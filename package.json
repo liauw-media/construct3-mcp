@@ -1,0 +1,35 @@
+{
+  "name": "construct3-mcp-server",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server for Construct 3 game engine projects",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "construct3-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "construct3",
+    "game-engine",
+    "model-context-protocol"
+  ],
+  "author": "MyStudio",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
