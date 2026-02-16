@@ -365,3 +365,27 @@ export interface AssetUsageInfo {
   };
   isGlobal: boolean;
 }
+
+// ─── Write Result Types ────────────────────────────────────
+
+/** Result of a write operation */
+export interface WriteResult {
+  success: boolean;
+  entity: string;
+  category: string;
+  action: string;
+  generatedSid?: number;
+  generatedUid?: number;
+  warnings?: string[];
+  backupFile?: string;
+}
+
+/** Result of checking references before deletion */
+export interface ReferenceCheckResult {
+  safe: boolean;
+  references: {
+    eventSheets: string[];
+    layouts: string[];
+    families: string[];
+  };
+}
