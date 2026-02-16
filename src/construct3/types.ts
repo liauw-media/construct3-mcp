@@ -2,6 +2,8 @@
  * TypeScript type definitions for Construct 3 project structures
  */
 
+// ─── Project Root ───────────────────────────────────────────
+
 export interface Construct3Project {
   projectFormatVersion: number;
   savedWithRelease: number;
@@ -33,6 +35,8 @@ export interface Addon {
   sdkVersion?: number;
 }
 
+// ─── Container Types ────────────────────────────────────────
+
 export interface ObjectTypesContainer {
   items: string[];
   subfolders: Subfolder[];
@@ -63,6 +67,8 @@ export interface Subfolder {
   subfolders: Subfolder[];
   name: string;
 }
+
+// ─── File Folders ───────────────────────────────────────────
 
 export interface RootFileFolders {
   script: FileFolder;
@@ -96,6 +102,8 @@ export interface FileItem {
     purpose: string;
   };
 }
+
+// ─── Project Properties ─────────────────────────────────────
 
 export interface ProjectProperties {
   description: string;
@@ -136,20 +144,149 @@ export interface ProjectProperties {
   uidAllocationMode: string;
 }
 
+// ─── Event Sheet Types (Discriminated Unions) ───────────────
+
 export interface EventSheet {
   name: string;
-  events: Event[];
+  events: C3Event[];
 }
 
-export interface Event {
+/** Condition within an event block */
+export interface Condition {
+  id: string;
+  objectClass: string;
+  sid: number;
+  'behavior-type'?: string;
+  parameters?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** Standard action referencing an object */
+export interface StandardAction {
+  id: string;
+  objectClass: string;
+  sid: number;
+  'behavior-type'?: string;
+  parameters?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** Function call action */
+export interface FunctionCallAction {
+  id: string;
+  objectClass: string;
+  sid: number;
+  callFunction?: string;
+  parameters?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** Script action */
+export interface ScriptAction {
+  type: 'script';
+  script: string;
+  [key: string]: unknown;
+}
+
+export type Action = StandardAction | FunctionCallAction | ScriptAction;
+
+/** Block event — the most common: has conditions, actions, optional children */
+export interface BlockEvent {
+  eventType: 'block';
+  conditions: Condition[];
+  actions: Action[];
+  children?: C3Event[];
+  sid?: number;
+  disabled?: boolean;
+  [key: string]: unknown;
+}
+
+/** Variable declaration event */
+export interface VariableEvent {
+  eventType: 'variable';
+  name: string;
+  type: string;
+  initialValue: string;
+  comment?: string;
+  sid?: number;
+  isStatic?: boolean;
+  isConstant?: boolean;
+  [key: string]: unknown;
+}
+
+/** Function block event — defines a function */
+export interface FunctionBlockEvent {
+  eventType: 'function-block';
+  functionName?: string;
+  conditions: Condition[];
+  actions: Action[];
+  children?: C3Event[];
+  parameters?: Array<{ name: string; type: string }>;
+  sid?: number;
+  [key: string]: unknown;
+}
+
+/** Group event — organizes events into named groups */
+export interface GroupEvent {
+  eventType: 'group';
+  title: string;
+  disabled?: boolean;
+  isActiveOnStart?: boolean;
+  children: C3Event[];
+  sid?: number;
+  [key: string]: unknown;
+}
+
+/** Include event — includes another event sheet */
+export interface IncludeEvent {
+  eventType: 'include';
+  includeSheet: string;
+  [key: string]: unknown;
+}
+
+/** Comment event */
+export interface CommentEvent {
+  eventType: 'comment';
+  text: string;
+  [key: string]: unknown;
+}
+
+/** Script block event — inline JavaScript */
+export interface ScriptEvent {
+  eventType: 'script';
+  script: string;
+  [key: string]: unknown;
+}
+
+/** Catch-all for unknown event types */
+export interface UnknownEvent {
   eventType: string;
   [key: string]: unknown;
 }
+
+export type C3Event =
+  | BlockEvent
+  | VariableEvent
+  | FunctionBlockEvent
+  | GroupEvent
+  | IncludeEvent
+  | CommentEvent
+  | ScriptEvent
+  | UnknownEvent;
+
+// ─── Object & Layout Types ─────────────────────────────────
 
 export interface ObjectType {
   name: string;
   'plugin-id': string;
   sid: number;
+  'is-global'?: boolean;
+  instanceVariables?: Record<string, unknown>;
+  behaviors?: Array<{ 'behavior-type': string; [key: string]: unknown }>;
+  animations?: Array<{
+    frames: Array<{ width: number; height: number; [key: string]: unknown }>;
+    [key: string]: unknown;
+  }>;
   [key: string]: unknown;
 }
 
@@ -157,6 +294,7 @@ export interface Layout {
   name: string;
   layers: Layer[];
   sid: number;
+  'event-sheet'?: string;
   [key: string]: unknown;
 }
 
@@ -173,4 +311,57 @@ export interface Instance {
   uid: number;
   sid: number;
   [key: string]: unknown;
+}
+
+// ─── Analysis Result Types ──────────────────────────────────
+
+/** A reference to an object found in an event sheet */
+export interface ObjectReference {
+  objectName: string;
+  eventSheet: string;
+  path: string; // e.g., "group:CheckBigWin > block:3 > action:2"
+  context: 'condition' | 'action';
+}
+
+/** Node in the event sheet flow graph */
+export interface EventSheetFlowNode {
+  name: string;
+  includes: string[];
+  includedBy: string[];
+  layout?: string;
+  eventCount: number;
+  functionCount: number;
+  groupCount: number;
+}
+
+/** Node in the object dependency graph */
+export interface ObjectDependencyNode {
+  objectName: string;
+  referencedIn: {
+    eventSheets: string[];
+    layouts: string[];
+  };
+  families: string[];
+  coOccursWith: string[];
+  referenceCount: number;
+}
+
+/** Performance issue found by heuristic analysis */
+export interface PerformanceIssue {
+  severity: 'info' | 'warning' | 'critical';
+  category: string;
+  location: string;
+  message: string;
+  suggestion: string;
+}
+
+/** Asset usage information */
+export interface AssetUsageInfo {
+  name: string;
+  type: 'sound' | 'music' | 'image' | 'font' | 'video' | 'icon' | 'general';
+  referencedIn: {
+    eventSheets: string[];
+    layouts: string[];
+  };
+  isGlobal: boolean;
 }
