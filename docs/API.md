@@ -208,7 +208,7 @@ Update an existing object's instance variables and behaviors.
 |-----------|------|----------|-------------|
 | `name` | string | Yes | Existing object name |
 | `isGlobal` | boolean | No | Change global status |
-| `addVariables` | array | No | `[{ name, type: "number"\|"string"\|"boolean", initialValue? }]` |
+| `addVariables` | array | No | `[{ name, type: "number"\|"string"\|"boolean" }]` |
 | `removeVariables` | string[] | No | Variable names to remove |
 | `addBehaviors` | array | No | `[{ behaviorId: "Tween"\|"Sin"\|etc., name }]` |
 | `removeBehaviors` | string[] | No | Behavior names to remove |

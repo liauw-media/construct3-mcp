@@ -146,7 +146,7 @@ Real-world examples of using the Construct3 MCP Server with Claude.
 ```json
 {
   "name": "Enemy",
-  "addVariables": [{ "name": "health", "type": "number", "initialValue": "100" }],
+  "addVariables": [{ "name": "health", "type": "number" }],
   "addBehaviors": [{ "behaviorId": "Tween", "name": "Tween" }]
 }
 ```
@@ -316,7 +316,7 @@ Returns success with a warning that references were NOT cleaned up.
 1. `create_event_sheet({ name: "Inventory" })`
 2. `create_object({ name: "InventoryItem", pluginId: "Sprite", subfolder: "Inventory" })`
 3. `create_object({ name: "ItemLabel", pluginId: "Text", subfolder: "Inventory" })`
-4. `update_object_properties({ name: "InventoryItem", addVariables: [{ name: "itemId", type: "number", initialValue: "0" }] })`
+4. `update_object_properties({ name: "InventoryItem", addVariables: [{ name: "itemId", type: "number" }] })`
 5. `add_event_to_sheet({ sheetName: "Inventory", eventType: "function", functionName: "AddItem", functionParams: [{ name: "id", type: "number" }] })`
 
 ### Refactoring Analysis + Cleanup

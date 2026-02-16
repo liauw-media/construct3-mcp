@@ -116,7 +116,7 @@ export function registerMutationTools(
         let data: Record<string, unknown>;
         let uid: number | undefined;
 
-        if (isSingleglobal || args.isGlobal) {
+        if (isSingleglobal || (args.isGlobal && !isNonworldGlobal)) {
           uid = await idGen.generateUid(reader);
           const sgiSid = await idGen.generateSid(reader);
           data = createGlobalObject(args.name, args.pluginId, sid, uid, sgiSid);
@@ -168,7 +168,6 @@ export function registerMutationTools(
       addVariables: z.array(z.object({
         name: z.string().describe('Variable name'),
         type: z.enum(['number', 'string', 'boolean']).describe('Variable type'),
-        initialValue: z.string().optional().default('').describe('Initial value'),
       })).optional().describe('Instance variables to add'),
       removeVariables: z.array(z.string()).optional().describe('Instance variable names to remove'),
       addBehaviors: z.array(z.object({
@@ -603,12 +602,17 @@ export function registerMutationTools(
       try {
         // Validate object type exists and read its plugin ID
         let pluginId: string | undefined;
+        let isNonworld = false;
         try {
           const objData = await reader.readObjectType(args.objectType);
           pluginId = objData['plugin-id'];
           // Block global-only objects from being placed on layouts
           if ((objData as Record<string, unknown>)['singleglobal-inst']) {
             return toolError(`Object "${args.objectType}" is a global plugin (${pluginId}) and cannot be placed on layouts.`);
+          }
+          // Nonworld-global objects (Arr, Json, Dictionary) go in nonworld-instances, not on layers
+          if ((objData as Record<string, unknown>).isGlobal === true) {
+            isNonworld = true;
           }
         } catch {
           return toolError(`Object type "${args.objectType}" does not exist. Use list_objects to see available objects.`);
@@ -625,31 +629,46 @@ export function registerMutationTools(
           return toolError(`Layout "${args.layoutName}" not found.${hint}`);
         }
 
-        // Find target layer
-        const layers = layout.layers as Array<Record<string, unknown>>;
-        const targetLayer = layers.find(l => l.name === args.layerName);
-        if (!targetLayer) {
-          const layerNames = layers.map(l => l.name).join(', ');
-          return toolError(`Layer "${args.layerName}" not found in layout "${args.layoutName}". Available layers: ${layerNames}`);
-        }
-
         const uid = await idGen.generateUid(reader);
         const sid = await idGen.generateSid(reader);
-
-        // Use provided properties, or auto-fill from plugin defaults
-        const pluginProps = args.properties
-          ?? (pluginId ? DEFAULT_INSTANCE_PROPERTIES[pluginId] : undefined)
-          ?? {};
-
         const warnings: string[] = [];
-        if (!args.properties && pluginId && !DEFAULT_INSTANCE_PROPERTIES[pluginId]) {
-          warnings.push(`No default instance properties known for plugin "${pluginId}". Instance created with empty properties — you may need to configure them in the C3 editor.`);
+
+        if (isNonworld) {
+          // Nonworld-global objects (Array, JSON, Dictionary) are placed in layout's nonworld-instances array
+          const nonworldInstances = layout['nonworld-instances'] as Array<Record<string, unknown>>;
+          nonworldInstances.push({
+            type: args.objectType,
+            properties: args.properties ?? {},
+            uid,
+            sid,
+            tags: '',
+            instanceVariables: {},
+            behaviors: {},
+          });
+          warnings.push(`"${args.objectType}" is a global (nonworld) object — placed in nonworld-instances instead of on a layer. Layer and position parameters were ignored.`);
+        } else {
+          // Normal world objects go on a layer
+          const layers = layout.layers as Array<Record<string, unknown>>;
+          const targetLayer = layers.find(l => l.name === args.layerName);
+          if (!targetLayer) {
+            const layerNames = layers.map(l => l.name).join(', ');
+            return toolError(`Layer "${args.layerName}" not found in layout "${args.layoutName}". Available layers: ${layerNames}`);
+          }
+
+          // Use provided properties, or auto-fill from plugin defaults
+          const pluginProps = args.properties
+            ?? (pluginId ? DEFAULT_INSTANCE_PROPERTIES[pluginId] : undefined)
+            ?? {};
+
+          if (!args.properties && pluginId && !DEFAULT_INSTANCE_PROPERTIES[pluginId]) {
+            warnings.push(`No default instance properties known for plugin "${pluginId}". Instance created with empty properties — you may need to configure them in the C3 editor.`);
+          }
+
+          const instance = createInstance(args.objectType, uid, sid, args.x, args.y, args.width, args.height, pluginProps);
+
+          const instances = targetLayer.instances as Array<Record<string, unknown>>;
+          instances.push(instance);
         }
-
-        const instance = createInstance(args.objectType, uid, sid, args.x, args.y, args.width, args.height, pluginProps);
-
-        const instances = targetLayer.instances as Array<Record<string, unknown>>;
-        instances.push(instance);
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
