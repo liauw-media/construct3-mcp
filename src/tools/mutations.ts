@@ -12,6 +12,7 @@ import type { WriteResult } from '../construct3/types.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   GLOBAL_PLUGINS,
+  NONWORLD_GLOBAL_PLUGINS,
   RESERVED_NAMES,
   DEFAULT_INSTANCE_PROPERTIES,
   createSpriteObject,
@@ -54,8 +55,8 @@ function validateName(name: string): void {
 
 /** Validate a subfolder path is safe. */
 function validateSubfolder(subfolder: string): void {
-  if (subfolder.includes('..') || subfolder.startsWith('/') || subfolder.startsWith('\\')) {
-    throw new Error('Subfolder path contains invalid characters');
+  if (subfolder.includes('..') || subfolder.includes('\\') || subfolder.startsWith('/')) {
+    throw new Error('Subfolder path contains invalid characters (use forward slashes only, no "..")');
   }
   const parts = subfolder.split('/');
   for (const part of parts) {
@@ -110,11 +111,12 @@ export function registerMutationTools(
         const addonWarning = await writer.ensureAddonRegistered('plugin', args.pluginId);
 
         const sid = await idGen.generateSid(reader);
-        const isGlobalPlugin = GLOBAL_PLUGINS.has(args.pluginId) || args.isGlobal;
+        const isSingleglobal = GLOBAL_PLUGINS.has(args.pluginId);
+        const isNonworldGlobal = NONWORLD_GLOBAL_PLUGINS.has(args.pluginId);
         let data: Record<string, unknown>;
         let uid: number | undefined;
 
-        if (isGlobalPlugin) {
+        if (isSingleglobal || args.isGlobal) {
           uid = await idGen.generateUid(reader);
           const sgiSid = await idGen.generateSid(reader);
           data = createGlobalObject(args.name, args.pluginId, sid, uid, sgiSid);
@@ -127,6 +129,10 @@ export function registerMutationTools(
           data = createTiledBgObject(args.name, sid);
         } else {
           data = createGenericObject(args.name, args.pluginId, sid);
+          // Nonworld-global plugins (Arr, Json, Dictionary) are isGlobal but not singleglobal-inst
+          if (isNonworldGlobal) {
+            data.isGlobal = true;
+          }
         }
 
         await writer.writeEntityFile('objectTypes', args.name, data, args.subfolder);
@@ -209,8 +215,7 @@ export function registerMutationTools(
               continue;
             }
             const sid = await idGen.generateSid(reader);
-            const defaultValue = v.initialValue || (v.type === 'number' ? '0' : v.type === 'boolean' ? 'false' : '');
-            vars.push(createInstanceVariable(v.name, v.type, defaultValue, sid));
+            vars.push(createInstanceVariable(v.name, v.type, sid));
           }
         }
 

@@ -41,11 +41,14 @@ export class Construct3ProjectWriter {
   private async createBackup(filePath: string): Promise<string> {
     const backupPath = filePath + '.bak';
     try {
-      await stat(filePath); // Verify file exists before copying
-      await copyFile(filePath, backupPath);
-    } catch {
-      // File may not exist yet (new entity) — no backup needed
+      await stat(filePath);
+    } catch (e: unknown) {
+      // File doesn't exist yet (new entity) — no backup needed
+      if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return backupPath;
+      throw new Error(`Cannot access file for backup: ${e instanceof Error ? e.message : String(e)}`);
     }
+    // File exists — backup must succeed or we abort
+    await copyFile(filePath, backupPath);
     return backupPath;
   }
 
@@ -132,7 +135,14 @@ export class Construct3ProjectWriter {
     const filePath = this.resolveProjectPath(...segments);
 
     const backupPath = await this.createBackup(filePath);
-    await unlink(filePath);
+    try {
+      await unlink(filePath);
+    } catch (e: unknown) {
+      // File already gone — that's the desired end state
+      if (!(e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT')) {
+        throw e;
+      }
+    }
 
     this.invalidateAll();
     return backupPath;

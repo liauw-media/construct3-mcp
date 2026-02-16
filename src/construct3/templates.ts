@@ -11,9 +11,14 @@
 /** Plugins that use singleglobal-inst (no layout placement) */
 export const GLOBAL_PLUGINS = new Set([
   'Audio', 'AJAX', 'Mouse', 'Touch', 'Keyboard', 'Browser',
-  'Geolocation', 'NWjs', 'Clipboard', 'Platform Info', 'Arr',
-  'Json', 'Dictionary', 'LocalStorage', 'XMLParser', 'Multiplayer',
+  'Geolocation', 'NWjs', 'Clipboard', 'PlatformInfo',
+  'LocalStorage', 'XMLParser', 'Multiplayer',
   'Facebook', 'IAP', 'Greenworks', 'Cryptography', 'Timeline',
+]);
+
+/** Plugins that are isGlobal but NOT singleglobal-inst (placed as nonworld instances) */
+export const NONWORLD_GLOBAL_PLUGINS = new Set([
+  'Arr', 'Json', 'Dictionary',
 ]);
 
 /** Names reserved by C3 engine — cannot be used for object types */
@@ -118,11 +123,12 @@ export function createSpriteObject(name: string, sid: number, animSid: number): 
               originX: 0.5,
               originY: 0.5,
               originalSource: '',
-              exportFormat: 'png',
-              exportQuality: 1,
+              exportFormat: 'lossless',
+              exportQuality: 0.8,
               fileType: 'image/png',
               duration: 1,
               tag: '',
+              useCollisionPoly: true,
             },
           ],
           sid: animSid,
@@ -165,13 +171,14 @@ export function createTiledBgObject(name: string, sid: number): Record<string, u
     image: {
       width: 100,
       height: 100,
-      originX: 0,
-      originY: 0,
+      originX: 0.5,
+      originY: 0.5,
       originalSource: '',
-      exportFormat: 'png',
-      exportQuality: 1,
+      exportFormat: 'lossless',
+      exportQuality: 0.8,
       fileType: 'image/png',
       tag: '',
+      useCollisionPoly: true,
     },
   };
 }
@@ -262,8 +269,10 @@ export const DEFAULT_INSTANCE_PROPERTIES: Record<string, Record<string, unknown>
     'right-margin': 10,
     'top-margin': 10,
     'bottom-margin': 10,
-    'fill': 'stretch',
-    'enable-collisions': true,
+    edges: 'stretch',
+    fill: 'stretch',
+    origin: 'top-left',
+    seams: 'overlap',
   },
 };
 
@@ -272,14 +281,13 @@ export const DEFAULT_INSTANCE_PROPERTIES: Record<string, Record<string, unknown>
 export function createInstanceVariable(
   name: string,
   type: 'number' | 'string' | 'boolean',
-  initialValue: string | number,
   sid: number,
 ): Record<string, unknown> {
   return {
     name,
     type,
-    initialValue: String(initialValue),
-    comment: '',
+    desc: '',
+    show: true,
     sid,
   };
 }
@@ -465,10 +473,6 @@ export function createInstance(
     tags: '',
     instanceVariables: {},
     behaviors: {},
-    instanceFolderItem: {
-      sid,
-      expanded: true,
-    },
     showing: true,
     locked: false,
     world: {
