@@ -332,3 +332,8 @@ export async function getProjectIndex(reader: Construct3ProjectReader): Promise<
   await cachedIndex.build(reader);
   return cachedIndex;
 }
+
+/** Reset the cached project index so it rebuilds on next use. */
+export function resetProjectIndex(): void {
+  cachedIndex = null;
+}

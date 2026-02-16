@@ -1,6 +1,6 @@
 {
   "name": "construct3-mcp-server",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Model Context Protocol server for Construct 3 game engine projects",
   "type": "module",
   "main": "dist/index.js",

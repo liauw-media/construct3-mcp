@@ -2,434 +2,269 @@
 
 ## System Overview
 
-The Construct3 MCP Server is a TypeScript-based application that implements the Model Context Protocol (MCP) to provide safe, structured access to Construct 3 game engine projects.
+The Construct3 MCP Server is a TypeScript application implementing the Model Context Protocol (MCP) to provide safe, structured access to Construct 3 game engine projects — including reading, analysis, and validated modifications.
 
 ```
-┌─────────────────┐
-│  Claude AI      │
-│  (MCP Client)   │
-└────────┬────────┘
-         │
-         │ MCP Protocol (stdio)
-         │
-┌────────▼────────────────────────────────────┐
-│  Construct3 MCP Server                      │
-│  ┌────────────────────────────────────────┐ │
-│  │  MCP Protocol Layer                    │ │
-│  │  • Resources • Tools • Prompts         │ │
-│  └──────────┬──────────────────────────────┘ │
-│             │                                │
-│  ┌──────────▼──────────────────────────────┐ │
-│  │  Business Logic Layer                   │ │
-│  │  • Project Reader  • Validators         │ │
-│  │  • Documentation Access                 │ │
-│  └──────────┬──────────────────────────────┘ │
-│             │                                │
-│  ┌──────────▼──────────────────────────────┐ │
-│  │  File System Layer                      │ │
-│  │  • JSON Parsing  • File I/O             │ │
-│  └──────────┬──────────────────────────────┘ │
-└─────────────┼─────────────────────────────────┘
+                        MCP Protocol (stdio)
+                              │
+┌─────────────────────────────▼──────────────────────────────────┐
+│  Construct3 MCP Server (v1.3.0)                                │
+│                                                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  MCP Protocol Layer                                      │  │
+│  │  Resources (7) · Query Tools (9) · Analysis (6)          │  │
+│  │  Mutations (8) · Prompts (6)                             │  │
+│  └──────────┬───────────────────────────────────────────────┘  │
+│             │                                                  │
+│  ┌──────────▼──────────────────────────────────────────────┐   │
+│  │  Business Logic Layer                                    │  │
+│  │  ProjectReader · ProjectWriter · IdGenerator             │  │
+│  │  Templates · Analyzers (6) · Cross-Reference Index       │  │
+│  └──────────┬───────────────────────────────────────────────┘  │
+│             │                                                  │
+│  ┌──────────▼──────────────────────────────────────────────┐   │
+│  │  File System Layer                                       │  │
+│  │  JSON parsing · Backup · Validate · Write · Verify       │  │
+│  └──────────┬───────────────────────────────────────────────┘  │
+└─────────────┼──────────────────────────────────────────────────┘
               │
 ┌─────────────▼─────────────────┐
-│  Construct3 Project Files      │
-│  • project.c3proj              │
-│  • eventSheets/*.json          │
-│  • objectTypes/*.json          │
-│  • layouts/*.json              │
+│  Construct 3 Project Files     │
+│  project.c3proj                │
+│  objectTypes/*.json            │
+│  eventSheets/*.json            │
+│  layouts/*.json                │
+│  families/*.json               │
 └────────────────────────────────┘
 ```
 
 ## Core Components
 
-### 1. MCP Server (`src/index.ts`)
+### 1. Entry Point (`src/index.ts`)
 
-The main entry point that:
-- Initializes the MCP server
-- Registers handlers for resources, tools, and prompts
-- Manages the stdio transport layer
-- Handles project initialization and lifecycle
+Initializes the MCP server, creates all core instances, and registers handlers:
 
-**Key Responsibilities:**
-- Protocol compliance
-- Request routing
-- Error handling
-- Project lifecycle management
+```
+reader  → registerProjectResources, registerDocsResources, registerQueryTools
+          registerWorkflowPrompts, registerAnalysisTools
+writer  → registerMutationTools (also needs reader + idGen)
+idGen   → shared between writer and mutations
+```
 
 ### 2. Project Reader (`src/construct3/project-reader.ts`)
 
-Handles all file I/O and parsing for Construct3 projects:
+Read-only access to all project data with lazy-loading and caching.
 
 ```typescript
 class Construct3ProjectReader {
-  // Core methods
-  loadProject(): Promise<Construct3Project>
-  readEventSheet(name: string): Promise<EventSheet>
-  readObjectType(name: string): Promise<ObjectType>
-  readLayout(name: string): Promise<Layout>
+  // Core loading
+  loadProject(): Promise<void>
+  reloadProject(): Promise<void>
 
-  // Query methods
-  listEventSheets(): Promise<string[]>
+  // Read entities
+  readObjectType(name: string): Promise<ObjectType>
+  readEventSheet(name: string): Promise<EventSheet>
+  readLayout(name: string): Promise<Layout>
+  readAllObjectTypes(): Promise<Map<string, ObjectType>>
+  readAllEventSheets(): Promise<Map<string, EventSheet>>
+  readAllLayouts(): Promise<Map<string, Layout>>
+  readAllFamilies(): Promise<Map<string, Family>>
+
+  // Query
   listObjectTypes(): Promise<string[]>
+  listEventSheets(): Promise<string[]>
+  listLayouts(): Promise<string[]>
+  listFamilies(): Promise<string[]>
   searchObjects(pattern: string): string[]
+  findNearestName(name: string, category: string): string[]
+
+  // Metadata
+  getProject(): Construct3Project
   getMetadata(): ProjectMetadata
+  getUsedAddons(): Addon[]
+  getProjectDir(): string
+  getProjectPath(): string
+
+  // Cache management (called by writer after modifications)
+  invalidateCaches(): void
 }
 ```
 
-**Design Patterns:**
-- **Singleton-like**: One reader instance per server
-- **Lazy Loading**: Project files loaded on-demand
-- **Caching**: Main project data cached after initial load
+**Design patterns:**
+- **Lazy loading**: Entity files read on-demand and cached
+- **Path mapping**: Built at load time from c3proj container structures (handles subfolders)
+- **Fuzzy matching**: `findNearestName()` provides "Did you mean?" suggestions
 
-### 3. Type System (`src/construct3/types.ts`)
+### 3. Project Writer (`src/construct3/project-writer.ts`)
 
-Complete TypeScript type definitions for Construct3 structures:
-
-```typescript
-// Main types
-Construct3Project
-EventSheet
-ObjectType
-Layout
-Addon
-ProjectProperties
-
-// Container types
-ObjectTypesContainer
-EventSheetsContainer
-LayoutsContainer
-```
-
-**Benefits:**
-- Type safety throughout codebase
-- IntelliSense support
-- Compile-time error detection
-- Self-documenting code
-
-### 4. Resources Layer (`src/resources/`)
-
-Implements MCP resources (read-only data access):
-
-**Project Resources** (`project.ts`):
-- `construct3://project/info` - Project metadata
-- `construct3://project/structure` - Full structure
-- `construct3://project/addons` - Plugin list
-- `construct3://objects/{name}` - Object details
-- `construct3://eventsheets/{name}` - Event sheet details
-- `construct3://layouts/{name}` - Layout details
-
-**Documentation Resources** (`docs.ts`):
-- `construct3://docs/manual/{topic}` - Official C3 docs
-- Fetches and caches documentation from Scirra
-
-### 5. Tools Layer (`src/tools/`)
-
-Implements MCP tools (executable functions):
+Safe write operations with the safety pipeline: **backup → validate → write → verify → invalidate**.
 
 ```typescript
-// Query tools (query.ts)
-list_objects(filter?: string)
-list_eventsheets()
-list_layouts()
-list_families()
-get_object_details(name: string)
-get_eventsheet_details(name: string)
-get_layout_details(name: string)
-search_objects(pattern: string)
-get_project_summary()
+class Construct3ProjectWriter {
+  // Entity files
+  writeEntityFile(category, name, data, subfolder?): Promise<string>
+  deleteEntityFile(category, name, subfolder?): Promise<string>
+
+  // c3proj container updates
+  addToProject(category, name, subfolder?): Promise<void>
+  removeFromProject(category, name): Promise<void>
+
+  // Metadata
+  updateProjectProperties(updates): Promise<string>
+
+  // Addon management
+  ensureAddonRegistered(type, id): Promise<string | undefined>
+
+  // Helpers
+  getSubfolderForEntity(category, name): string | undefined
+}
 ```
 
-**Tool Design:**
-- Input validation using Zod schemas
-- Structured error responses
-- JSON-formatted outputs
-- Idempotent operations
+**Safety guarantees:**
+- **Path traversal protection**: All paths resolved and checked against project directory
+- **Pre-write validation**: JSON round-trip test, null/type checks, 5MB size limit
+- **Backup**: `.bak` file created before every overwrite
+- **Post-write verification**: File read back and re-parsed after writing
+- **Cache invalidation**: Reader caches, project index, and ID generator all reset
 
-### 6. Prompts Layer (`src/prompts/`)
+### 4. ID Generator (`src/construct3/id-generator.ts`)
 
-Implements MCP prompts (workflow templates):
+Collision-free SID and UID generation.
 
 ```typescript
-// Workflow prompts (workflows.ts)
-analyze_project()
-find_object_usage(objectName: string)
-explain_eventsheet(eventSheetName: string)
-review_game_logic()
-document_object(objectName: string)
-optimize_project()
+class IdGenerator {
+  initialize(reader): Promise<void>   // Scan all existing IDs (lazy, once)
+  generateSid(reader): Promise<number> // 15-digit random, collision-checked
+  generateUid(reader): Promise<number> // Sequential (highest + 1)
+  addSid(sid): void                    // Register newly created SID
+  addUid(uid): void                    // Register newly created UID
+  reset(): void                        // Force re-scan on next use
+}
 ```
 
-**Prompt Architecture:**
-- Contextual information gathering
-- Structured prompt generation
-- Integration with project data
-- Parameterized templates
+**SID strategy**: Random 15-digit integer (100,000,000,000,000 – 999,999,999,999,999), checked against a set of all existing SIDs scanned from the entire project. Retry up to 100 times on collision.
+
+**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment.
+
+**Scan sources**: c3proj file items, all object/eventsheet/layout/family JSON files — including SIDs on objects, events, actions, conditions, layers, instances, behaviors, variables, animations, frames, and function parameters.
+
+### 5. Templates (`src/construct3/templates.ts`)
+
+Builders for valid C3 JSON structures. All field names and defaults validated against real C3 project files.
+
+- **Object templates**: Sprite (with animations), Text, TiledBg, NinePatch, global plugins, generic
+- **Event templates**: empty sheet, variable, group, function (with params), include, comment
+- **Layout templates**: layout (with layers), layer, instance
+- **Instance variable & behavior templates**
+- **Lookup tables**: `GLOBAL_PLUGINS`, `RESERVED_NAMES`, `DEFAULT_INSTANCE_PROPERTIES`, `KNOWN_SCIRRA_PLUGINS`, `KNOWN_SCIRRA_BEHAVIORS`
+
+### 6. Analyzers (`src/construct3/analyzers/`)
+
+Six analysis modules powered by a shared cross-reference index:
+
+| Module | Purpose |
+|--------|---------|
+| `index-builder.ts` | Builds and caches project-wide cross-reference index |
+| `eventsheet-flow.ts` | Include hierarchy and layout bindings (Mermaid output) |
+| `function-map.ts` | Function definitions and call sites |
+| `object-deps.ts` | Object usage across event sheets, layouts, families |
+| `orphan-finder.ts` | Objects not referenced anywhere |
+| `asset-usage.ts` | Sound, image, font, video asset tracking |
+| `performance.ts` | Heuristic performance audit (info/warning/critical) |
+
+The cross-reference index (`ProjectIndex`) is cached and reset when writes occur via `resetProjectIndex()`.
+
+### 7. MCP Layers
+
+| Layer | File(s) | Count | Purpose |
+|-------|---------|-------|---------|
+| Resources | `resources/project.ts`, `resources/docs.ts` | 7 | Read-only data access |
+| Query Tools | `tools/query.ts` | 9 | List, search, get details |
+| Analysis Tools | `tools/analysis.ts` | 6 | Deep analysis and visualization |
+| Mutation Tools | `tools/mutations.ts` | 8 | Safe create, update, delete |
+| Prompts | `prompts/workflows.ts` | 6 | Workflow templates |
 
 ## Data Flow
 
-### Resource Request Flow
+### Read Flow
 
 ```
-1. Claude requests resource: construct3://objects/Player
-                             ↓
-2. Server parses URI and routes to resource handler
-                             ↓
-3. Resource handler calls ProjectReader.readObjectType('Player')
-                             ↓
-4. ProjectReader reads and parses: objectTypes/Player.json
-                             ↓
-5. Data returned as JSON string in MCP response
-                             ↓
-6. Claude receives and processes the object data
+Claude → list_objects({ filter: "btn" })
+  → Zod schema validation
+  → reader.searchObjects("btn")
+  → in-memory filter on cached object list
+  → JSON response to Claude
 ```
 
-### Tool Execution Flow
+### Write Flow
 
 ```
-1. Claude calls tool: list_objects({ filter: "btn" })
-                      ↓
-2. Server validates parameters with Zod schema
-                      ↓
-3. Tool handler calls ProjectReader.searchObjects("btn")
-                      ↓
-4. ProjectReader filters object list
-                      ↓
-5. Results formatted as JSON
-                      ↓
-6. Response returned to Claude with success/error status
+Claude → create_object({ name: "Enemy", pluginId: "Sprite" })
+  → validateName("Enemy")
+  → writer.ensureAddonRegistered("plugin", "Sprite")
+  → check uniqueness against reader.listObjectTypes()
+  → idGen.generateSid() (scan all IDs if first use)
+  → build template: createSpriteObject("Enemy", sid, animSid)
+  → writer.writeEntityFile("objectTypes", "Enemy", data)
+      → validateJsonData(data)     ← pre-write check
+      → createBackup(filePath)      ← .bak copy
+      → writeFile(filePath, json)   ← actual write
+      → verifyWrittenFile(filePath) ← post-write read-back
+      → invalidateAll()             ← clear all caches
+  → writer.addToProject("objectTypes", "Enemy")
+      → createBackup(c3proj)
+      → add "Enemy" to objectTypes.items
+      → writeFile + verify + reader.reloadProject()
+  → return WriteResult to Claude
 ```
 
-### Prompt Generation Flow
+### Analysis Flow
 
 ```
-1. Claude requests prompt: analyze_project()
-                          ↓
-2. Prompt handler gathers project data
-                          ↓
-3. Multiple ProjectReader calls to collect information
-                          ↓
-4. Data assembled into prompt template
-                          ↓
-5. Structured prompt messages returned to Claude
+Claude → get_object_dependencies({ object: "Player" })
+  → getProjectIndex(reader) (builds or returns cached index)
+      → reader.readAllEventSheets()
+      → reader.readAllLayouts()
+      → reader.readAllFamilies()
+      → scan all events for objectClass references
+      → scan all instances for type references
+      → build maps: objectToEventSheets, objectToLayouts, objectToFamilies
+  → look up "Player" in index
+  → return dependency report
 ```
 
 ## Communication Protocol
-
-### Transport Layer
 
 Uses `StdioServerTransport` from MCP SDK:
 - **Input**: JSON-RPC 2.0 messages on stdin
 - **Output**: JSON-RPC 2.0 responses on stdout
 - **Logging**: stderr for debug/error messages
 
-### Message Types
-
-**Capabilities Negotiation:**
-```json
-{
-  "capabilities": {
-    "resources": {},
-    "tools": {},
-    "prompts": {}
-  }
-}
-```
-
-**Resource Request:**
-```json
-{
-  "method": "resources/read",
-  "params": {
-    "uri": "construct3://objects/Player"
-  }
-}
-```
-
-**Tool Call:**
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "list_objects",
-    "arguments": {
-      "filter": "btn"
-    }
-  }
-}
-```
-
 ## Error Handling
 
-### Error Hierarchy
-
-```
-Error Types:
-├── ProjectInitializationError - Failed to load project
-├── FileNotFoundError - Missing .c3proj or related files
-├── ParseError - Invalid JSON in project files
-├── ValidationError - Invalid parameters or data
-└── ResourceNotFoundError - Requested resource doesn't exist
-```
-
-### Error Response Format
+All tool handlers catch errors and return structured responses:
 
 ```typescript
-{
-  content: [{
-    type: 'text',
-    text: 'Error message with context'
-  }],
-  isError: true
-}
+// Success
+{ content: [{ type: 'text', text: JSON.stringify(result) }] }
+
+// Error
+{ content: [{ type: 'text', text: 'Error message' }], isError: true }
 ```
 
-### Recovery Strategies
+The mutation tools provide extra context on errors:
+- Fuzzy name suggestions ("Did you mean: Player?")
+- Reference lists when deletion is blocked
+- Warnings for auto-registered addons or unknown plugin properties
 
-1. **Graceful Degradation**: Return partial data when possible
-2. **Clear Error Messages**: Include file paths and expected format
-3. **Validation**: Check parameters before file operations
-4. **Safe Defaults**: Provide empty arrays/objects rather than errors
+## Security
 
-## Performance Considerations
-
-### Optimization Strategies
-
-1. **Project Caching**: Main project file loaded once
-2. **Lazy Loading**: Event sheets/objects loaded on-demand
-3. **Selective Reading**: Only requested files are read
-4. **Efficient Searching**: In-memory filtering vs. repeated I/O
-
-### Resource Usage
-
-**Memory:**
-- Main project: ~500KB - 2MB (typical)
-- Each event sheet: ~10KB - 500KB
-- Cache size: Unbounded (consider LRU cache in future)
-
-**I/O:**
-- Initial load: 1 file read
-- Per query: 0-10 file reads (typical)
-- No file writes (read-only)
-
-## Security Considerations
-
-### Access Control
-
-- **Read-Only**: No write operations supported
-- **Path Traversal**: No prevention (runs with user permissions)
-- **Validation**: Input validation on all tool parameters
-
-### Future Security Enhancements
-
-- [ ] Sandboxed file access
-- [ ] Path traversal prevention
-- [ ] Resource usage limits
-- [ ] Rate limiting on requests
-
-## Extension Points
-
-### Adding New Resources
-
-```typescript
-// In src/resources/custom.ts
-server.resource({
-  uri: 'construct3://custom/mydata',
-  name: 'My Custom Data',
-  description: 'Custom resource description',
-  mimeType: 'application/json',
-}, async () => {
-  const data = await reader.getCustomData();
-  return {
-    contents: [{
-      uri: 'construct3://custom/mydata',
-      mimeType: 'application/json',
-      text: JSON.stringify(data, null, 2),
-    }],
-  };
-});
-```
-
-### Adding New Tools
-
-```typescript
-// In src/tools/custom.ts
-server.tool({
-  name: 'custom_tool',
-  description: 'My custom tool',
-  parameters: z.object({
-    param: z.string(),
-  }),
-}, async (args: { param: string }) => {
-  const result = processCustomLogic(args.param);
-  return {
-    content: [{
-      type: 'text',
-      text: JSON.stringify(result),
-    }],
-  };
-});
-```
-
-### Adding New Prompts
-
-```typescript
-// In src/prompts/custom.ts
-server.prompt({
-  name: 'custom_prompt',
-  description: 'My custom prompt',
-  parameters: z.object({
-    param: z.string(),
-  }),
-}, async (args: { param: string }) => {
-  return {
-    messages: [{
-      role: 'user',
-      content: {
-        type: 'text',
-        text: `Custom prompt with ${args.param}`,
-      },
-    }],
-  };
-});
-```
-
-## Testing Strategy
-
-### Unit Tests
-- Project reader methods
-- Type validation
-- URI parsing
-- Error handling
-
-### Integration Tests
-- Full MCP protocol flow
-- Resource/tool/prompt handlers
-- File system interactions
-
-### E2E Tests
-- Complete client-server communication
-- Real Construct3 projects
-- Error scenarios
-
-## Future Architecture Changes
-
-### Planned Improvements
-
-1. **Plugin System**: Support for custom extensions
-2. **Caching Layer**: LRU cache for frequently accessed data
-3. **Validation Layer**: JSON schema validation for project files
-4. **Write Support**: Safe modification with rollback
-5. **WebSocket Transport**: Alternative to stdio for web clients
-
-### Scalability Considerations
-
-- **Multiple Projects**: Support concurrent project access
-- **Large Projects**: Stream large files instead of loading entirely
-- **Performance Monitoring**: Add metrics and telemetry
-- **Resource Limits**: Implement quotas and rate limiting
+- **Path traversal protection**: `resolveProjectPath()` rejects any path escaping the project directory
+- **Reserved name blocking**: "System" and other C3 reserved names cannot be used
+- **Input validation**: Zod schemas on all tool parameters with length limits
+- **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
+- **Size limits**: 5MB maximum for any generated JSON file
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-10-12
-**Authors**: MyStudio Team
+**Last Updated**: 2026-02-16

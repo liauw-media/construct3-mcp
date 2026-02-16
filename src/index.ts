@@ -13,6 +13,9 @@ import { registerDocsResources } from './resources/docs.js';
 import { registerQueryTools } from './tools/query.js';
 import { registerWorkflowPrompts } from './prompts/workflows.js';
 import { registerAnalysisTools } from './tools/analysis.js';
+import { registerMutationTools } from './tools/mutations.js';
+import { Construct3ProjectWriter } from './construct3/project-writer.js';
+import { IdGenerator } from './construct3/id-generator.js';
 
 // Require explicit project path — no process.cwd() fallback
 const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || (() => {
@@ -23,7 +26,7 @@ const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || ((
 })();
 
 const server = new McpServer(
-  { name: 'construct3-mcp-server', version: '2.0.0' },
+  { name: 'construct3-mcp-server', version: '1.3.0' },
   { capabilities: { resources: {}, tools: {}, prompts: {} } }
 );
 
@@ -61,6 +64,11 @@ async function main() {
     registerQueryTools(server, reader);
     registerWorkflowPrompts(server, reader);
     registerAnalysisTools(server, reader);
+
+    // Phase 3: Safe Modifications
+    const idGen = new IdGenerator();
+    const writer = new Construct3ProjectWriter(reader, idGen);
+    registerMutationTools(server, reader, writer, idGen);
 
     // Start transport
     const transport = new StdioServerTransport();

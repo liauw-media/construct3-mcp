@@ -1,12 +1,12 @@
 # Construct3 MCP Server
 
-> 🎮 A Model Context Protocol (MCP) server that enables AI assistants like Claude to safely read, analyze, and understand Construct 3 game engine projects.
+> A Model Context Protocol (MCP) server that enables AI assistants like Claude to safely read, analyze, and modify Construct 3 game engine projects.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # Install dependencies
@@ -34,35 +34,36 @@ node dist/index.js /path/to/your/project.c3proj
 }
 ```
 
-## 📖 Table of Contents
+## Table of Contents
 
 - [Why This Exists](#why-this-exists)
 - [Features](#features)
 - [Installation](#installation)
 - [Usage](#usage)
-- [Documentation](#documentation)
+- [Safety Model](#safety-model)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
 
-## 🤔 Why This Exists
+## Why This Exists
 
-**The Problem**: When you ask Claude Code to work on Construct3 projects, it directly edits JSON files and often breaks:
-- Object references and unique IDs
-- Event sheet dependencies
+**The Problem**: When you ask Claude Code to work on Construct 3 projects, it directly edits JSON files and often breaks:
+- Object references and unique IDs (SIDs/UIDs)
+- Event sheet dependencies and includes
 - Layout and instance relationships
 - Plugin and behavior configurations
+- The `usedAddons` registry
 
-**The Solution**: This MCP server provides a **safe, read-only interface** that:
-- ✅ Understands Construct3's internal structure
-- ✅ Provides structured access to project data
-- ✅ Prevents accidental file corruption
-- ✅ Enables intelligent analysis and documentation
-- ✅ Includes access to official Construct3 documentation
+**The Solution**: This MCP server provides a **structured, validated interface** that:
+- Understands Construct 3's internal file format and ID system
+- Provides structured access to project data via resources and query tools
+- Enables deep analysis (dependency graphs, orphan detection, performance audits)
+- Safely creates, updates, and deletes project entities with automatic backup, ID generation, and validation
+- Includes access to official Construct 3 documentation
 
-## ✨ Features
+## Features
 
-### 🔍 Resources (Read-Only Data Access)
+### Resources (Read-Only Data Access)
 
 | Resource | Description |
 |----------|-------------|
@@ -72,34 +73,85 @@ node dist/index.js /path/to/your/project.c3proj
 | `construct3://objects/{name}` | Specific object type details |
 | `construct3://eventsheets/{name}` | Specific event sheet details |
 | `construct3://layouts/{name}` | Specific layout details |
-| `construct3://docs/manual/{topic}` | Official Construct3 documentation |
+| `construct3://docs/manual/{topic}` | Official Construct 3 documentation |
 
-### 🛠️ Tools (Query Operations)
+### Query Tools (Read-Only)
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `list_objects` | `filter?: string` | List all object types with optional filtering |
-| `list_eventsheets` | - | List all event sheets |
-| `list_layouts` | - | List all layouts |
-| `list_families` | - | List all object families |
-| `get_object_details` | `name: string` | Get detailed info about a specific object |
-| `get_eventsheet_details` | `name: string` | Get detailed info about an event sheet |
-| `get_layout_details` | `name: string` | Get detailed info about a layout |
-| `search_objects` | `pattern: string` | Search objects by name pattern |
-| `get_project_summary` | - | Get comprehensive project summary |
+| Tool | Description |
+|------|-------------|
+| `list_objects` | List all object types with optional name filtering |
+| `list_eventsheets` | List all event sheets |
+| `list_layouts` | List all layouts |
+| `list_families` | List all object families |
+| `get_object_details` | Get detailed info about a specific object |
+| `get_eventsheet_details` | Get detailed info about an event sheet |
+| `get_layout_details` | Get detailed info about a layout |
+| `search_objects` | Search objects by name pattern |
+| `get_project_summary` | Get comprehensive project summary |
 
-### 📝 Prompts (Workflow Templates)
+### Analysis Tools
 
-| Prompt | Parameters | Purpose |
-|--------|------------|---------|
-| `analyze_project` | - | Analyze project structure and organization |
-| `find_object_usage` | `objectName` | Find where a specific object is used |
-| `explain_eventsheet` | `eventSheetName` | Explain how an event sheet works |
-| `review_game_logic` | - | Review overall game logic architecture |
-| `document_object` | `objectName` | Generate documentation for an object |
-| `optimize_project` | - | Get optimization suggestions |
+| Tool | Description |
+|------|-------------|
+| `get_eventsheet_flow` | Event sheet include hierarchy and layout bindings (Mermaid or JSON) |
+| `get_function_map` | Function definitions and call sites across event sheets |
+| `get_object_dependencies` | Where objects are used (event sheets, layouts, families) |
+| `find_orphaned_objects` | Find objects not referenced in any event sheet or layout |
+| `get_asset_usage` | Track sound, image, font, and video asset usage |
+| `analyze_performance` | Heuristic performance audit with categorized issues |
 
-## 📦 Installation
+### Mutation Tools (Safe Write Operations)
+
+| Tool | Description |
+|------|-------------|
+| `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.) |
+| `update_object_properties` | Add/remove instance variables and behaviors on an object |
+| `delete_object` | Delete an object (with reference checking and optional force) |
+| `create_event_sheet` | Create a new event sheet with optional includes |
+| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet |
+| `create_layout` | Create a new layout with configurable layers |
+| `add_instance_to_layout` | Place an object instance on a layout layer |
+| `update_project_metadata` | Update project name, version, author, or description |
+
+### Prompts (Workflow Templates)
+
+| Prompt | Purpose |
+|--------|---------|
+| `analyze_project` | Analyze project structure and organization |
+| `find_object_usage` | Find where a specific object is used |
+| `explain_eventsheet` | Explain how an event sheet works |
+| `review_game_logic` | Review overall game logic architecture |
+| `document_object` | Generate documentation for an object |
+| `optimize_project` | Get optimization suggestions |
+
+## Safety Model
+
+All mutation tools follow a strict safety protocol:
+
+1. **Validation** — Names checked for reserved words, path traversal, format. Plugin/behavior IDs validated against `usedAddons`.
+2. **Backup** — Every file is backed up to `<filename>.bak` before modification.
+3. **ID Generation** — SIDs (15-digit random) and UIDs (sequential) are collision-checked against the entire project.
+4. **Write** — JSON is pre-validated (round-trip test, size limit) before writing.
+5. **Verify** — Files are read back and re-parsed after writing to confirm integrity.
+6. **Cache Invalidation** — All reader caches and indexes are cleared so subsequent reads see fresh data.
+
+Additional safeguards:
+- **Reference checking** — `delete_object` scans all event sheets, layouts, and families for references before deleting.
+- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error.
+- **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
+- **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
+
+## Documentation
+
+Detailed documentation is available in the `/docs` folder:
+
+- [**Architecture**](docs/ARCHITECTURE.md) - System design, components, and data flow
+- [**API Reference**](docs/API.md) - Complete reference for all resources, tools, and prompts
+- [**Examples**](docs/EXAMPLES.md) - Usage examples and workflows
+- [**Development Guide**](docs/DEVELOPMENT.md) - Contributing, adding tools, C3 format notes
+- [**Troubleshooting**](docs/TROUBLESHOOTING.md) - Common issues and solutions
+
+## Installation
 
 ### Prerequisites
 
@@ -122,7 +174,7 @@ npm run build
 
 This compiles TypeScript to JavaScript in the `dist/` folder.
 
-## 🎯 Usage
+## Usage
 
 ### With Claude Code
 
@@ -136,8 +188,8 @@ This compiles TypeScript to JavaScript in the `dist/` folder.
     "construct3": {
       "command": "node",
       "args": [
-        "S:\\mystudio\\construct3-mcp\\dist\\index.js",
-        "S:\\mystudio\\your-construct3-project"
+        "/absolute/path/to/construct3-mcp/dist/index.js",
+        "/absolute/path/to/your-construct3-project"
       ]
     }
   }
@@ -145,7 +197,7 @@ This compiles TypeScript to JavaScript in the `dist/` folder.
 ```
 
 4. Restart Claude Code
-5. Look for the 🔌 MCP icon to confirm the server is connected
+5. The MCP tools should appear in the tool list
 
 ### With Claude Desktop
 
@@ -168,8 +220,6 @@ This compiles TypeScript to JavaScript in the `dist/` folder.
 
 ### Standalone Testing
 
-Test the server directly from the command line:
-
 ```bash
 # With specific project file
 node dist/index.js /path/to/project.c3proj
@@ -183,63 +233,64 @@ node dist/index.js /path/to/project-folder
 Once the MCP server is running, ask Claude:
 
 **Project Analysis:**
-- "What objects are in my Construct3 project?"
+- "What objects are in my Construct 3 project?"
 - "Give me an overview of the project structure"
 - "What plugins and behaviors are being used?"
+- "Find orphaned objects that aren't used anywhere"
+- "Run a performance audit on my project"
 
 **Code Understanding:**
 - "Explain how the MainSheet event sheet works"
-- "Show me the SpinMachine event logic"
-- "What does the FreeSpin event sheet do?"
+- "Show me the event sheet include hierarchy"
+- "Map all the functions in the project"
+- "What objects depend on the Player?"
 
-**Finding References:**
-- "Find all uses of the 'spin_btn' object"
-- "Where is the 'Touch' plugin used?"
-- "Show me all layouts that use the 'Player' object"
+**Safe Modifications:**
+- "Create a new Sprite object called Enemy"
+- "Add a health variable to the Player object"
+- "Create an event sheet for the menu logic"
+- "Add a new layout called LevelSelect with two layers"
+- "Place a Player instance at position 100, 200 on the Game layout"
 
-**Documentation & Analysis:**
-- "Generate documentation for the 'Audio' object"
-- "Analyze the game logic architecture"
-- "Suggest optimizations for this project"
-
-**Access Construct3 Docs:**
-- "Show me the Construct3 documentation for the Sprite plugin"
+**Documentation:**
+- "Show me the Construct 3 documentation for the Sprite plugin"
 - "What are the best practices for event sheets?"
-- "How do I use the AJAX plugin in Construct3?"
 
-## 📚 Documentation
-
-Comprehensive documentation is available in the `/docs` folder:
-
-- [**Architecture**](docs/ARCHITECTURE.md) - System design and structure
-- [**API Reference**](docs/API.md) - Complete API documentation
-- [**Examples**](docs/EXAMPLES.md) - Usage examples and recipes
-- [**Development Guide**](docs/DEVELOPMENT.md) - Contributing and development
-- [**Troubleshooting**](docs/TROUBLESHOOTING.md) - Common issues and solutions
-
-## 🛠️ Development
+## Development
 
 ### Project Structure
 
 ```
 construct3-mcp/
 ├── src/
-│   ├── index.ts              # Main MCP server entry point
+│   ├── index.ts                    # Main MCP server entry point
 │   ├── construct3/
-│   │   ├── project-reader.ts # Construct3 project file parser
-│   │   ├── types.ts          # TypeScript type definitions
-│   │   └── validator.ts      # Project validation utilities
+│   │   ├── project-reader.ts       # Project file parser and cache
+│   │   ├── project-writer.ts       # Safe write operations with backup
+│   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
+│   │   ├── templates.ts            # Object, event sheet, layout templates
+│   │   ├── types.ts                # TypeScript type definitions
+│   │   └── analyzers/
+│   │       ├── index-builder.ts    # Cross-reference index
+│   │       ├── eventsheet-flow.ts  # Event sheet flow analysis
+│   │       ├── function-map.ts     # Function mapping
+│   │       ├── object-deps.ts      # Object dependency analysis
+│   │       ├── orphan-finder.ts    # Orphaned object detection
+│   │       ├── asset-usage.ts      # Asset usage tracking
+│   │       └── performance.ts      # Performance heuristics
 │   ├── resources/
-│   │   ├── project.ts        # MCP resources implementation
-│   │   └── docs.ts           # Construct3 documentation access
+│   │   ├── project.ts              # MCP resources
+│   │   └── docs.ts                 # Construct 3 documentation access
 │   ├── tools/
-│   │   └── query.ts          # MCP tools implementation
+│   │   ├── query.ts                # 9 query tools
+│   │   ├── analysis.ts             # 6 analysis tools
+│   │   └── mutations.ts            # 8 mutation tools
 │   └── prompts/
-│       └── workflows.ts      # MCP prompts implementation
-├── docs/                     # Comprehensive documentation
-├── dist/                     # Compiled JavaScript (generated)
+│       └── workflows.ts            # 6 workflow prompts
+├── dist/                           # Compiled JavaScript (generated)
 ├── package.json
 ├── tsconfig.json
+├── CHANGELOG.md
 └── README.md
 ```
 
@@ -268,7 +319,7 @@ npm install
 npm run build
 ```
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! Here's how to get started:
 
@@ -280,64 +331,68 @@ We welcome contributions! Here's how to get started:
 6. **Push to your branch**: `git push origin feature/amazing-feature`
 7. **Open a Pull Request**
 
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed contribution guidelines.
+## Roadmap
 
-## 🗺️ Roadmap
-
-### Phase 1: Foundation (Current) ✅
+### Phase 1: Foundation ✅
 - [x] Read-only project access
-- [x] Basic resources, tools, and prompts
+- [x] 7 resources, 9 query tools, 6 prompts
 - [x] Project structure parsing
 - [x] Official documentation access
 
-### Phase 2: Enhanced Analysis 🚧
-- [ ] Event sheet flow visualization
-- [ ] Object dependency graph
-- [ ] Performance analysis tools
-- [ ] Asset usage tracking
+### Phase 2: Enhanced Analysis ✅
+- [x] Event sheet flow visualization (Mermaid diagrams)
+- [x] Object dependency graph
+- [x] Performance analysis tools
+- [x] Asset usage tracking
+- [x] Orphaned object detection
+- [x] Function mapping across event sheets
 
-### Phase 3: Safe Modifications 🔮
-- [ ] Safe property updates with validation
-- [ ] Object creation with proper ID management
-- [ ] Event sheet template generation
-- [ ] Project scaffolding tools
+### Phase 3: Safe Modifications ✅
+- [x] Object creation with proper SID/UID management
+- [x] Instance variable and behavior management
+- [x] Event sheet creation and event insertion
+- [x] Layout creation and instance placement
+- [x] Project metadata updates
+- [x] Automatic backup, validation, and verification
+- [x] Reference checking before deletion
+- [x] Addon auto-registration for known plugins
 
-### Phase 4: Advanced Features 🌟
+### Phase 4: Advanced Features
 - [ ] Support for .c3p (zipped) projects
-- [ ] Integration with Construct3 CLI
-- [ ] Real-time collaboration features
+- [ ] Rename with reference updates (dry-run preview)
+- [ ] Bulk operations
+- [ ] Event block creation (conditions/actions)
 - [ ] Plugin development assistance
 
-## 🐛 Known Limitations
+## Known Limitations
 
-- **Read-Only**: Currently does not support modifying projects
 - **Folder Format Only**: Works with .c3proj folder projects, not .c3p ZIP files
-- **Complex Events**: Deep event logic can be hard to interpret from JSON
-- **No Runtime**: Cannot execute or test games, only analyze structure
+- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned for Phase 4)
+- **Structural Events Only**: Can create groups, functions, variables, includes, and comments — but not condition/action event blocks
+- **No Runtime**: Cannot execute or test games, only analyze and modify structure
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details
 
-## 👥 Authors
+## Authors
 
 **MyStudio Team**
 - Initial development for Bonny's Fortune game project
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [Anthropic](https://www.anthropic.com/) - For creating the Model Context Protocol
 - [Scirra](https://www.construct.net/) - For Construct 3 game engine
 - The MCP Community - For inspiration and examples
 
-## 📞 Support
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/liauw-media/construct3-mcp/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/liauw-media/construct3-mcp/discussions)
-- **Documentation**: [Wiki](https://github.com/liauw-media/construct3-mcp/wiki)
 
 ---
 
-**Made with ❤️ for the Construct 3 community**
+**Made with care for the Construct 3 community**
 
-[⬆ back to top](#construct3-mcp-server)
+[Back to top](#construct3-mcp-server)

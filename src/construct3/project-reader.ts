@@ -309,6 +309,33 @@ export class Construct3ProjectReader {
   }
 
   /**
+   * Invalidate all caches so subsequent reads pick up fresh data.
+   * Must be called after any write operation.
+   */
+  invalidateCaches(): void {
+    this.eventSheetCache = null;
+    this.objectTypeCache = null;
+    this.layoutCache = null;
+    this.familyCache = null;
+  }
+
+  /**
+   * Reload the project file from disk and rebuild path maps.
+   * Call after modifying project.c3proj.
+   */
+  async reloadProject(): Promise<void> {
+    await this.loadProject();
+    this.invalidateCaches();
+  }
+
+  /**
+   * Get the project file path
+   */
+  getProjectPath(): string {
+    return this.projectPath;
+  }
+
+  /**
    * Get project metadata
    */
   getMetadata() {
