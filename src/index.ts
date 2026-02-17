@@ -17,13 +17,8 @@ import { registerMutationTools } from './tools/mutations.js';
 import { Construct3ProjectWriter } from './construct3/project-writer.js';
 import { IdGenerator } from './construct3/id-generator.js';
 
-// Require explicit project path — no process.cwd() fallback
-const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || (() => {
-  console.error('Usage: construct3-mcp <project-path>');
-  console.error('  project-path: Path to a .c3proj file or directory containing one');
-  console.error('  Or set C3_PROJECT_PATH environment variable');
-  process.exit(1);
-})();
+// Use explicit path if given, otherwise auto-detect .c3proj in current working directory
+const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || process.cwd();
 
 const server = new McpServer(
   { name: 'construct3-mcp-server', version: '1.3.0' },

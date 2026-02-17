@@ -19,16 +19,13 @@ npm run build
 node dist/index.js /path/to/your/project.c3proj
 ```
 
-**Add to Claude Code:**
+**Add to Claude Code** (auto-detects `.c3proj` in your working directory):
 ```json
 {
   "mcpServers": {
     "construct3": {
       "command": "node",
-      "args": [
-        "/absolute/path/to/construct3-mcp/dist/index.js",
-        "/absolute/path/to/your-construct3-project"
-      ]
+      "args": ["/absolute/path/to/construct3-mcp/dist/index.js"]
     }
   }
 }
@@ -178,53 +175,43 @@ This compiles TypeScript to JavaScript in the `dist/` folder.
 
 ### With Claude Code
 
-1. Open Claude Code settings
-2. Navigate to MCP Servers configuration
-3. Add the Construct3 MCP server:
+1. Add the Construct3 MCP server to your config (no project path needed — it auto-detects `.c3proj` in your working directory):
 
 ```json
 {
   "mcpServers": {
     "construct3": {
       "command": "node",
-      "args": [
-        "/absolute/path/to/construct3-mcp/dist/index.js",
-        "/absolute/path/to/your-construct3-project"
-      ]
+      "args": ["/absolute/path/to/construct3-mcp/dist/index.js"]
     }
   }
 }
 ```
 
-4. Restart Claude Code
-5. The MCP tools should appear in the tool list
+2. Open Claude Code inside any Construct 3 project folder
+3. The MCP tools appear automatically
+
+You can also pass an explicit path if needed:
+```json
+"args": ["/path/to/construct3-mcp/dist/index.js", "/path/to/specific-project"]
+```
 
 ### With Claude Desktop
 
 **macOS**: Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: Edit `%APPDATA%\Claude\claude_desktop_config.json`
 
-```json
-{
-  "mcpServers": {
-    "construct3": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/construct3-mcp/dist/index.js",
-        "/absolute/path/to/your/construct3-project"
-      ]
-    }
-  }
-}
-```
+Same config as above. Note: Claude Desktop doesn't change working directory per-project, so you'll likely want to pass the project path explicitly in `args`.
 
 ### Standalone Testing
 
 ```bash
-# With specific project file
-node dist/index.js /path/to/project.c3proj
+# Auto-detect .c3proj in current directory
+cd /path/to/project-folder
+node /path/to/construct3-mcp/dist/index.js
 
-# With project directory (auto-detects .c3proj)
+# Or pass explicit path
+node dist/index.js /path/to/project.c3proj
 node dist/index.js /path/to/project-folder
 ```
 
