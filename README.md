@@ -2,6 +2,8 @@
 
 > A Model Context Protocol (MCP) server that enables AI assistants like Claude to safely read, analyze, and modify Construct 3 game engine projects.
 
+> **Work in Progress** — Phases 1-3 are complete and functional. Phase 4 (advanced features) is in development. See the [Roadmap](#roadmap) for details.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
