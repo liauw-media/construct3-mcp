@@ -26,6 +26,9 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 
+# MCP config (local per-machine paths)
+.mcp.json
+
 # IDE
 .vscode/
 .idea/
