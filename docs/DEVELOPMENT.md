@@ -60,7 +60,7 @@ construct3-mcp/
 │   ├── tools/                      # MCP tool handlers
 │   │   ├── query.ts                # Query tools (9)
 │   │   ├── analysis.ts             # Analysis tools (6)
-│   │   └── mutations.ts            # Mutation tools (8)
+│   │   └── mutations.ts            # Mutation tools (11)
 │   └── prompts/                    # MCP prompt handlers
 │       └── workflows.ts            # Workflow prompts (6)
 ├── docs/                           # Documentation
@@ -180,6 +180,9 @@ Currently tested manually against real C3 projects. To test:
 - [ ] `add_instance_to_layout`
 - [ ] `delete_object` with and without force
 - [ ] `update_project_metadata`
+- [ ] `add_event_block` with conditions, actions, and group path
+- [ ] `add_animation_to_sprite` on an existing Sprite
+- [ ] `update_animation_properties` (speed, looping, ping-pong)
 - [ ] Verify `.bak` backup files are created
 - [ ] Verify all read tools still work after writes
 
@@ -209,4 +212,4 @@ Currently tested manually against real C3 projects. To test:
 
 ---
 
-**Last Updated**: 2026-02-16
+**Last Updated**: 2026-02-19

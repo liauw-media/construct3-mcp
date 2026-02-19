@@ -1,6 +1,7 @@
 /**
- * MCP Tools for Phase 3: Safe Modifications.
- * 8 write tools for creating, updating, and deleting C3 project entities.
+ * MCP Tools for Safe Modifications (Phases 3-4).
+ * 11 write tools for creating, updating, and deleting C3 project entities,
+ * including event block creation and animation management.
  */
 
 import { z } from 'zod';
@@ -28,6 +29,9 @@ import {
   createFunctionEvent,
   createIncludeEvent,
   createCommentEvent,
+  createBlockEvent,
+  createAnimation,
+  createAnimationFrame,
   createLayout,
   createInstance,
 } from '../construct3/templates.js';
@@ -77,6 +81,68 @@ function toolError(message: string) {
     content: [{ type: 'text' as const, text: message }],
     isError: true as const,
   };
+}
+
+/** Traverse event tree to find a group by title path (e.g., "Movement > Collision").
+ *  Two-pass: verify the full path resolves before mutating any data. */
+function findGroupByPath(
+  events: Record<string, unknown>[],
+  groupPath: string,
+): Record<string, unknown>[] | null {
+  const segments = groupPath.split('>').map(s => s.trim());
+
+  // First pass: verify all segments resolve without mutating
+  let current = events;
+  const groups: Array<Record<string, unknown>> = [];
+  for (const seg of segments) {
+    const group = current.find(
+      (e) => e.eventType === 'group' && e.title === seg,
+    ) as Record<string, unknown> | undefined;
+    if (!group) return null;
+    groups.push(group);
+    current = Array.isArray(group.children) ? group.children as Record<string, unknown>[] : [];
+  }
+
+  // Full path resolved — ensure all groups have children arrays
+  for (const g of groups) {
+    if (!Array.isArray(g.children)) g.children = [];
+  }
+
+  return groups[groups.length - 1].children as Record<string, unknown>[];
+}
+
+/** Validate objectClass references against project objects, families, and "System". */
+async function validateObjectClasses(
+  reader: Construct3ProjectReader,
+  refs: Array<{ objectClass: string; 'behavior-type'?: string }>,
+): Promise<{ errors: string[]; warnings: string[] }> {
+  const objects = await reader.listObjectTypes();
+  let families: string[] = [];
+  try {
+    families = await reader.listFamilies();
+  } catch {
+    // families may not exist in all projects
+  }
+  const validClasses = new Set([...objects, ...families, 'System']);
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  for (const ref of refs) {
+    if (!validClasses.has(ref.objectClass)) {
+      const suggestions = reader.findNearestName(ref.objectClass, 'objects');
+      const hint = suggestions.length > 0
+        ? ` Did you mean: ${suggestions.join(', ')}?`
+        : '';
+      errors.push(`Unknown objectClass "${ref.objectClass}".${hint}`);
+    }
+    if (ref['behavior-type']) {
+      // Soft validate: warn but allow (behavior may come from families or third-party plugins)
+      warnings.push(`Behavior-type "${ref['behavior-type']}" on "${ref.objectClass}" was not validated — ensure it exists on the object or its families.`);
+    }
+  }
+
+  return { errors, warnings };
 }
 
 export function registerMutationTools(
@@ -516,7 +582,160 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 6: create_layout ─────────────────────────────────
+  // ─── Tool 6: add_event_block ──────────────────────────────
+
+  server.tool(
+    'add_event_block',
+    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic',
+    {
+      sheetName: z.string().max(200).describe('Target event sheet'),
+      conditions: z.array(z.object({
+        id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
+        objectClass: z.string().describe('Object name or "System"'),
+        'behavior-type': z.string().optional().describe('Behavior type (e.g., "Platform", "8Direction")'),
+        parameters: z.record(z.unknown()).optional().describe('Condition parameters as key-value pairs'),
+        isInverted: z.boolean().optional().describe('Negate the condition'),
+      })).min(1).describe('Conditions array (at least one required)'),
+      actions: z.array(z.union([
+        z.object({
+          id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
+          objectClass: z.string().describe('Object name or "System"'),
+          'behavior-type': z.string().optional().describe('Behavior type'),
+          parameters: z.record(z.unknown()).optional().describe('Action parameters as key-value pairs'),
+          callFunction: z.string().optional().describe('For function call actions'),
+        }),
+        z.object({
+          type: z.literal('script').describe('Script action type'),
+          script: z.string().describe('Inline JavaScript code'),
+        }),
+      ])).optional().default([]).describe('Actions array (standard actions or script actions)'),
+      groupPath: z.string().max(500).optional().describe('Insert inside group by title path (e.g., "Movement > Collision")'),
+      position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event block'),
+      disabled: z.boolean().optional().default(false).describe('Create the event block disabled'),
+    },
+    async (args) => {
+      try {
+        // Read the target event sheet
+        let sheet: Record<string, unknown>;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+        }
+
+        // Validate all objectClass references
+        const allRefs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
+        for (const c of args.conditions) {
+          allRefs.push({ objectClass: c.objectClass, 'behavior-type': c['behavior-type'] });
+        }
+        for (const a of args.actions) {
+          if ('objectClass' in a) {
+            allRefs.push({ objectClass: a.objectClass, 'behavior-type': a['behavior-type'] });
+          }
+        }
+
+        const { errors, warnings } = await validateObjectClasses(reader, allRefs);
+        if (errors.length > 0) {
+          return toolError(`Object class validation failed:\n${errors.join('\n')}`);
+        }
+
+        // Generate SID for the block
+        const blockSid = await idGen.generateSid(reader);
+
+        // Build conditions with SIDs
+        const builtConditions: Array<Record<string, unknown>> = [];
+        for (const c of args.conditions) {
+          const condSid = await idGen.generateSid(reader);
+          const cond: Record<string, unknown> = {
+            id: c.id,
+            objectClass: c.objectClass,
+            sid: condSid,
+          };
+          if (c['behavior-type']) cond['behavior-type'] = c['behavior-type'];
+          if (c.parameters) cond.parameters = c.parameters;
+          if (c.isInverted) cond.isInverted = true;
+          builtConditions.push(cond);
+        }
+
+        // Build actions with SIDs (or as script actions)
+        const builtActions: Array<Record<string, unknown>> = [];
+        for (const a of args.actions) {
+          if ('type' in a && a.type === 'script') {
+            // Script actions: no SID, no objectClass
+            builtActions.push({
+              type: 'script',
+              script: a.script,
+            });
+          } else if ('id' in a) {
+            const actSid = await idGen.generateSid(reader);
+            const act: Record<string, unknown> = {
+              id: a.id,
+              objectClass: a.objectClass,
+              sid: actSid,
+            };
+            if (a['behavior-type']) act['behavior-type'] = a['behavior-type'];
+            if (a.parameters) act.parameters = a.parameters;
+            if (a.callFunction) act.callFunction = a.callFunction;
+            builtActions.push(act);
+          }
+        }
+
+        // Create the block event
+        const blockEvent = createBlockEvent(blockSid, builtConditions, builtActions, args.disabled || undefined);
+
+        // Determine target events array
+        let targetEvents: Record<string, unknown>[];
+        const events = sheet.events as Record<string, unknown>[];
+
+        if (args.groupPath) {
+          const resolved = findGroupByPath(events, args.groupPath);
+          if (!resolved) {
+            // Collect available top-level group titles for a helpful error
+            const topGroups = events
+              .filter(e => e.eventType === 'group')
+              .map(e => e.title as string);
+            const hint = topGroups.length > 0
+              ? `\nAvailable top-level groups: ${topGroups.join(', ')}`
+              : '\nNo groups found in this event sheet.';
+            return toolError(`Group path "${args.groupPath}" not found in "${args.sheetName}".${hint}`);
+          }
+          targetEvents = resolved;
+        } else {
+          targetEvents = events;
+        }
+
+        // Insert at position
+        if (args.position === 'start') {
+          targetEvents.unshift(blockEvent);
+        } else {
+          targetEvents.push(blockEvent);
+        }
+
+        // Write back
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          generatedSid: blockSid,
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error adding event block: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── Tool 7: create_layout ──────────────────────────────────
 
   server.tool(
     'create_layout',
@@ -583,7 +802,7 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 7: add_instance_to_layout ────────────────────────
+  // ─── Tool 8: add_instance_to_layout ────────────────────────
 
   server.tool(
     'add_instance_to_layout',
@@ -689,7 +908,7 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 8: update_project_metadata ───────────────────────
+  // ─── Tool 9: update_project_metadata ───────────────────────
 
   server.tool(
     'update_project_metadata',
@@ -724,6 +943,179 @@ export function registerMutationTools(
         return toolResult(result);
       } catch (error) {
         return toolError(`Error updating project metadata: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── Tool 10: add_animation_to_sprite ─────────────────────
+
+  server.tool(
+    'add_animation_to_sprite',
+    'Add a new animation to a Sprite object',
+    {
+      objectName: z.string().max(200).describe('Sprite object name'),
+      animationName: z.string().min(1).max(200).describe('Animation name (e.g., "Idle", "Walk", "Jump")'),
+      speed: z.number().min(0).optional().default(5).describe('Frames per second (default: 5)'),
+      isLooping: z.boolean().optional().default(true).describe('Loop the animation (default: true)'),
+      isPingPong: z.boolean().optional().default(false).describe('Ping-pong playback (default: false)'),
+      repeatCount: z.number().int().min(1).optional().default(1).describe('Repeat count if not looping (default: 1)'),
+      frameCount: z.number().int().min(1).max(100).optional().default(1).describe('Number of blank frames to create (default: 1)'),
+      frameWidth: z.number().int().positive().optional().describe('Frame width in pixels (default: existing sprite width)'),
+      frameHeight: z.number().int().positive().optional().describe('Frame height in pixels (default: existing sprite height)'),
+    },
+    async (args) => {
+      try {
+        // Read existing object
+        let obj: Record<string, unknown>;
+        try {
+          obj = await reader.readObjectType(args.objectName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.objectName, 'objects');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_objects to see all available names.';
+          return toolError(`Object "${args.objectName}" not found.${hint}`);
+        }
+
+        // Verify it's a Sprite
+        if (obj['plugin-id'] !== 'Sprite') {
+          return toolError(`Object "${args.objectName}" is a "${obj['plugin-id']}" plugin, not a Sprite. Only Sprite objects have animations.`);
+        }
+
+        // Navigate to animations.items
+        const animations = obj.animations as Record<string, unknown> | undefined;
+        if (!animations || !Array.isArray(animations.items)) {
+          return toolError(`Object "${args.objectName}" has no animations structure. It may be corrupted.`);
+        }
+        const animItems = animations.items as Array<Record<string, unknown>>;
+
+        // Check for duplicate animation name
+        if (animItems.some(a => a.name === args.animationName)) {
+          return toolError(`Animation "${args.animationName}" already exists on "${args.objectName}". Use update_animation_properties to modify it.`);
+        }
+
+        // Determine frame dimensions from existing animation if not specified
+        let frameWidth = args.frameWidth ?? 100;
+        let frameHeight = args.frameHeight ?? 100;
+        if ((!args.frameWidth || !args.frameHeight) && animItems.length > 0) {
+          const existingFrames = animItems[0].frames as Array<Record<string, unknown>> | undefined;
+          if (existingFrames && existingFrames.length > 0) {
+            if (!args.frameWidth) frameWidth = (existingFrames[0].width as number) ?? 100;
+            if (!args.frameHeight) frameHeight = (existingFrames[0].height as number) ?? 100;
+          }
+        }
+
+        // Generate frames
+        const frames: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < args.frameCount; i++) {
+          frames.push(createAnimationFrame(frameWidth, frameHeight));
+        }
+
+        // Generate SID for the animation
+        const animSid = await idGen.generateSid(reader);
+
+        const anim = createAnimation(
+          args.animationName,
+          animSid,
+          args.speed,
+          args.isLooping,
+          args.isPingPong,
+          args.repeatCount,
+          frames,
+        );
+
+        animItems.push(anim);
+
+        // Write back
+        const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
+        const backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.objectName,
+          category: 'object',
+          action: 'updated',
+          generatedSid: animSid,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error adding animation: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── Tool 11: update_animation_properties ─────────────────
+
+  server.tool(
+    'update_animation_properties',
+    'Update properties of an existing animation on a Sprite object',
+    {
+      objectName: z.string().max(200).describe('Sprite object name'),
+      animationName: z.string().min(1).max(200).describe('Animation name to modify'),
+      speed: z.number().min(0).optional().describe('New speed (frames per second)'),
+      isLooping: z.boolean().optional().describe('New loop setting'),
+      isPingPong: z.boolean().optional().describe('New ping-pong setting'),
+      repeatCount: z.number().int().min(1).optional().describe('New repeat count'),
+    },
+    async (args) => {
+      try {
+        // Read existing object
+        let obj: Record<string, unknown>;
+        try {
+          obj = await reader.readObjectType(args.objectName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.objectName, 'objects');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_objects to see all available names.';
+          return toolError(`Object "${args.objectName}" not found.${hint}`);
+        }
+
+        // Verify it's a Sprite
+        if (obj['plugin-id'] !== 'Sprite') {
+          return toolError(`Object "${args.objectName}" is a "${obj['plugin-id']}" plugin, not a Sprite. Only Sprite objects have animations.`);
+        }
+
+        // Navigate to animations.items
+        const animations = obj.animations as Record<string, unknown> | undefined;
+        if (!animations || !Array.isArray(animations.items)) {
+          return toolError(`Object "${args.objectName}" has no animations structure.`);
+        }
+        const animItems = animations.items as Array<Record<string, unknown>>;
+
+        // Find the target animation
+        const anim = animItems.find(a => a.name === args.animationName);
+        if (!anim) {
+          const availableNames = animItems.map(a => a.name as string).join(', ');
+          return toolError(`Animation "${args.animationName}" not found on "${args.objectName}". Available animations: ${availableNames}`);
+        }
+
+        // Check at least one property is being updated
+        if (args.speed === undefined && args.isLooping === undefined && args.isPingPong === undefined && args.repeatCount === undefined) {
+          return toolError('No updates provided. Specify at least one of: speed, isLooping, isPingPong, repeatCount.');
+        }
+
+        // Apply updates
+        if (args.speed !== undefined) anim.speed = args.speed;
+        if (args.isLooping !== undefined) anim.isLooping = args.isLooping;
+        if (args.isPingPong !== undefined) anim.isPingPong = args.isPingPong;
+        if (args.repeatCount !== undefined) anim.repeatCount = args.repeatCount;
+
+        // Write back
+        const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
+        const backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.objectName,
+          category: 'object',
+          action: 'updated',
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error updating animation: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   );

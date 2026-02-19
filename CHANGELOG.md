@@ -2,6 +2,34 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [1.4.0] - 2026-02-19
+
+### Phase 4: Event Blocks & Animation
+
+3 new mutation tools for gameplay logic and animation management (total: 11 mutation tools).
+
+#### Added
+
+- **`add_event_block`** — Add block events with conditions + actions to event sheets, with group path targeting, script action support, inverted conditions, and object class validation
+- **`add_animation_to_sprite`** — Add named animations with configurable frame count, speed, looping, ping-pong to Sprite objects
+- **`update_animation_properties`** — Modify speed, looping, ping-pong, repeat count on existing Sprite animations
+
+#### Infrastructure
+
+- **`createBlockEvent`** template — Generates valid block event JSON with conditions, actions, children array
+- **`createAnimation` / `createAnimationFrame`** templates — Animation and frame JSON builders
+- **`findGroupByPath()`** helper — Two-pass group traversal (verify-then-mutate) for safe nested event insertion
+- **`validateObjectClasses()`** helper — Validates objectClass references against project objects, families, and System
+
+#### Fixes (pre-push audit)
+
+- `findGroupByPath` no longer mutates event data on failed path resolution
+- All Phase 4 tools now return `backupFile` in results (consistency with Phase 3)
+- Animation name validated as non-empty (`.min(1)`)
+- Animation speed validated as non-negative (`.min(0)`)
+- `createBlockEvent` includes `children: []` for sub-event consistency
+- Fixed stale documentation: tool counts (8→11), roadmap references, manual test checklist
+
 ## [1.3.0] - 2026-02-16
 
 ### Phase 3: Safe Modifications

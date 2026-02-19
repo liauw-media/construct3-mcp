@@ -2,7 +2,7 @@
 
 > A Model Context Protocol (MCP) server that enables AI assistants like Claude to safely read, analyze, and modify Construct 3 game engine projects.
 
-> **Work in Progress** — Phases 1-3 are complete and functional. Phase 4 (advanced features) is in development. See the [Roadmap](#roadmap) for details.
+> **Work in Progress** — Phases 1-4 are complete and functional. Phase 5 (advanced features) is in development. See the [Roadmap](#roadmap) for details.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
@@ -108,9 +108,12 @@ node dist/index.js /path/to/your/project.c3proj
 | `delete_object` | Delete an object (with reference checking and optional force) |
 | `create_event_sheet` | Create a new event sheet with optional includes |
 | `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet |
+| `add_event_block` | Add a block event with conditions + actions (gameplay logic) |
 | `create_layout` | Create a new layout with configurable layers |
 | `add_instance_to_layout` | Place an object instance on a layout layer |
 | `update_project_metadata` | Update project name, version, author, or description |
+| `add_animation_to_sprite` | Add a new animation to a Sprite object |
+| `update_animation_properties` | Update animation speed, looping, ping-pong on a Sprite |
 
 ### Prompts (Workflow Templates)
 
@@ -273,7 +276,7 @@ construct3-mcp/
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
 │   │   ├── analysis.ts             # 6 analysis tools
-│   │   └── mutations.ts            # 8 mutation tools
+│   │   └── mutations.ts            # 11 mutation tools
 │   └── prompts/
 │       └── workflows.ts            # 6 workflow prompts
 ├── dist/                           # Compiled JavaScript (generated)
@@ -346,19 +349,24 @@ We welcome contributions! Here's how to get started:
 - [x] Reference checking before deletion
 - [x] Addon auto-registration for known plugins
 
-### Phase 4: Advanced Features
+### Phase 4: Event Blocks & Animation ✅
+- [x] Event block creation (conditions + actions) with group path targeting
+- [x] Script action support (inline JavaScript)
+- [x] Animation management (add/update animations on Sprites)
+- [x] Object class validation against project entities
+
+### Phase 5: Advanced Features
 - [ ] Support for .c3p (zipped) projects
 - [ ] Rename with reference updates (dry-run preview)
 - [ ] Bulk operations
-- [ ] Event block creation (conditions/actions)
 - [ ] Plugin development assistance
 
 ## Known Limitations
 
 - **Folder Format Only**: Works with .c3proj folder projects, not .c3p ZIP files
-- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned for Phase 4)
-- **Structural Events Only**: Can create groups, functions, variables, includes, and comments — but not condition/action event blocks
+- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned for Phase 5)
 - **No Runtime**: Cannot execute or test games, only analyze and modify structure
+- **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs)
 
 ## License
 
