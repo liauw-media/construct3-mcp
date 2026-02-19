@@ -391,6 +391,66 @@ export function createCommentEvent(text: string): Record<string, unknown> {
   };
 }
 
+// ─── Block Event Template ──────────────────────────────────
+
+export function createBlockEvent(
+  sid: number,
+  conditions: Array<Record<string, unknown>>,
+  actions: Array<Record<string, unknown>>,
+  disabled?: boolean,
+): Record<string, unknown> {
+  return {
+    eventType: 'block',
+    conditions,
+    actions,
+    children: [],
+    sid,
+    ...(disabled ? { disabled: true } : {}),
+  };
+}
+
+// ─── Animation Templates ──────────────────────────────────
+
+export function createAnimationFrame(
+  width: number,
+  height: number,
+): Record<string, unknown> {
+  return {
+    width,
+    height,
+    originX: 0.5,
+    originY: 0.5,
+    originalSource: '',
+    exportFormat: 'lossless',
+    exportQuality: 0.8,
+    fileType: 'image/png',
+    duration: 1,
+    tag: '',
+    useCollisionPoly: true,
+  };
+}
+
+export function createAnimation(
+  name: string,
+  sid: number,
+  speed: number,
+  isLooping: boolean,
+  isPingPong: boolean,
+  repeatCount: number,
+  frames: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    frames,
+    sid,
+    name,
+    isLooping,
+    isPingPong,
+    repeatCount,
+    repeatTo: 0,
+    speed,
+  };
+}
+
 // ─── Layout Templates ──────────────────────────────────────
 
 export function createLayout(

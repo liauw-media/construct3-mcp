@@ -29,6 +29,9 @@ pnpm-debug.log*
 # MCP config (local per-machine paths)
 .mcp.json
 
+# Claude Code local config
+.claude/
+
 # IDE
 .vscode/
 .idea/

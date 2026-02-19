@@ -251,6 +251,169 @@ Returns success with a warning that references were NOT cleaned up.
 
 ---
 
+## Event Block Creation
+
+### System Condition → Set Variable
+
+**Query:**
+> "On start of layout, set the Player's health to 100"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "GameSheet",
+  "conditions": [
+    { "id": "on-start-of-layout", "objectClass": "System" }
+  ],
+  "actions": [
+    {
+      "id": "set-instvar-value",
+      "objectClass": "Player",
+      "parameters": { "variable": "health", "value": "100" }
+    }
+  ]
+}
+```
+
+### Keyboard Input → Platform Jump
+
+**Query:**
+> "When the player presses Space, make them jump using the Platform behavior"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "PlayerControls",
+  "conditions": [
+    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": "32" } }
+  ],
+  "actions": [
+    {
+      "id": "simulate-control",
+      "objectClass": "Player",
+      "behavior-type": "Platform",
+      "parameters": { "control": "jump" }
+    }
+  ]
+}
+```
+
+### Collision → Destroy + Subtract Health (Multi-Action)
+
+**Query:**
+> "When Enemy collides with Bullet, destroy the bullet and subtract 10 from enemy health"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "CombatSheet",
+  "conditions": [
+    {
+      "id": "on-collision-with-another-object",
+      "objectClass": "Enemy",
+      "parameters": { "object": "Bullet" }
+    }
+  ],
+  "actions": [
+    { "id": "destroy", "objectClass": "Bullet" },
+    {
+      "id": "set-instvar-value",
+      "objectClass": "Enemy",
+      "parameters": { "variable": "health", "value": "Enemy.health - 10" }
+    }
+  ]
+}
+```
+
+### Event Inside a Group
+
+**Query:**
+> "Add a collision check inside the Movement > Physics group"
+
+**Claude uses**: `add_event_block` with `groupPath: "Movement > Physics"`
+
+### Inverted Condition
+
+**Query:**
+> "If the player is NOT overlapping SafeZone, subtract 1 from health every tick"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "GameSheet",
+  "conditions": [
+    {
+      "id": "is-overlapping-another-object",
+      "objectClass": "Player",
+      "parameters": { "object": "SafeZone" },
+      "isInverted": true
+    }
+  ],
+  "actions": [
+    {
+      "id": "subtract-from-instvar",
+      "objectClass": "Player",
+      "parameters": { "variable": "health", "value": "1" }
+    }
+  ]
+}
+```
+
+### Script Action
+
+**Query:**
+> "On start of layout, run a script that logs 'Game started'"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "GameSheet",
+  "conditions": [
+    { "id": "on-start-of-layout", "objectClass": "System" }
+  ],
+  "actions": [
+    { "type": "script", "script": "console.log('Game started');" }
+  ]
+}
+```
+
+---
+
+## Animation Management
+
+### Add a Walk Animation
+
+**Query:**
+> "Add a Walk animation to the Player sprite with 8 frames at 12 FPS, looping"
+
+**Claude uses**: `add_animation_to_sprite` with:
+```json
+{
+  "objectName": "Player",
+  "animationName": "Walk",
+  "speed": 12,
+  "isLooping": true,
+  "frameCount": 8
+}
+```
+
+### Update Animation Speed
+
+**Query:**
+> "Change the Player's Walk animation to 15 FPS and enable ping-pong"
+
+**Claude uses**: `update_animation_properties` with:
+```json
+{
+  "objectName": "Player",
+  "animationName": "Walk",
+  "speed": 15,
+  "isPingPong": true
+}
+```
+
+---
+
 ## Finding References
 
 ### Find Object Usage
@@ -342,4 +505,4 @@ Returns success with a warning that references were NOT cleaned up.
 
 ---
 
-**Last Updated**: 2026-02-16
+**Last Updated**: 2026-02-19
