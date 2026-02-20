@@ -264,31 +264,46 @@ Add a structural event to an existing event sheet.
 
 ### `add_event_block`
 
-Add a block event (conditions + actions) to an event sheet — the core of gameplay logic.
+Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, OR conditions, and per-action disabling.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
-| `conditions` | array | Yes | Conditions (min 1). Each: `{ id, objectClass, "behavior-type"?, parameters?, isInverted? }` |
-| `actions` | array | No | Actions (default: `[]`). Standard: `{ id, objectClass, "behavior-type"?, parameters?, callFunction? }`. Script: `{ type: "script", script }` |
+| `conditions` | array | No* | Conditions. Each: `{ id, objectClass, "behavior-type"?, parameters?, isInverted?, isOr? }`. *Required (min 1) unless `isElse` is true. |
+| `actions` | array | No | Actions (default: `[]`). Standard: `{ id, objectClass, "behavior-type"?, parameters?, callFunction?, disabled? }`. Script: `{ type: "script", script }` |
 | `groupPath` | string | No | Insert inside group by title path (e.g., `"Movement > Collision"`) |
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 | `disabled` | boolean | No | Create the block disabled (default: false) |
+| `isElse` | boolean | No | Mark as an else block — conditions become optional (default: false) |
+| `children` | array | No | Sub-events nested inside this block (recursive). Each child has the same shape: `{ conditions?, actions?, disabled?, isElse?, children? }` |
+
+**Condition fields:**
+- `isOr` — OR-combine with the previous condition (default is AND). The first condition's `isOr` is ignored by C3.
+- `isInverted` — Negate the condition.
+
+**Action fields:**
+- `disabled` — Disable an individual action (the action exists but won't run).
+
+**Sub-events (`children`):**
+- Each child is a full block event with its own conditions, actions, and children.
+- Children with `isElse: true` act as "Else" branches and don't require conditions.
+- Max nesting depth: 5 levels. Max total events (parent + all descendants): 50.
 
 **Validation:**
-- `objectClass` is hard-validated against project objects, families, and `"System"`
+- `objectClass` is hard-validated against project objects, families, and `"System"` — across the entire tree (parent + all descendants)
 - `behavior-type` is soft-validated (warning only, since behaviors may come from families)
 - `id` (ACE identifier) is **not** validated — Claude knows the hundreds of C3 ACE IDs
 - Script actions (`type: "script"`) skip objectClass validation and SID generation
 
 **What it does:**
 1. Reads the target event sheet
-2. Validates all `objectClass` references
-3. Generates SIDs for the block + each condition + each standard action
-4. Builds condition/action objects with optional fields (`behavior-type`, `parameters`, `isInverted`, `callFunction`)
-5. If `groupPath`: resolves nested group path (error with available groups on miss)
-6. Inserts at position (`start`/`end`)
-7. Writes sheet back with backup
+2. Validates all `objectClass` references across the entire event tree
+3. Recursively generates SIDs for each block, condition, and standard action
+4. Builds condition/action objects with optional fields (`behavior-type`, `parameters`, `isInverted`, `isOr`, `callFunction`, `disabled`)
+5. Recursively builds child sub-events with `isElse` support
+6. If `groupPath`: resolves nested group path (error with available groups on miss)
+7. Inserts at position (`start`/`end`)
+8. Writes sheet back with backup
 
 ### `delete_event_sheet`
 

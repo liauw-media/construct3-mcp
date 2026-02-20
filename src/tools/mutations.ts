@@ -584,37 +584,215 @@ export function registerMutationTools(
 
   // ─── Tool 6: add_event_block ──────────────────────────────
 
+  // Condition schema shared by top-level and child events
+  const conditionSchema = z.object({
+    id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
+    objectClass: z.string().describe('Object name or "System"'),
+    'behavior-type': z.string().optional().describe('Behavior type (e.g., "Platform", "8Direction")'),
+    parameters: z.record(z.unknown()).optional().describe('Condition parameters as key-value pairs'),
+    isInverted: z.boolean().optional().describe('Negate the condition'),
+    isOr: z.boolean().optional().describe('OR-combine with previous condition (default: AND)'),
+  });
+
+  // Action schema shared by top-level and child events
+  const standardActionSchema = z.object({
+    id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
+    objectClass: z.string().describe('Object name or "System"'),
+    'behavior-type': z.string().optional().describe('Behavior type'),
+    parameters: z.record(z.unknown()).optional().describe('Action parameters as key-value pairs'),
+    callFunction: z.string().optional().describe('For function call actions'),
+    disabled: z.boolean().optional().describe('Disable this individual action'),
+  });
+
+  const scriptActionSchema = z.object({
+    type: z.literal('script').describe('Script action type'),
+    script: z.string().describe('Inline JavaScript code'),
+    disabled: z.boolean().optional().describe('Disable this individual script action'),
+  });
+
+  const actionSchema = z.union([standardActionSchema, scriptActionSchema]);
+
+  // Recursive child event schema using z.lazy()
+  interface ChildEventInput {
+    conditions?: Array<z.infer<typeof conditionSchema>>;
+    actions?: Array<z.infer<typeof standardActionSchema> | z.infer<typeof scriptActionSchema>>;
+    disabled?: boolean;
+    isElse?: boolean;
+    children?: ChildEventInput[];
+  }
+
+  const childEventSchema: z.ZodType<ChildEventInput> = z.lazy(() => z.object({
+    conditions: z.array(conditionSchema).optional().default([]),
+    actions: z.array(actionSchema).optional().default([]),
+    disabled: z.boolean().optional(),
+    isElse: z.boolean().optional(),
+    children: z.array(childEventSchema).optional().default([]),
+  }));
+
+  /** Safety limits for recursive event building */
+  const MAX_NESTING_DEPTH = 5;
+  const MAX_TOTAL_EVENTS = 50;
+  const MAX_ITEMS_PER_BLOCK = 100;
+
+  /** Collect all objectClass references from a block and all its descendants. */
+  function collectObjectRefs(
+    conditions: Array<{ objectClass: string; 'behavior-type'?: string }>,
+    actions: Array<Record<string, unknown>>,
+    children: ChildEventInput[],
+    refs: Array<{ objectClass: string; 'behavior-type'?: string }>,
+  ): void {
+    for (const c of conditions) {
+      refs.push({ objectClass: c.objectClass, 'behavior-type': c['behavior-type'] });
+    }
+    for (const a of actions) {
+      if ('objectClass' in a && typeof a.objectClass === 'string') {
+        refs.push({ objectClass: a.objectClass, 'behavior-type': a['behavior-type'] as string | undefined });
+      }
+    }
+    for (const child of children) {
+      collectObjectRefs(
+        child.conditions ?? [],
+        (child.actions ?? []) as Array<Record<string, unknown>>,
+        child.children ?? [],
+        refs,
+      );
+    }
+  }
+
+  /** Recursively build a block event with conditions, actions, and children.
+   *  Returns the built block and the count of events created (for safety limit). */
+  async function buildBlockEvent(
+    block: {
+      conditions: Array<z.infer<typeof conditionSchema>>;
+      actions: Array<z.infer<typeof standardActionSchema> | z.infer<typeof scriptActionSchema>>;
+      disabled?: boolean;
+      isElse?: boolean;
+      children: ChildEventInput[];
+    },
+    depth: number,
+    counter: { count: number; warnings: string[] },
+  ): Promise<Record<string, unknown>> {
+    if (depth > MAX_NESTING_DEPTH) {
+      throw new Error(`Sub-event nesting exceeds maximum depth of ${MAX_NESTING_DEPTH}`);
+    }
+    counter.count++;
+    if (counter.count > MAX_TOTAL_EVENTS) {
+      throw new Error(`Total event count exceeds maximum of ${MAX_TOTAL_EVENTS}`);
+    }
+
+    // Validate: non-else blocks must have at least one condition
+    if (!block.isElse && block.conditions.length === 0) {
+      throw new Error(`Non-else event block at depth ${depth} has no conditions. Add conditions or set isElse: true.`);
+    }
+
+    // Cap conditions and actions per block to prevent SID amplification
+    if (block.conditions.length > MAX_ITEMS_PER_BLOCK) {
+      throw new Error(`Block has ${block.conditions.length} conditions (max ${MAX_ITEMS_PER_BLOCK})`);
+    }
+    if (block.actions.length > MAX_ITEMS_PER_BLOCK) {
+      throw new Error(`Block has ${block.actions.length} actions (max ${MAX_ITEMS_PER_BLOCK})`);
+    }
+
+    // Warn: isElse blocks with conditions (C3 ignores them)
+    if (block.isElse && block.conditions.length > 0) {
+      counter.warnings.push(`Else block at depth ${depth} has ${block.conditions.length} condition(s) — C3 ignores conditions on else blocks.`);
+    }
+
+    // Warn: isOr on the first condition is meaningless
+    if (block.conditions.length > 0 && block.conditions[0].isOr) {
+      counter.warnings.push(`First condition at depth ${depth} has isOr: true — this is ignored by C3 (no previous condition to OR with).`);
+    }
+
+    const blockSid = await idGen.generateSid(reader);
+
+    // Build conditions with SIDs
+    const builtConditions: Array<Record<string, unknown>> = [];
+    for (const c of block.conditions) {
+      const condSid = await idGen.generateSid(reader);
+      const cond: Record<string, unknown> = {
+        id: c.id,
+        objectClass: c.objectClass,
+        sid: condSid,
+      };
+      if (c['behavior-type']) cond['behavior-type'] = c['behavior-type'];
+      if (c.parameters) cond.parameters = c.parameters;
+      if (c.isInverted) cond.isInverted = true;
+      if (c.isOr) cond.isOr = true;
+      builtConditions.push(cond);
+    }
+
+    // Build actions with SIDs (or as script actions)
+    const builtActions: Array<Record<string, unknown>> = [];
+    for (const a of block.actions) {
+      if ('type' in a && a.type === 'script') {
+        const scriptAct: Record<string, unknown> = {
+          type: 'script',
+          script: a.script,
+        };
+        if (a.disabled) scriptAct.disabled = true;
+        builtActions.push(scriptAct);
+      } else if ('id' in a) {
+        const actSid = await idGen.generateSid(reader);
+        const act: Record<string, unknown> = {
+          id: a.id,
+          objectClass: a.objectClass,
+          sid: actSid,
+        };
+        if (a['behavior-type']) act['behavior-type'] = a['behavior-type'];
+        if (a.parameters) act.parameters = a.parameters;
+        if (a.callFunction) act.callFunction = a.callFunction;
+        if (a.disabled) act.disabled = true;
+        builtActions.push(act);
+      }
+    }
+
+    // Recursively build children
+    const builtChildren: Array<Record<string, unknown>> = [];
+    for (const child of block.children) {
+      const childBlock = await buildBlockEvent(
+        {
+          conditions: child.conditions ?? [],
+          actions: child.actions ?? [],
+          disabled: child.disabled,
+          isElse: child.isElse,
+          children: child.children ?? [],
+        },
+        depth + 1,
+        counter,
+      );
+      builtChildren.push(childBlock);
+    }
+
+    return createBlockEvent(
+      blockSid,
+      builtConditions,
+      builtActions,
+      block.disabled || undefined,
+      builtChildren.length > 0 ? builtChildren : undefined,
+      block.isElse || undefined,
+    );
+  }
+
   server.tool(
     'add_event_block',
-    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic',
+    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, OR conditions, and per-action disabling.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
-      conditions: z.array(z.object({
-        id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
-        objectClass: z.string().describe('Object name or "System"'),
-        'behavior-type': z.string().optional().describe('Behavior type (e.g., "Platform", "8Direction")'),
-        parameters: z.record(z.unknown()).optional().describe('Condition parameters as key-value pairs'),
-        isInverted: z.boolean().optional().describe('Negate the condition'),
-      })).min(1).describe('Conditions array (at least one required)'),
-      actions: z.array(z.union([
-        z.object({
-          id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
-          objectClass: z.string().describe('Object name or "System"'),
-          'behavior-type': z.string().optional().describe('Behavior type'),
-          parameters: z.record(z.unknown()).optional().describe('Action parameters as key-value pairs'),
-          callFunction: z.string().optional().describe('For function call actions'),
-        }),
-        z.object({
-          type: z.literal('script').describe('Script action type'),
-          script: z.string().describe('Inline JavaScript code'),
-        }),
-      ])).optional().default([]).describe('Actions array (standard actions or script actions)'),
+      conditions: z.array(conditionSchema).optional().default([]).describe('Conditions array (at least one required, unless isElse is true)'),
+      actions: z.array(actionSchema).optional().default([]).describe('Actions array (standard actions or script actions)'),
       groupPath: z.string().max(500).optional().describe('Insert inside group by title path (e.g., "Movement > Collision")'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event block'),
       disabled: z.boolean().optional().default(false).describe('Create the event block disabled'),
+      isElse: z.boolean().optional().default(false).describe('Mark as an else block (conditions become optional)'),
+      children: z.array(childEventSchema).optional().default([]).describe('Sub-events nested inside this block (recursive, max depth 5, max 50 total events)'),
     },
     async (args) => {
       try {
+        // Validate: non-else blocks must have at least one condition
+        if (!args.isElse && args.conditions.length === 0) {
+          return toolError('At least one condition is required (unless isElse is true).');
+        }
+
         // Read the target event sheet
         let sheet: Record<string, unknown>;
         try {
@@ -627,65 +805,35 @@ export function registerMutationTools(
           return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
         }
 
-        // Validate all objectClass references
+        // Collect all objectClass references from entire tree (parent + descendants)
         const allRefs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
-        for (const c of args.conditions) {
-          allRefs.push({ objectClass: c.objectClass, 'behavior-type': c['behavior-type'] });
-        }
-        for (const a of args.actions) {
-          if ('objectClass' in a) {
-            allRefs.push({ objectClass: a.objectClass, 'behavior-type': a['behavior-type'] });
-          }
-        }
+        collectObjectRefs(
+          args.conditions,
+          args.actions as Array<Record<string, unknown>>,
+          args.children,
+          allRefs,
+        );
 
         const { errors, warnings } = await validateObjectClasses(reader, allRefs);
         if (errors.length > 0) {
           return toolError(`Object class validation failed:\n${errors.join('\n')}`);
         }
 
-        // Generate SID for the block
-        const blockSid = await idGen.generateSid(reader);
-
-        // Build conditions with SIDs
-        const builtConditions: Array<Record<string, unknown>> = [];
-        for (const c of args.conditions) {
-          const condSid = await idGen.generateSid(reader);
-          const cond: Record<string, unknown> = {
-            id: c.id,
-            objectClass: c.objectClass,
-            sid: condSid,
-          };
-          if (c['behavior-type']) cond['behavior-type'] = c['behavior-type'];
-          if (c.parameters) cond.parameters = c.parameters;
-          if (c.isInverted) cond.isInverted = true;
-          builtConditions.push(cond);
-        }
-
-        // Build actions with SIDs (or as script actions)
-        const builtActions: Array<Record<string, unknown>> = [];
-        for (const a of args.actions) {
-          if ('type' in a && a.type === 'script') {
-            // Script actions: no SID, no objectClass
-            builtActions.push({
-              type: 'script',
-              script: a.script,
-            });
-          } else if ('id' in a) {
-            const actSid = await idGen.generateSid(reader);
-            const act: Record<string, unknown> = {
-              id: a.id,
-              objectClass: a.objectClass,
-              sid: actSid,
-            };
-            if (a['behavior-type']) act['behavior-type'] = a['behavior-type'];
-            if (a.parameters) act.parameters = a.parameters;
-            if (a.callFunction) act.callFunction = a.callFunction;
-            builtActions.push(act);
-          }
-        }
-
-        // Create the block event
-        const blockEvent = createBlockEvent(blockSid, builtConditions, builtActions, args.disabled || undefined);
+        // Build the block event recursively (handles children, SIDs, safety limits)
+        const counter = { count: 0, warnings: [] as string[] };
+        const blockEvent = await buildBlockEvent(
+          {
+            conditions: args.conditions,
+            actions: args.actions,
+            disabled: args.disabled,
+            isElse: args.isElse,
+            children: args.children,
+          },
+          1,
+          counter,
+        );
+        warnings.push(...counter.warnings);
+        const blockSid = blockEvent.sid as number;
 
         // Determine target events array
         let targetEvents: Record<string, unknown>[];
@@ -694,7 +842,6 @@ export function registerMutationTools(
         if (args.groupPath) {
           const resolved = findGroupByPath(events, args.groupPath);
           if (!resolved) {
-            // Collect available top-level group titles for a helpful error
             const topGroups = events
               .filter(e => e.eventType === 'group')
               .map(e => e.title as string);
