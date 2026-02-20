@@ -1,7 +1,7 @@
 /**
- * MCP Tools for Safe Modifications (Phases 3-4).
- * 11 write tools for creating, updating, and deleting C3 project entities,
- * including event block creation and animation management.
+ * MCP Tools for Safe Modifications (Phases 3-5).
+ * 14 write tools for creating, updating, and deleting C3 project entities,
+ * including event block creation, animation management, and layout/event sheet lifecycle.
  */
 
 import { z } from 'zod';
@@ -735,7 +735,83 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 7: create_layout ──────────────────────────────────
+  // ─── Tool 7: delete_event_sheet ──────────────────────────────
+
+  server.tool(
+    'delete_event_sheet',
+    'Delete an event sheet from the project (checks references first)',
+    {
+      name: z.string().max(200).describe('Event sheet name to delete'),
+      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
+    },
+    async (args) => {
+      try {
+        // Verify the event sheet exists
+        const existing = await reader.listEventSheets();
+        if (!existing.includes(args.name)) {
+          const suggestions = reader.findNearestName(args.name, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.name}" not found.${hint}`);
+        }
+
+        // Check references via project index
+        const index = await getProjectIndex(reader);
+
+        // 1. Sheets that include this one
+        const includedBy = index.eventSheetIncludedBy.get(args.name) || [];
+
+        // 2. Layouts bound to this event sheet
+        const boundLayouts: string[] = [];
+        for (const [layoutName, sheetName] of index.layoutToEventSheet) {
+          if (sheetName === args.name) {
+            boundLayouts.push(layoutName);
+          }
+        }
+
+        const hasRefs = includedBy.length > 0 || boundLayouts.length > 0;
+
+        if (hasRefs && !args.force) {
+          return toolResult({
+            success: false,
+            entity: args.name,
+            category: 'eventsheet',
+            action: 'delete_blocked',
+            message: 'Event sheet is still referenced. Use force=true to delete anyway (references will NOT be cleaned up).',
+            references: {
+              includedBy,
+              boundLayouts,
+            },
+          });
+        }
+
+        const warnings: string[] = [];
+        if (hasRefs && args.force) {
+          const refList = [...includedBy.map(s => `included by "${s}"`), ...boundLayouts.map(l => `bound to layout "${l}"`)];
+          warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
+        const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
+        await writer.removeFromProject('eventSheets', args.name);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'eventsheet',
+          action: 'deleted',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error deleting event sheet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── Tool 8: create_layout ─────────────────────────────────
 
   server.tool(
     'create_layout',
@@ -802,7 +878,7 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 8: add_instance_to_layout ────────────────────────
+  // ─── Tool 9: add_instance_to_layout ────────────────────────
 
   server.tool(
     'add_instance_to_layout',
@@ -908,7 +984,157 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 9: update_project_metadata ───────────────────────
+  // ─── Tool 10: delete_layout ──────────────────────────────────
+
+  server.tool(
+    'delete_layout',
+    'Delete a layout from the project (checks references first)',
+    {
+      name: z.string().max(200).describe('Layout name to delete'),
+      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
+    },
+    async (args) => {
+      try {
+        // Verify the layout exists
+        const existing = await reader.listLayouts();
+        if (!existing.includes(args.name)) {
+          const suggestions = reader.findNearestName(args.name, 'layouts');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_layouts to see all available names.';
+          return toolError(`Layout "${args.name}" not found.${hint}`);
+        }
+
+        // Block deletion of the startup layout unconditionally
+        const metadata = reader.getMetadata();
+        if (metadata.firstLayout === args.name) {
+          return toolError(`Cannot delete "${args.name}" — it is the project's startup layout (firstLayout). Change the startup layout in project settings first.`);
+        }
+
+        // Check references via project index
+        const index = await getProjectIndex(reader);
+
+        const warnings: string[] = [];
+
+        // Warn about bound event sheet (will become orphaned if no other layout uses it)
+        const boundSheet = index.layoutToEventSheet.get(args.name);
+        if (boundSheet) {
+          warnings.push(`Layout was bound to event sheet "${boundSheet}". The event sheet was NOT deleted.`);
+        }
+
+        // Warn about objects placed on this layout
+        const placedObjects: string[] = [];
+        for (const [objName, layouts] of index.objectToLayouts) {
+          if (layouts.includes(args.name)) {
+            placedObjects.push(objName);
+          }
+        }
+        if (placedObjects.length > 0) {
+          warnings.push(`Objects placed on this layout: ${placedObjects.join(', ')}. Instances were removed with the layout file.`);
+        }
+
+        if (!args.force && (placedObjects.length > 0 || boundSheet)) {
+          return toolResult({
+            success: false,
+            entity: args.name,
+            category: 'layout',
+            action: 'delete_blocked',
+            message: 'Layout has associated data. Use force=true to delete anyway.',
+            references: {
+              boundEventSheet: boundSheet || null,
+              placedObjects,
+            },
+          });
+        }
+
+        const subfolder = writer.getSubfolderForEntity('layouts', args.name);
+        const backupPath = await writer.deleteEntityFile('layouts', args.name, subfolder);
+        await writer.removeFromProject('layouts', args.name);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'layout',
+          action: 'deleted',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error deleting layout: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── Tool 11: update_layout ─────────────────────────────────
+
+  server.tool(
+    'update_layout',
+    'Update layout properties (event sheet binding, dimensions)',
+    {
+      name: z.string().max(200).describe('Layout name to update'),
+      eventSheet: z.string().max(200).optional().describe('New event sheet binding (validated for existence)'),
+      width: z.number().int().positive().optional().describe('New layout width in pixels'),
+      height: z.number().int().positive().optional().describe('New layout height in pixels'),
+    },
+    async (args) => {
+      try {
+        // Check at least one update is provided
+        if (args.eventSheet === undefined && args.width === undefined && args.height === undefined) {
+          return toolError('No updates provided. Specify at least one of: eventSheet, width, height.');
+        }
+
+        // Read existing layout
+        let layout: Record<string, unknown>;
+        try {
+          layout = await reader.readLayout(args.name) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.name, 'layouts');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_layouts to see all available names.';
+          return toolError(`Layout "${args.name}" not found.${hint}`);
+        }
+
+        const warnings: string[] = [];
+
+        // Validate and apply event sheet binding
+        if (args.eventSheet !== undefined) {
+          const sheets = await reader.listEventSheets();
+          if (!sheets.includes(args.eventSheet)) {
+            const suggestions = reader.findNearestName(args.eventSheet, 'eventsheets');
+            const hint = suggestions.length > 0
+              ? ` Did you mean: ${suggestions.join(', ')}?`
+              : ' Use list_eventsheets to see available sheets.';
+            return toolError(`Event sheet "${args.eventSheet}" does not exist.${hint}`);
+          }
+          layout.eventSheet = args.eventSheet;
+        }
+
+        // Apply dimension updates
+        if (args.width !== undefined) layout.width = args.width;
+        if (args.height !== undefined) layout.height = args.height;
+
+        // Write back
+        const subfolder = writer.getSubfolderForEntity('layouts', args.name);
+        const backupPath = await writer.writeEntityFile('layouts', args.name, layout, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'layout',
+          action: 'updated',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error updating layout: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── Tool 12: update_project_metadata ───────────────────────
 
   server.tool(
     'update_project_metadata',
@@ -947,7 +1173,7 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 10: add_animation_to_sprite ─────────────────────
+  // ─── Tool 13: add_animation_to_sprite ─────────────────────
 
   server.tool(
     'add_animation_to_sprite',
@@ -1045,7 +1271,7 @@ export function registerMutationTools(
     }
   );
 
-  // ─── Tool 11: update_animation_properties ─────────────────
+  // ─── Tool 14: update_animation_properties ─────────────────
 
   server.tool(
     'update_animation_properties',

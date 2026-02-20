@@ -2,6 +2,24 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [1.5.0] - 2026-02-21
+
+### Event Sheet & Layout Lifecycle
+
+3 new mutation tools for deleting event sheets/layouts and updating layout properties (total: 14 mutation tools).
+
+#### Added
+
+- **`delete_event_sheet`** — Delete event sheets with reference checking (included-by sheets, bound layouts); supports `force` flag to override
+- **`delete_layout`** — Delete layouts with reference checking (bound event sheets, placed objects); blocks deletion of the startup layout unconditionally; supports `force` flag
+- **`update_layout`** — Update layout properties: event sheet binding (validated), width, and height
+
+#### Closes
+
+- Issue #2: `delete_event_sheet`
+- Issue #3: `delete_layout`
+- Issue #4: `update_layout`
+
 ## [1.4.0] - 2026-02-19
 
 ### Phase 4: Event Blocks & Animation

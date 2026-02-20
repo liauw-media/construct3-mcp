@@ -290,6 +290,21 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 6. Inserts at position (`start`/`end`)
 7. Writes sheet back with backup
 
+### `delete_event_sheet`
+
+Delete an event sheet from the project.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Event sheet name to delete |
+| `force` | boolean | No | Delete even if referenced (default: false) |
+
+**Behavior:**
+- Checks for references: sheets that include this one, layouts bound to it
+- If referenced and `force=false`: returns the reference list and blocks
+- If referenced and `force=true`: deletes with warning (references NOT cleaned up)
+- Backs up the JSON file and removes from c3proj
+
 ### `create_layout`
 
 Create a new layout.
@@ -321,6 +336,35 @@ Place an object instance on a layout layer.
 - Blocks global-only objects (singleglobal-inst) from being placed
 - Auto-fills default instance properties for Sprite, Text, TiledBg, NinePatch
 - Warns when placing instances of unknown plugin types
+
+### `delete_layout`
+
+Delete a layout from the project.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Layout name to delete |
+| `force` | boolean | No | Delete even if referenced (default: false) |
+
+**Behavior:**
+- Blocks unconditionally if the layout is the project's startup layout (`firstLayout`)
+- Checks for bound event sheets and placed objects
+- If referenced and `force=false`: returns the reference list and blocks
+- If referenced and `force=true`: deletes with warning (references NOT cleaned up)
+- Backs up the JSON file and removes from c3proj
+
+### `update_layout`
+
+Update layout properties (event sheet binding, dimensions).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Layout name to update |
+| `eventSheet` | string | No | New event sheet binding (validated for existence) |
+| `width` | number | No | New layout width in pixels |
+| `height` | number | No | New layout height in pixels |
+
+At least one parameter must be provided.
 
 ### `update_project_metadata`
 
@@ -488,4 +532,4 @@ interface ReferenceCheckResult {
 
 ---
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-02-21
