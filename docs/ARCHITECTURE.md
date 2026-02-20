@@ -8,12 +8,12 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
                         MCP Protocol (stdio)
                               │
 ┌─────────────────────────────▼──────────────────────────────────┐
-│  Construct3 MCP Server (v1.4.0)                                │
+│  Construct3 MCP Server (v1.5.0)                                │
 │                                                                │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  MCP Protocol Layer                                      │  │
 │  │  Resources (7) · Query Tools (9) · Analysis (6)          │  │
-│  │  Mutations (11) · Prompts (6)                            │  │
+│  │  Mutations (14) · Prompts (6)                            │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
 │  ┌──────────▼──────────────────────────────────────────────┐   │
@@ -181,7 +181,7 @@ The cross-reference index (`ProjectIndex`) is cached and reset when writes occur
 | Resources | `resources/project.ts`, `resources/docs.ts` | 7 | Read-only data access |
 | Query Tools | `tools/query.ts` | 9 | List, search, get details |
 | Analysis Tools | `tools/analysis.ts` | 6 | Deep analysis and visualization |
-| Mutation Tools | `tools/mutations.ts` | 11 | Safe create, update, delete |
+| Mutation Tools | `tools/mutations.ts` | 14 | Safe create, update, delete |
 | Prompts | `prompts/workflows.ts` | 6 | Workflow templates |
 
 ## Data Flow
@@ -267,4 +267,4 @@ The mutation tools provide extra context on errors:
 
 ---
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-02-21

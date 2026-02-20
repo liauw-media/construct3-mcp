@@ -216,6 +216,68 @@ Real-world examples of using the Construct3 MCP Server with Claude.
 4. Auto-fills Sprite default instance properties
 5. Adds instance to the layer's instances array
 
+### Delete an Event Sheet
+
+**Query:**
+> "Delete the old MenuLogic event sheet"
+
+**Claude uses**: `delete_event_sheet` with `name: "MenuLogic"`
+
+**If referenced** (e.g., included by another sheet or bound to a layout):
+```json
+{
+  "success": false,
+  "action": "delete_blocked",
+  "message": "Event sheet is still referenced. Use force=true to delete anyway.",
+  "references": {
+    "includedBy": ["MainSheet"],
+    "boundLayouts": ["Menu"]
+  }
+}
+```
+
+**Force delete:**
+> "Force delete MenuLogic even though it's referenced"
+
+Returns success with a warning that references were NOT cleaned up.
+
+### Delete a Layout
+
+**Query:**
+> "Delete the LevelSelect layout"
+
+**Claude uses**: `delete_layout` with `name: "LevelSelect"`
+
+**If it's the startup layout:**
+Returns an error — the startup layout cannot be deleted.
+
+**If it has placed objects or a bound event sheet:**
+```json
+{
+  "success": false,
+  "action": "delete_blocked",
+  "references": {
+    "boundEventSheet": "MenuLogic",
+    "placedObjects": ["Enemy", "ScoreDisplay"]
+  }
+}
+```
+
+### Update Layout Properties
+
+**Query:**
+> "Change the Game layout to use the CombatSheet event sheet and set its size to 3840x2160"
+
+**Claude uses**: `update_layout` with:
+```json
+{
+  "name": "Game",
+  "eventSheet": "CombatSheet",
+  "width": 3840,
+  "height": 2160
+}
+```
+
 ### Delete an Object (with reference checking)
 
 **Query:**
@@ -505,4 +567,4 @@ Returns success with a warning that references were NOT cleaned up.
 
 ---
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-02-21

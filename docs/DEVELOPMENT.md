@@ -60,7 +60,7 @@ construct3-mcp/
 │   ├── tools/                      # MCP tool handlers
 │   │   ├── query.ts                # Query tools (9)
 │   │   ├── analysis.ts             # Analysis tools (6)
-│   │   └── mutations.ts            # Mutation tools (11)
+│   │   └── mutations.ts            # Mutation tools (14)
 │   └── prompts/                    # MCP prompt handlers
 │       └── workflows.ts            # Workflow prompts (6)
 ├── docs/                           # Documentation
@@ -179,6 +179,10 @@ Currently tested manually against real C3 projects. To test:
 - [ ] `create_layout` with custom layers
 - [ ] `add_instance_to_layout`
 - [ ] `delete_object` with and without force
+- [ ] `delete_event_sheet` with and without force
+- [ ] `delete_layout` on non-first layout
+- [ ] `delete_layout` on first layout (must block)
+- [ ] `update_layout` changing eventSheet, width, height
 - [ ] `update_project_metadata`
 - [ ] `add_event_block` with conditions, actions, and group path
 - [ ] `add_animation_to_sprite` on an existing Sprite
@@ -212,4 +216,4 @@ Currently tested manually against real C3 projects. To test:
 
 ---
 
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-02-21

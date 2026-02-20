@@ -109,8 +109,11 @@ node dist/index.js /path/to/your/project.c3proj
 | `create_event_sheet` | Create a new event sheet with optional includes |
 | `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet |
 | `add_event_block` | Add a block event with conditions + actions (gameplay logic) |
+| `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
 | `create_layout` | Create a new layout with configurable layers |
 | `add_instance_to_layout` | Place an object instance on a layout layer |
+| `delete_layout` | Delete a layout (blocks startup layout, checks references) |
+| `update_layout` | Update layout event sheet binding and dimensions |
 | `update_project_metadata` | Update project name, version, author, or description |
 | `add_animation_to_sprite` | Add a new animation to a Sprite object |
 | `update_animation_properties` | Update animation speed, looping, ping-pong on a Sprite |
@@ -138,7 +141,7 @@ All mutation tools follow a strict safety protocol:
 6. **Cache Invalidation** — All reader caches and indexes are cleared so subsequent reads see fresh data.
 
 Additional safeguards:
-- **Reference checking** — `delete_object` scans all event sheets, layouts, and families for references before deleting.
+- **Reference checking** — `delete_object`, `delete_event_sheet`, and `delete_layout` scan for references before deleting.
 - **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error.
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
@@ -297,7 +300,7 @@ construct3-mcp/
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
 │   │   ├── analysis.ts             # 6 analysis tools
-│   │   └── mutations.ts            # 11 mutation tools
+│   │   └── mutations.ts            # 14 mutation tools
 │   └── prompts/
 │       └── workflows.ts            # 6 workflow prompts
 ├── dist/                           # Compiled JavaScript (generated)
