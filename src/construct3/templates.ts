@@ -398,14 +398,17 @@ export function createBlockEvent(
   conditions: Array<Record<string, unknown>>,
   actions: Array<Record<string, unknown>>,
   disabled?: boolean,
+  children?: Array<Record<string, unknown>>,
+  isElse?: boolean,
 ): Record<string, unknown> {
   return {
     eventType: 'block',
     conditions,
     actions,
-    children: [],
+    children: children ?? [],
     sid,
     ...(disabled ? { disabled: true } : {}),
+    ...(isElse ? { isElse: true } : {}),
   };
 }
 

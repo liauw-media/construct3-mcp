@@ -14,11 +14,16 @@ All notable changes to the Construct3 MCP Server are documented here.
 - **`delete_layout`** — Delete layouts with reference checking (bound event sheets, placed objects); blocks deletion of the startup layout unconditionally; supports `force` flag
 - **`update_layout`** — Update layout properties: event sheet binding (validated), width, and height
 
+#### Enhanced
+
+- **`add_event_block`** — Now supports sub-events (`children`), else blocks (`isElse`), OR conditions (`isOr`), and per-action disabling (`disabled` on actions). Recursive child building with safety limits (max depth 5, max 50 total events). Object class validation covers the entire event tree.
+
 #### Closes
 
 - Issue #2: `delete_event_sheet`
 - Issue #3: `delete_layout`
 - Issue #4: `update_layout`
+- Issue #7: `add_event_block` sub-events, else, OR, per-action disabled
 
 ## [1.4.0] - 2026-02-19
 

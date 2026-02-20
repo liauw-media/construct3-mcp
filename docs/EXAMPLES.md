@@ -439,6 +439,130 @@ Returns success with a warning that references were NOT cleaned up.
 }
 ```
 
+### Sub-Event (Nested Block)
+
+**Query:**
+> "When the player collides with an Enemy, check if the enemy's health is <= 0 as a sub-event and destroy it"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "CombatSheet",
+  "conditions": [
+    {
+      "id": "on-collision-with-another-object",
+      "objectClass": "Player",
+      "parameters": { "object": "Enemy" }
+    }
+  ],
+  "actions": [
+    {
+      "id": "subtract-from-instvar",
+      "objectClass": "Enemy",
+      "parameters": { "variable": "health", "value": "10" }
+    }
+  ],
+  "children": [
+    {
+      "conditions": [
+        {
+          "id": "compare-instance-variable",
+          "objectClass": "Enemy",
+          "parameters": { "variable": "health", "comparison": "≤", "value": "0" }
+        }
+      ],
+      "actions": [
+        { "id": "destroy", "objectClass": "Enemy" }
+      ]
+    }
+  ]
+}
+```
+
+### Else Block
+
+**Query:**
+> "If score >= 100, show the WinText. Otherwise, show the TryAgainText."
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "GameSheet",
+  "conditions": [
+    {
+      "id": "compare-instance-variable",
+      "objectClass": "Player",
+      "parameters": { "variable": "score", "comparison": "≥", "value": "100" }
+    }
+  ],
+  "actions": [
+    { "id": "set-visible", "objectClass": "WinText", "parameters": { "visible": true } }
+  ],
+  "children": [
+    {
+      "isElse": true,
+      "actions": [
+        { "id": "set-visible", "objectClass": "TryAgainText", "parameters": { "visible": true } }
+      ]
+    }
+  ]
+}
+```
+
+### OR Condition
+
+**Query:**
+> "When the player presses Space OR presses the up arrow, jump"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "PlayerControls",
+  "conditions": [
+    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": "32" } },
+    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": "38" }, "isOr": true }
+  ],
+  "actions": [
+    {
+      "id": "simulate-control",
+      "objectClass": "Player",
+      "behavior-type": "Platform",
+      "parameters": { "control": "jump" }
+    }
+  ]
+}
+```
+
+### Disabled Action
+
+**Query:**
+> "On start of layout, set health to 100 and add a disabled debug action that sets health to 999"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "GameSheet",
+  "conditions": [
+    { "id": "on-start-of-layout", "objectClass": "System" }
+  ],
+  "actions": [
+    {
+      "id": "set-instvar-value",
+      "objectClass": "Player",
+      "parameters": { "variable": "health", "value": "100" }
+    },
+    {
+      "id": "set-instvar-value",
+      "objectClass": "Player",
+      "parameters": { "variable": "health", "value": "999" },
+      "disabled": true
+    }
+  ]
+}
+```
+
+> **Note:** Per-action `disabled` applies to standard actions only. The disabled action exists in the event sheet but won't execute — useful for debugging or temporarily toggling actions.
+
 ---
 
 ## Animation Management
