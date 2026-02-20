@@ -1,6 +1,6 @@
 # Construct3 MCP Server
 
-> A Model Context Protocol (MCP) server that enables AI assistants like Claude to safely read, analyze, and modify Construct 3 game engine projects.
+> A Model Context Protocol (MCP) server that enables AI assistants (Claude, Cursor, Antigravity, and any MCP-compatible tool) to safely read, analyze, and modify Construct 3 game engine projects.
 
 > **Work in Progress** — Phases 1-4 are complete and functional. Phase 5 (advanced features) is in development. See the [Roadmap](#roadmap) for details.
 
@@ -21,7 +21,7 @@ npm run build
 node dist/index.js /path/to/your/project.c3proj
 ```
 
-**Add to Claude Code** (auto-detects `.c3proj` in your working directory):
+**Add to your MCP config** (Claude Code, Cursor, Antigravity — [see Usage](#usage) for config file locations):
 ```json
 {
   "mcpServers": {
@@ -178,10 +178,9 @@ This compiles TypeScript to JavaScript in the `dist/` folder.
 
 ## Usage
 
-### With Claude Code
+All MCP-compatible tools use the same JSON configuration format. The server auto-detects `.c3proj` in your working directory, or you can pass an explicit project path.
 
-1. Add the Construct3 MCP server to your config (no project path needed — it auto-detects `.c3proj` in your working directory):
-
+**MCP config** (same for all tools):
 ```json
 {
   "mcpServers": {
@@ -193,20 +192,42 @@ This compiles TypeScript to JavaScript in the `dist/` folder.
 }
 ```
 
-2. Open Claude Code inside any Construct 3 project folder
-3. The MCP tools appear automatically
-
-You can also pass an explicit path if needed:
+To target a specific project instead of auto-detecting:
 ```json
-"args": ["/path/to/construct3-mcp/dist/index.js", "/path/to/specific-project"]
+"args": ["/path/to/construct3-mcp/dist/index.js", "/path/to/your-project"]
 ```
+
+### With Claude Code
+
+Add the config above to your project's `.mcp.json` or global `~/.claude/mcp.json`.
+
+1. Open Claude Code inside any Construct 3 project folder
+2. The MCP tools appear automatically
 
 ### With Claude Desktop
 
-**macOS**: Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: Edit `%APPDATA%\Claude\claude_desktop_config.json`
+Add the config to your Claude Desktop settings file:
 
-Same config as above. Note: Claude Desktop doesn't change working directory per-project, so you'll likely want to pass the project path explicitly in `args`.
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Note: Claude Desktop doesn't change working directory per-project, so pass the project path explicitly in `args`.
+
+### With Cursor
+
+Add the config to `.cursor/mcp.json` in your project root (project-specific) or `~/.cursor/mcp.json` (global).
+
+1. Restart Cursor after adding or modifying the config
+2. The Construct 3 tools appear in Cursor's AI agent
+
+### With Antigravity
+
+Add the config to Antigravity's MCP configuration:
+
+- **Via UI**: Click the `...` menu in the Agent panel → **MCP Servers** → **Manage MCP Servers** → **View raw config**
+- **Direct edit**: `~/.gemini/antigravity/mcp_config.json`
+
+Note: Antigravity doesn't set a working directory per-project, so pass the project path explicitly in `args`.
 
 ### Standalone Testing
 
