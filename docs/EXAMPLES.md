@@ -561,7 +561,7 @@ Returns success with a warning that references were NOT cleaned up.
 }
 ```
 
-> **Note:** Per-action `disabled` applies to standard actions only. The disabled action exists in the event sheet but won't execute — useful for debugging or temporarily toggling actions.
+> **Note:** Per-action `disabled` works on both standard actions and script actions. The disabled action exists in the event sheet but won't execute — useful for debugging or temporarily toggling actions.
 
 ---
 
