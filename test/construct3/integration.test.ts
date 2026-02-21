@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, readFile, stat, rm } from 'fs/promises';
+import { mkdtemp, cp, readFile, writeFile, stat, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
@@ -109,8 +109,7 @@ describe('Construct3ProjectReader (integration)', () => {
     const content = await readFile(projectPath, 'utf-8');
     const project = JSON.parse(content);
     project.name = 'RenamedProject';
-    const { writeFile: wf } = await import('fs/promises');
-    await wf(projectPath, JSON.stringify(project, null, '\t'), 'utf-8');
+    await writeFile(projectPath, JSON.stringify(project, null, '\t'), 'utf-8');
 
     await reader.reloadProject();
     expect(reader.getMetadata().name).toBe('RenamedProject');
@@ -313,8 +312,7 @@ describe('Project lock (mutex)', () => {
     // First call: force an error by trying to add to a nonexistent category
     // We'll use updateProjectProperties with a valid key but sabotage the file
     const projectPath = join(tmpDir, 'project.c3proj');
-    const { writeFile: wf } = await import('fs/promises');
-    await wf(projectPath, 'NOT JSON', 'utf-8');
+    await writeFile(projectPath, 'NOT JSON', 'utf-8');
 
     // This should fail (can't parse the file)
     await expect(writer.addToProject('objectTypes', 'WillFail')).rejects.toThrow();
@@ -328,6 +326,21 @@ describe('Project lock (mutex)', () => {
     const content = await readFile(projectPath, 'utf-8');
     const project = JSON.parse(content);
     expect(project.objectTypes.items).toContain('AfterError');
+  });
+
+  it('concurrent ensureAddonRegistered for same addon produces exactly one entry', async () => {
+    // AJAX is a known Scirra plugin not in the fixture's usedAddons
+    await Promise.all([
+      writer.ensureAddonRegistered('plugin', 'AJAX'),
+      writer.ensureAddonRegistered('plugin', 'AJAX'),
+    ]);
+
+    const content = await readFile(join(tmpDir, 'project.c3proj'), 'utf-8');
+    const project = JSON.parse(content);
+    const ajaxEntries = project.usedAddons.filter(
+      (a: { type: string; id: string }) => a.type === 'plugin' && a.id === 'AJAX',
+    );
+    expect(ajaxEntries).toHaveLength(1);
   });
 });
 
