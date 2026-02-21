@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult } from '../construct3/types.js';
+import type { WriteResult, Layout } from '../construct3/types.js';
 import { validateName, toolResult, toolError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
@@ -116,9 +116,9 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return toolError(`Object type "${args.objectType}" does not exist. Use list_objects to see available objects.`);
         }
 
-        let layout: Record<string, unknown>;
+        let layout: Layout;
         try {
-          layout = await reader.readLayout(args.layoutName) as unknown as Record<string, unknown>;
+          layout = await reader.readLayout(args.layoutName);
         } catch {
           const suggestions = reader.findNearestName(args.layoutName, 'layouts');
           const hint = suggestions.length > 0
@@ -132,8 +132,8 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         const warnings: string[] = [];
 
         if (isNonworld) {
-          const nonworldInstances = layout['nonworld-instances'] as Array<Record<string, unknown>>;
-          nonworldInstances.push({
+          if (!layout['nonworld-instances']) layout['nonworld-instances'] = [];
+          layout['nonworld-instances'].push({
             type: args.objectType,
             properties: args.properties ?? {},
             uid,
@@ -144,10 +144,9 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           });
           warnings.push(`"${args.objectType}" is a global (nonworld) object — placed in nonworld-instances instead of on a layer. Layer and position parameters were ignored.`);
         } else {
-          const layers = layout.layers as Array<Record<string, unknown>>;
-          const targetLayer = layers.find(l => l.name === args.layerName);
+          const targetLayer = layout.layers.find(l => l.name === args.layerName);
           if (!targetLayer) {
-            const layerNames = layers.map(l => l.name).join(', ');
+            const layerNames = layout.layers.map(l => l.name).join(', ');
             return toolError(`Layer "${args.layerName}" not found in layout "${args.layoutName}". Available layers: ${layerNames}`);
           }
 
@@ -161,8 +160,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
           const instance = createInstance(args.objectType, uid, sid, args.x, args.y, args.width, args.height, pluginProps);
 
-          const instances = targetLayer.instances as Array<Record<string, unknown>>;
-          instances.push(instance);
+          targetLayer.instances.push(instance);
         }
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
@@ -285,9 +283,9 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         }
 
         // Read existing layout
-        let layout: Record<string, unknown>;
+        let layout: Layout;
         try {
-          layout = await reader.readLayout(args.name) as unknown as Record<string, unknown>;
+          layout = await reader.readLayout(args.name);
         } catch {
           const suggestions = reader.findNearestName(args.name, 'layouts');
           const hint = suggestions.length > 0

@@ -28,10 +28,6 @@ export function validateName(name: string): void {
   if (!/^[a-zA-Z_][a-zA-Z0-9_ ]*$/.test(name)) {
     throw new Error('Name must start with a letter or underscore and contain only alphanumeric characters, underscores, and spaces');
   }
-  // Path traversal check
-  if (name.includes('..') || name.includes('/') || name.includes('\\')) {
-    throw new Error('Name contains invalid path characters');
-  }
   // Reserved name check
   if (RESERVED_NAMES.has(name)) {
     throw new Error(`"${name}" is a reserved name in Construct 3 and cannot be used`);

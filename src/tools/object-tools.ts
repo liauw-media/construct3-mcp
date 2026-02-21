@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult } from '../construct3/types.js';
+import type { WriteResult, ObjectType } from '../construct3/types.js';
 import { validateName, validateSubfolder, toolResult, toolError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
@@ -48,7 +48,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const sid = await idGen.generateSid(reader);
         const isSingleglobal = GLOBAL_PLUGINS.has(args.pluginId);
         const isNonworldGlobal = NONWORLD_GLOBAL_PLUGINS.has(args.pluginId);
-        let data: Record<string, unknown>;
+        let data: ObjectType;
         let uid: number | undefined;
 
         if (isSingleglobal || (args.isGlobal && !isNonworldGlobal)) {
@@ -113,10 +113,15 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
     },
     async (args) => {
       try {
+        // Check at least one update is provided
+        if (args.isGlobal === undefined && !args.addVariables?.length && !args.removeVariables?.length && !args.addBehaviors?.length && !args.removeBehaviors?.length) {
+          return toolError('No updates provided. Specify at least one of: isGlobal, addVariables, removeVariables, addBehaviors, removeBehaviors.');
+        }
+
         // Read existing object — preserves ALL original fields
-        let obj: Record<string, unknown>;
+        let obj: ObjectType;
         try {
-          obj = await reader.readObjectType(args.name) as unknown as Record<string, unknown>;
+          obj = await reader.readObjectType(args.name);
         } catch {
           const suggestions = reader.findNearestName(args.name, 'objects');
           const hint = suggestions.length > 0
