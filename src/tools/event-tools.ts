@@ -57,7 +57,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         const sid = await idGen.generateSid(reader);
-        const data = createEmptySheet(args.name, sid) as { events: Record<string, unknown>[] };
+        const data = createEmptySheet(args.name, sid);
 
         // Add include events
         if (args.includeSheets) {

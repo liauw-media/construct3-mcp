@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult, AnimationFrame } from '../construct3/types.js';
+import type { WriteResult, ObjectType, AnimationFrame } from '../construct3/types.js';
 import { toolResult, toolError } from './shared.js';
 import { createAnimation, createAnimationFrame } from '../construct3/templates.js';
 
@@ -28,9 +28,9 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
     async (args) => {
       try {
         // Read existing object
-        let obj: Record<string, unknown>;
+        let obj: ObjectType;
         try {
-          obj = await reader.readObjectType(args.objectName) as unknown as Record<string, unknown>;
+          obj = await reader.readObjectType(args.objectName);
         } catch {
           const suggestions = reader.findNearestName(args.objectName, 'objects');
           const hint = suggestions.length > 0
@@ -45,11 +45,10 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         }
 
         // Navigate to animations.items
-        const animations = obj.animations as Record<string, unknown> | undefined;
-        if (!animations || !Array.isArray(animations.items)) {
+        if (!obj.animations || !Array.isArray(obj.animations.items)) {
           return toolError(`Object "${args.objectName}" has no animations structure. It may be corrupted.`);
         }
-        const animItems = animations.items as Array<Record<string, unknown>>;
+        const animItems = obj.animations.items;
 
         // Check for duplicate animation name
         if (animItems.some(a => a.name === args.animationName)) {
@@ -60,10 +59,10 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         let frameWidth = args.frameWidth ?? 100;
         let frameHeight = args.frameHeight ?? 100;
         if ((!args.frameWidth || !args.frameHeight) && animItems.length > 0) {
-          const existingFrames = animItems[0].frames as Array<Record<string, unknown>> | undefined;
-          if (existingFrames && existingFrames.length > 0) {
-            if (!args.frameWidth) frameWidth = (existingFrames[0].width as number) ?? 100;
-            if (!args.frameHeight) frameHeight = (existingFrames[0].height as number) ?? 100;
+          const existingFrames = animItems[0].frames;
+          if (existingFrames.length > 0) {
+            if (!args.frameWidth) frameWidth = existingFrames[0].width ?? 100;
+            if (!args.frameHeight) frameHeight = existingFrames[0].height ?? 100;
           }
         }
 
@@ -123,9 +122,9 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
     async (args) => {
       try {
         // Read existing object
-        let obj: Record<string, unknown>;
+        let obj: ObjectType;
         try {
-          obj = await reader.readObjectType(args.objectName) as unknown as Record<string, unknown>;
+          obj = await reader.readObjectType(args.objectName);
         } catch {
           const suggestions = reader.findNearestName(args.objectName, 'objects');
           const hint = suggestions.length > 0
@@ -140,16 +139,15 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         }
 
         // Navigate to animations.items
-        const animations = obj.animations as Record<string, unknown> | undefined;
-        if (!animations || !Array.isArray(animations.items)) {
+        if (!obj.animations || !Array.isArray(obj.animations.items)) {
           return toolError(`Object "${args.objectName}" has no animations structure.`);
         }
-        const animItems = animations.items as Array<Record<string, unknown>>;
+        const animItems = obj.animations.items;
 
         // Find the target animation
         const anim = animItems.find(a => a.name === args.animationName);
         if (!anim) {
-          const availableNames = animItems.map(a => a.name as string).join(', ');
+          const availableNames = animItems.map(a => a.name).join(', ');
           return toolError(`Animation "${args.animationName}" not found on "${args.objectName}". Available animations: ${availableNames}`);
         }
 

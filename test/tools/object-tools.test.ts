@@ -154,9 +154,24 @@ describe('update_object_properties', () => {
     expect(data.warnings[0]).toContain('already exists');
   });
 
+  it('errors with no updates', async () => {
+    const { server } = setup({
+      objects: new Map([['Player', {
+        name: 'Player', 'plugin-id': 'Sprite', sid: 1,
+        instanceVariables: [], behaviorTypes: [],
+      }]]),
+    });
+    const result = await server.callTool('update_object_properties', { name: 'Player' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('No updates');
+  });
+
   it('errors on nonexistent object', async () => {
     const { server } = setup();
-    const result = await server.callTool('update_object_properties', { name: 'Ghost' });
+    const result = await server.callTool('update_object_properties', {
+      name: 'Ghost',
+      addVariables: [{ name: 'x', type: 'number' }],
+    });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not found');
   });
