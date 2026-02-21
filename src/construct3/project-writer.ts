@@ -7,7 +7,7 @@ import { readFile, writeFile, copyFile, unlink, mkdir, stat } from 'fs/promises'
 import { dirname, resolve, relative, isAbsolute } from 'path';
 import type { Construct3ProjectReader } from './project-reader.js';
 import type { IdGenerator } from './id-generator.js';
-import type { Addon, Subfolder } from './types.js';
+import type { Addon, Subfolder, ProjectProperties } from './types.js';
 import { resetProjectIndex } from './analyzers/index-builder.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from './templates.js';
 
@@ -17,18 +17,24 @@ const MAX_WRITE_SIZE = 5 * 1024 * 1024;
 /** Keys allowed at the project root level (outside properties) */
 const ALLOWED_TOP_LEVEL = new Set(['name']);
 
-/** Keys allowed inside project.properties (matches ProjectProperties interface) */
-const ALLOWED_PROPERTIES = new Set([
-  'description', 'version', 'autoIncrementVersion', 'author', 'authorEmail',
-  'authorWebsite', 'appId', 'pixelRounding', 'zAxisScale', 'fov',
-  'useLoaderLayout', 'fullscreenMode', 'fullscreenQuality', 'viewportFit',
-  'backgroundColor', 'splashColor', 'useThemeColor', 'themeColor',
-  'orientations', 'webgpu', 'gpuPreference', 'scriptsType', 'framerateMode',
-  'sampling', 'downscaling', 'renderingMode', 'anisotropicFiltering',
-  'zNear', 'zFar', 'maxSpriteSheetSize', 'loaderStyle', 'preloadSounds',
-  'cordovaiOSScheme', 'cordovaAndroidScheme', 'exportFileStructure',
-  'uidAllocationMode',
-]);
+/**
+ * Compile-time enforced map of ProjectProperties keys.
+ * If a key is added/removed from the interface, TypeScript will error here.
+ */
+const PROPERTIES_KEY_MAP: Record<keyof ProjectProperties, true> = {
+  description: true, version: true, autoIncrementVersion: true,
+  author: true, authorEmail: true, authorWebsite: true, appId: true,
+  pixelRounding: true, zAxisScale: true, fov: true, useLoaderLayout: true,
+  fullscreenMode: true, fullscreenQuality: true, viewportFit: true,
+  backgroundColor: true, splashColor: true, useThemeColor: true,
+  themeColor: true, orientations: true, webgpu: true, gpuPreference: true,
+  scriptsType: true, framerateMode: true, sampling: true, downscaling: true,
+  renderingMode: true, anisotropicFiltering: true, zNear: true, zFar: true,
+  maxSpriteSheetSize: true, loaderStyle: true, preloadSounds: true,
+  cordovaiOSScheme: true, cordovaAndroidScheme: true,
+  exportFileStructure: true, uidAllocationMode: true,
+};
+const ALLOWED_PROPERTIES = new Set(Object.keys(PROPERTIES_KEY_MAP));
 
 export class Construct3ProjectWriter {
   private projectLock: Promise<void> = Promise.resolve();
