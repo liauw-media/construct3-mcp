@@ -338,6 +338,10 @@ export class Construct3ProjectWriter {
     }
 
     return this.withProjectLock(async () => {
+      // Re-check under lock — another concurrent call may have registered it
+      const freshAddons = this.reader.getUsedAddons();
+      if (freshAddons.some(a => a.type === type && a.id === id)) return undefined;
+
       // Auto-register the addon in c3proj
       const projectPath = this.reader.getProjectPath();
       await this.createBackup(projectPath);

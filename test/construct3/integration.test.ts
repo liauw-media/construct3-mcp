@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, readFile, stat } from 'fs/promises';
+import { mkdtemp, cp, readFile, stat, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
@@ -30,6 +30,10 @@ describe('Construct3ProjectReader (integration)', () => {
     tmpDir = await createTempProject();
     reader = new Construct3ProjectReader(join(tmpDir, 'project.c3proj'));
     await reader.loadProject();
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
   });
 
   it('loads project and returns valid metadata', () => {
@@ -127,6 +131,10 @@ describe('Construct3ProjectWriter (integration)', () => {
     await reader.loadProject();
     idGen = new IdGenerator();
     writer = new Construct3ProjectWriter(reader, idGen);
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
   });
 
   it('writeEntityFile creates backup and writes valid JSON', async () => {
@@ -232,6 +240,10 @@ describe('IdGenerator (integration)', () => {
     idGen = new IdGenerator();
   });
 
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
   it('initializes from fixture and collects existing SIDs', async () => {
     const sid = await idGen.generateSid(reader);
     // Should be a 15-digit number
@@ -280,6 +292,10 @@ describe('Project lock (mutex)', () => {
     writer = new Construct3ProjectWriter(reader, idGen);
   });
 
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
   it('two concurrent addToProject calls both succeed (no lost writes)', async () => {
     // Fire two concurrent adds
     await Promise.all([
@@ -291,6 +307,27 @@ describe('Project lock (mutex)', () => {
     const project = JSON.parse(content);
     expect(project.objectTypes.items).toContain('EnemyA');
     expect(project.objectTypes.items).toContain('EnemyB');
+  });
+
+  it('error inside lock releases it so next call proceeds', async () => {
+    // First call: force an error by trying to add to a nonexistent category
+    // We'll use updateProjectProperties with a valid key but sabotage the file
+    const projectPath = join(tmpDir, 'project.c3proj');
+    const { writeFile: wf } = await import('fs/promises');
+    await wf(projectPath, 'NOT JSON', 'utf-8');
+
+    // This should fail (can't parse the file)
+    await expect(writer.addToProject('objectTypes', 'WillFail')).rejects.toThrow();
+
+    // Restore valid project file so next call can succeed
+    await cp(join(FIXTURE_DIR, 'project.c3proj'), projectPath);
+    await reader.reloadProject();
+
+    // Next call should succeed — lock was released despite the error
+    await writer.addToProject('objectTypes', 'AfterError');
+    const content = await readFile(projectPath, 'utf-8');
+    const project = JSON.parse(content);
+    expect(project.objectTypes.items).toContain('AfterError');
   });
 });
 
@@ -308,6 +345,10 @@ describe('Round-trip write→read', () => {
     await reader.loadProject();
     idGen = new IdGenerator();
     writer = new Construct3ProjectWriter(reader, idGen);
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
   });
 
   it('write entity then read back returns matching data', async () => {
