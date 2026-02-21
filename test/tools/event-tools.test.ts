@@ -827,4 +827,119 @@ describe('update_event_block', () => {
     const action = (events[0].actions as Record<string, unknown>[])[0];
     expect(action.disabled).toBe(true);
   });
+
+  it('deduplicates removal indices (does not double-splice)', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [
+              { id: 'a', objectClass: 'System', sid: 20 },
+              { id: 'b', objectClass: 'System', sid: 21 },
+              { id: 'c', objectClass: 'System', sid: 22 },
+            ],
+          },
+        ],
+      }]]),
+    });
+    // Pass duplicate index — should only remove ONE action, not two
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeActionIndices: [1, 1],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const actions = events[0].actions as Record<string, unknown>[];
+    expect(actions).toHaveLength(2);
+    expect(actions[0].id).toBe('a');
+    expect(actions[1].id).toBe('c');
+  });
+
+  it('deduplicates condition removal indices', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [
+              { id: 'a', objectClass: 'System', sid: 10 },
+              { id: 'b', objectClass: 'System', sid: 11 },
+              { id: 'c', objectClass: 'System', sid: 12 },
+            ],
+            actions: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeConditionIndices: [0, 0],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const conditions = events[0].conditions as Record<string, unknown>[];
+    expect(conditions).toHaveLength(2);
+    expect(conditions[0].id).toBe('b');
+    expect(conditions[1].id).toBe('c');
+  });
+
+  it('warns when all conditions are removed', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'a', objectClass: 'System', sid: 10 }],
+            actions: [{ id: 'b', objectClass: 'System', sid: 20 }],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeConditionIndices: [0],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeDefined();
+    expect(data.warnings.some((w: string) => w.includes('unconditionally'))).toBe(true);
+  });
+
+  it('does not falsely warn when removing all conditions but adding new ones', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'a', objectClass: 'System', sid: 10 }],
+            actions: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeConditionIndices: [0],
+      addConditions: [{ id: 'every-tick', objectClass: 'System' }],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    // Should NOT warn about unconditional — we added a replacement condition
+    const hasUnconditionalWarning = data.warnings?.some((w: string) => w.includes('unconditionally')) ?? false;
+    expect(hasUnconditionalWarning).toBe(false);
+  });
 });
