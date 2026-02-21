@@ -110,8 +110,10 @@ node dist/index.js /path/to/your/project.c3proj
 | `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet |
 | `add_event_block` | Add a block event with conditions + actions (gameplay logic) |
 | `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
+| `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
+| `update_event_block` | Update an existing block: modify/add/remove actions and conditions |
 | `create_layout` | Create a new layout with configurable layers |
-| `add_instance_to_layout` | Place an object instance on a layout layer |
+| `add_instance_to_layout` | Place an object instance on a layout layer with full property control |
 | `delete_layout` | Delete a layout (blocks startup layout, checks references) |
 | `update_layout` | Update layout event sheet binding and dimensions |
 | `update_project_metadata` | Update project name, version, author, or description |
@@ -300,7 +302,13 @@ construct3-mcp/
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
 │   │   ├── analysis.ts             # 6 analysis tools
-│   │   └── mutations.ts            # 14 mutation tools
+│   │   ├── shared.ts               # Shared validation, error helpers
+│   │   ├── event-tools.ts          # Event sheet mutation tools
+│   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators
+│   │   ├── layout-tools.ts         # Layout mutation tools
+│   │   ├── object-tools.ts         # Object mutation tools
+│   │   ├── animation-tools.ts      # Animation mutation tools
+│   │   └── project-tools.ts        # Project metadata tools
 │   └── prompts/
 │       └── workflows.ts            # 6 workflow prompts
 ├── dist/                           # Compiled JavaScript (generated)
@@ -379,7 +387,15 @@ We welcome contributions! Here's how to get started:
 - [x] Animation management (add/update animations on Sprites)
 - [x] Object class validation against project entities
 
-### Phase 5: Advanced Features
+### Phase 5: Event & Layout Operations ✅
+- [x] Delete events from sheets by SID or include name (dry-run, force, function caller checking)
+- [x] Update existing event blocks (modify/add/remove conditions and actions)
+- [x] Delete layouts (with reference checking, startup layout protection)
+- [x] Update layout properties (event sheet binding, dimensions)
+- [x] Full instance property overrides (angle, color, instanceVariables, behaviors, tags, etc.)
+- [x] 192 tests, type-safe templates, domain-split tool modules
+
+### Phase 6: Advanced Features
 - [ ] Support for .c3p (zipped) projects
 - [ ] Rename with reference updates (dry-run preview)
 - [ ] Bulk operations

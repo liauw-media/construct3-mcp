@@ -320,6 +320,58 @@ Delete an event sheet from the project.
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
 - Backs up the JSON file and removes from c3proj
 
+### `delete_event_from_sheet`
+
+Delete an event from an event sheet by SID or include name.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sheetName` | string | Yes | Target event sheet |
+| `sid` | number | No* | SID of the event to delete (block, group, variable, function) |
+| `includeSheet` | string | No* | For removing includes: the included sheet name |
+| `dryRun` | boolean | No | Preview what would be deleted without deleting (default: false) |
+| `force` | boolean | No | Delete function-blocks even if they have callers (default: false) |
+
+*Exactly one of `sid` or `includeSheet` must be provided.
+
+**Behavior:**
+- **SID deletion**: Finds the event anywhere in the tree (including nested inside groups) using iterative traversal. Reports children count for groups, checks function callers for function-blocks.
+- **Include deletion**: Finds and removes the include event by sheet name. Lists current includes in error messages.
+- **Dry run**: Returns a preview of what would be deleted without writing changes.
+- **Function safety**: Blocks deletion of function-blocks that have callers (unless `force=true`).
+- Error messages include a navigable summary of top-level events with their types and SIDs.
+
+### `update_event_block`
+
+Update an existing block event — modify action parameters, add/remove actions or conditions, toggle disabled state.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sheetName` | string | Yes | Target event sheet |
+| `sid` | number | Yes | SID of the block event to update |
+| `disabled` | boolean | No | Enable or disable the entire block |
+| `updateActions` | array | No | `[{ index, parameters?, disabled? }]` — update actions by index (merge semantics) |
+| `updateConditions` | array | No | `[{ index, parameters?, isInverted? }]` — update conditions by index |
+| `addActions` | array | No | Append new actions (standard or script) |
+| `addConditions` | array | No | Append new conditions |
+| `removeActionIndices` | number[] | No | Remove actions by 0-based index |
+| `removeConditionIndices` | number[] | No | Remove conditions by 0-based index |
+
+At least one update parameter must be provided.
+
+**Operation ordering** (all indices reference the ORIGINAL array positions):
+1. Updates (non-length-mutating) — merge parameters, toggle flags
+2. Removals (descending order, deduped) — shrink arrays
+3. Additions (append) — grow arrays
+4. Final state checks — warn if all conditions removed
+
+**Notes:**
+- Only works on `block` or `function-block` events (not groups, variables, etc.)
+- New actions/conditions get fresh SIDs via the ID generator
+- `objectClass` is validated on new conditions/actions
+- Duplicate removal indices are automatically deduplicated
+- Warns when all conditions are removed (block becomes unconditional)
+
 ### `create_layout`
 
 Create a new layout.
@@ -334,7 +386,7 @@ Create a new layout.
 
 ### `add_instance_to_layout`
 
-Place an object instance on a layout layer.
+Place an object instance on a layout layer. For copying instances between layouts, read the source with `get_layout_details` and pass instance properties here.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -346,11 +398,23 @@ Place an object instance on a layout layer.
 | `width` | number | No | Instance width (default: 100) |
 | `height` | number | No | Instance height (default: 100) |
 | `properties` | object | No | Plugin-specific properties (auto-filled for known plugins) |
+| `angle` | number | No | Rotation angle in radians (default: 0) |
+| `color` | number[4] | No | RGBA tint as `[r, g, b, a]` with values 0-1 (default: [1,1,1,1]) |
+| `zElevation` | number | No | Z elevation for 3D layering (default: 0) |
+| `originX` | number | No | Horizontal origin 0-1 (default: 0.5 = center) |
+| `originY` | number | No | Vertical origin 0-1 (default: 0.5 = center) |
+| `instanceVariables` | object | No | Instance variable values as `{varName: value}` |
+| `behaviors` | object | No | Behavior runtime state as `{behaviorName: {prop: val}}` |
+| `tags` | string | No | Comma-separated instance tags (alphanumeric only) |
+| `showing` | boolean | No | Whether instance is initially visible (default: true) |
+| `locked` | boolean | No | Whether instance is locked in the editor (default: false) |
 
 **Notes:**
 - Blocks global-only objects (singleglobal-inst) from being placed
+- Nonworld-global objects (Array, JSON, Dictionary) are placed in `nonworld-instances` instead of on layers
 - Auto-fills default instance properties for Sprite, Text, TiledBg, NinePatch
-- Warns when placing instances of unknown plugin types
+- Warns on unknown instanceVariable or behavior keys (may be inherited from families)
+- All visual and behavioral properties are preserved when specified
 
 ### `delete_layout`
 

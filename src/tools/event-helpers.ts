@@ -270,13 +270,18 @@ export async function validateObjectClasses(
 
 // ─── Object Reference Collection ────────────────────────────
 
-/** Collect all objectClass references from a block and all its descendants. */
+/** Collect all objectClass references from a block and all its descendants.
+ *  Depth-limited to match buildBlockEvent's MAX_NESTING_DEPTH guard. */
 export function collectObjectRefs(
   conditions: Array<{ objectClass: string; 'behavior-type'?: string }>,
   actions: Array<Record<string, unknown>>,
   children: ChildEventInput[],
   refs: Array<{ objectClass: string; 'behavior-type'?: string }>,
+  depth = 0,
 ): void {
+  if (depth > MAX_NESTING_DEPTH) {
+    throw new Error(`collectObjectRefs nesting exceeds maximum depth of ${MAX_NESTING_DEPTH}`);
+  }
   for (const c of conditions) {
     refs.push({ objectClass: c.objectClass, 'behavior-type': c['behavior-type'] });
   }
@@ -291,6 +296,7 @@ export function collectObjectRefs(
       (child.actions ?? []) as Array<Record<string, unknown>>,
       child.children ?? [],
       refs,
+      depth + 1,
     );
   }
 }
