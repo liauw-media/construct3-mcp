@@ -6,6 +6,28 @@
  * Key conventions: C3 uses camelCase for most fields (isGlobal, not is-global).
  */
 
+import type {
+  ObjectType,
+  Layout,
+  Layer,
+  Instance,
+  EventSheet,
+  VariableEvent,
+  GroupEvent,
+  FunctionBlockEvent,
+  IncludeEvent,
+  CommentEvent,
+  BlockEvent,
+  Animation,
+  AnimationFrame,
+  AnimationsContainer,
+  InstanceVariable,
+  BehaviorType,
+  Condition,
+  Action,
+  C3Event,
+} from './types.js';
+
 // ─── Object Templates ──────────────────────────────────────
 
 /** Plugins that use singleglobal-inst (no layout placement) */
@@ -103,7 +125,7 @@ export const KNOWN_SCIRRA_BEHAVIORS: Record<string, string> = {
   Wrap: 'Wrap',
 };
 
-export function createSpriteObject(name: string, sid: number, animSid: number): Record<string, unknown> {
+export function createSpriteObject(name: string, sid: number, animSid: number): ObjectType {
   return {
     name,
     'plugin-id': 'Sprite',
@@ -145,7 +167,7 @@ export function createSpriteObject(name: string, sid: number, animSid: number): 
   };
 }
 
-export function createTextObject(name: string, sid: number): Record<string, unknown> {
+export function createTextObject(name: string, sid: number): ObjectType {
   return {
     name,
     'plugin-id': 'Text',
@@ -158,7 +180,7 @@ export function createTextObject(name: string, sid: number): Record<string, unkn
   };
 }
 
-export function createTiledBgObject(name: string, sid: number): Record<string, unknown> {
+export function createTiledBgObject(name: string, sid: number): ObjectType {
   return {
     name,
     'plugin-id': 'TiledBg',
@@ -189,7 +211,7 @@ export function createGlobalObject(
   sid: number,
   uid: number,
   sgiSid: number,
-): Record<string, unknown> {
+): ObjectType {
   return {
     name,
     'plugin-id': pluginId,
@@ -204,7 +226,7 @@ export function createGlobalObject(
   };
 }
 
-export function createGenericObject(name: string, pluginId: string, sid: number): Record<string, unknown> {
+export function createGenericObject(name: string, pluginId: string, sid: number): ObjectType {
   return {
     name,
     'plugin-id': pluginId,
@@ -282,7 +304,7 @@ export function createInstanceVariable(
   name: string,
   type: 'number' | 'string' | 'boolean',
   sid: number,
-): Record<string, unknown> {
+): InstanceVariable {
   return {
     name,
     type,
@@ -296,7 +318,7 @@ export function createBehavior(
   behaviorId: string,
   name: string,
   sid: number,
-): Record<string, unknown> {
+): BehaviorType {
   return {
     behaviorId,
     name,
@@ -306,7 +328,7 @@ export function createBehavior(
 
 // ─── Event Sheet Templates ─────────────────────────────────
 
-export function createEmptySheet(name: string, sid: number): Record<string, unknown> {
+export function createEmptySheet(name: string, sid: number): EventSheet {
   return {
     name,
     events: [],
@@ -319,7 +341,7 @@ export function createVariableEvent(
   type: 'number' | 'string' | 'boolean',
   initialValue: string,
   sid: number,
-): Record<string, unknown> {
+): VariableEvent {
   return {
     eventType: 'variable',
     name: varName,
@@ -332,7 +354,7 @@ export function createVariableEvent(
   };
 }
 
-export function createGroupEvent(title: string, sid: number): Record<string, unknown> {
+export function createGroupEvent(title: string, sid: number): GroupEvent {
   return {
     eventType: 'group',
     disabled: false,
@@ -348,8 +370,8 @@ export function createFunctionEvent(
   funcName: string,
   sid: number,
   params?: Array<{ name: string; type: string }>,
-): Record<string, unknown> {
-  const functionParameters: Record<string, unknown>[] = [];
+): FunctionBlockEvent {
+  const functionParameters: Array<{ name: string; type: string; initialValue: string; comment: string; sid: number }> = [];
   if (params) {
     for (const p of params) {
       functionParameters.push({
@@ -377,14 +399,14 @@ export function createFunctionEvent(
   };
 }
 
-export function createIncludeEvent(sheetName: string): Record<string, unknown> {
+export function createIncludeEvent(sheetName: string): IncludeEvent {
   return {
     eventType: 'include',
     includeSheet: sheetName,
   };
 }
 
-export function createCommentEvent(text: string): Record<string, unknown> {
+export function createCommentEvent(text: string): CommentEvent {
   return {
     eventType: 'comment',
     text,
@@ -395,12 +417,12 @@ export function createCommentEvent(text: string): Record<string, unknown> {
 
 export function createBlockEvent(
   sid: number,
-  conditions: Array<Record<string, unknown>>,
-  actions: Array<Record<string, unknown>>,
+  conditions: Condition[],
+  actions: Action[],
   disabled?: boolean,
-  children?: Array<Record<string, unknown>>,
+  children?: C3Event[],
   isElse?: boolean,
-): Record<string, unknown> {
+): BlockEvent {
   return {
     eventType: 'block',
     conditions,
@@ -417,7 +439,7 @@ export function createBlockEvent(
 export function createAnimationFrame(
   width: number,
   height: number,
-): Record<string, unknown> {
+): AnimationFrame {
   return {
     width,
     height,
@@ -440,8 +462,8 @@ export function createAnimation(
   isLooping: boolean,
   isPingPong: boolean,
   repeatCount: number,
-  frames: Array<Record<string, unknown>>,
-): Record<string, unknown> {
+  frames: AnimationFrame[],
+): Animation {
   return {
     frames,
     sid,
@@ -463,7 +485,7 @@ export function createLayout(
   height: number,
   eventSheet?: string,
   layers?: Array<{ name: string; sid: number }>,
-): Record<string, unknown> {
+): Layout {
   const layerData = (layers && layers.length > 0)
     ? layers.map(l => createLayer(l.name, l.sid))
     : [createLayer('Layer 0', sid + 1)];
@@ -488,7 +510,7 @@ export function createLayout(
   };
 }
 
-export function createLayer(name: string, sid: number): Record<string, unknown> {
+export function createLayer(name: string, sid: number): Layer {
   return {
     name,
     overriden: 0,
@@ -524,7 +546,7 @@ export function createInstance(
   width: number,
   height: number,
   pluginProperties?: Record<string, unknown>,
-): Record<string, unknown> {
+): Instance {
   // Use provided properties, or look up defaults for known plugins, or empty
   const properties = pluginProperties ?? {};
 
