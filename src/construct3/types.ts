@@ -30,6 +30,10 @@ export interface Construct3Project {
   viewportWidth: number;
   viewportHeight: number;
   firstLayout: string;
+  functionsName?: string;
+  autosaveData?: unknown;
+  containers?: unknown[];
+  flowcharts?: { items: string[]; subfolders: Subfolder[] };
 }
 
 export interface Addon {
@@ -133,6 +137,7 @@ export interface ProjectProperties {
   themeColor: number[];
   orientations: string;
   webgpu: string;
+  multitexturing: string;
   gpuPreference: string;
   scriptsType: string;
   framerateMode: string;
@@ -165,6 +170,8 @@ export interface AnimationFrame {
   duration?: number;
   tag?: string;
   useCollisionPoly?: boolean;
+  imageSpriteId?: string;
+  collisionPoly?: { points: number[] };
   [key: string]: unknown;
 }
 
@@ -429,6 +436,7 @@ export interface Instance {
   behaviors?: Record<string, unknown>;
   showing?: boolean;
   locked?: boolean;
+  instanceFolderItem?: { sid: number; expanded?: boolean };
   world?: {
     x: number;
     y: number;
@@ -439,6 +447,7 @@ export interface Instance {
     color?: number[];
     angle?: number;
     zElevation?: number;
+    blendMode?: string;
     [key: string]: unknown;
   };
   [key: string]: unknown;
