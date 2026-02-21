@@ -101,6 +101,7 @@
 		"themeColor": [1, 1, 1, 0],
 		"orientations": "landscape",
 		"webgpu": "auto",
+		"multitexturing": "auto",
 		"gpuPreference": "high-performance",
 		"scriptsType": "module",
 		"framerateMode": "vsync",

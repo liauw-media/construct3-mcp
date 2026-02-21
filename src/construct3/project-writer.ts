@@ -27,7 +27,7 @@ const PROPERTIES_KEY_MAP: Record<keyof ProjectProperties, true> = {
   pixelRounding: true, zAxisScale: true, fov: true, useLoaderLayout: true,
   fullscreenMode: true, fullscreenQuality: true, viewportFit: true,
   backgroundColor: true, splashColor: true, useThemeColor: true,
-  themeColor: true, orientations: true, webgpu: true, gpuPreference: true,
+  themeColor: true, orientations: true, webgpu: true, multitexturing: true, gpuPreference: true,
   scriptsType: true, framerateMode: true, sampling: true, downscaling: true,
   renderingMode: true, anisotropicFiltering: true, zNear: true, zFar: true,
   maxSpriteSheetSize: true, loaderStyle: true, preloadSounds: true,
