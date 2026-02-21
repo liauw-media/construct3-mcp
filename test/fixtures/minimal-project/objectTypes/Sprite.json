@@ -1,0 +1,32 @@
+{
+	"name": "Sprite",
+	"plugin-id": "Sprite",
+	"sid": 200000000000001,
+	"isGlobal": false,
+	"instanceVariables": [],
+	"behaviorTypes": [],
+	"effectTypes": [],
+	"animations": {
+		"items": [
+			{
+				"name": "Animation 1",
+				"sid": 300000000000001,
+				"speed": 5,
+				"isLooping": false,
+				"isPingPong": false,
+				"repeatCount": 1,
+				"repeatTo": 0,
+				"frames": [
+					{
+						"width": 64,
+						"height": 64,
+						"originX": 0.5,
+						"originY": 0.5,
+						"duration": 1
+					}
+				]
+			}
+		],
+		"subfolders": []
+	}
+}
