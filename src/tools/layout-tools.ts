@@ -200,6 +200,8 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
             tags: overrides.tags ?? '',
             instanceVariables: overrides.instanceVariables ?? {},
             behaviors: overrides.behaviors ?? {},
+            showing: overrides.showing ?? true,
+            locked: overrides.locked ?? false,
           });
           warnings.push(`"${args.objectType}" is a global (nonworld) object — placed in nonworld-instances instead of on a layer. Layer and position parameters were ignored.`);
         } else {

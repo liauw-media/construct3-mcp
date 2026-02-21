@@ -403,6 +403,35 @@ describe('add_instance_to_layout', () => {
     expect(data.warnings).toBeDefined();
     expect(data.warnings.some((w: string) => w.includes('NonExistentBehavior'))).toBe(true);
   });
+
+  it('preserves showing and locked on nonworld instances', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['GameData', {
+        name: 'GameData', 'plugin-id': 'Json', sid: 1,
+        isGlobal: true,
+      }]]),
+      layouts: new Map([['Level 1', {
+        name: 'Level 1', sid: 10,
+        layers: [{ name: 'Main', sid: 20, instances: [] }],
+        'nonworld-instances': [],
+      }]]),
+    });
+    const result = await server.callTool('add_instance_to_layout', {
+      layoutName: 'Level 1',
+      layerName: 'Main',
+      objectType: 'GameData',
+      x: 0, y: 0,
+      showing: false,
+      locked: true,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+
+    const writtenLayout = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const nonworld = writtenLayout['nonworld-instances'] as Array<Record<string, unknown>>;
+    expect(nonworld[0].showing).toBe(false);
+    expect(nonworld[0].locked).toBe(true);
+  });
 });
 
 describe('delete_layout', () => {

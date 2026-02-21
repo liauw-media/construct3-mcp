@@ -18,7 +18,7 @@ import {
   countDescendants,
   summarizeEvents,
 } from './event-helpers.js';
-import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
+import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   createEmptySheet,
   createVariableEvent,
@@ -71,6 +71,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         await writer.writeEntityFile('eventSheets', args.name, data, args.subfolder);
         await writer.addToProject('eventSheets', args.name, args.subfolder);
+        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,
@@ -174,6 +175,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,
@@ -284,6 +286,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,
@@ -361,6 +364,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
         const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
         await writer.removeFromProject('eventSheets', args.name);
+        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,
@@ -443,6 +447,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
           const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
           const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+          resetProjectIndex();
 
           return toolResult({
             success: true,
@@ -515,6 +520,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,
@@ -666,7 +672,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         // ── Remove conditions by index (descending order to avoid index shifting) ──
         if (args.removeConditionIndices && args.removeConditionIndices.length > 0) {
-          const sorted = [...args.removeConditionIndices].sort((a, b) => b - a);
+          const sorted = [...new Set(args.removeConditionIndices)].sort((a, b) => b - a);
           for (const idx of sorted) {
             if (idx < 0 || idx >= conditions.length) {
               return toolError(`Condition index ${idx} is out of range (block has ${conditions.length} condition(s), indices 0-${conditions.length - 1}).`);
@@ -677,7 +683,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         // ── Remove actions by index (descending order) ──
         if (args.removeActionIndices && args.removeActionIndices.length > 0) {
-          const sorted = [...args.removeActionIndices].sort((a, b) => b - a);
+          const sorted = [...new Set(args.removeActionIndices)].sort((a, b) => b - a);
           for (const idx of sorted) {
             if (idx < 0 || idx >= actions.length) {
               return toolError(`Action index ${idx} is out of range (block has ${actions.length} action(s), indices 0-${actions.length - 1}).`);
@@ -755,9 +761,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
         }
 
+        // Warn if all conditions were removed (checked after adds, not just removals)
+        if (conditions.length === 0 && !event.isElse) {
+          warnings.push('All conditions were removed — block will match unconditionally (always true).');
+        }
+
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,

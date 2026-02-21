@@ -17,7 +17,9 @@ export const conditionSchema = z.object({
   id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
   objectClass: z.string().describe('Object name or "System"'),
   'behavior-type': z.string().optional().describe('Behavior type (e.g., "Platform", "8Direction")'),
-  parameters: z.record(z.unknown()).optional().describe('Condition parameters as key-value pairs'),
+  parameters: z.record(z.unknown())
+    .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
+    .optional().describe('Condition parameters as key-value pairs'),
   isInverted: z.boolean().optional().describe('Negate the condition'),
   isOr: z.boolean().optional().describe('OR-combine with previous condition (default: AND)'),
 });
@@ -27,7 +29,9 @@ export const standardActionSchema = z.object({
   id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
   objectClass: z.string().describe('Object name or "System"'),
   'behavior-type': z.string().optional().describe('Behavior type'),
-  parameters: z.record(z.unknown()).optional().describe('Action parameters as key-value pairs'),
+  parameters: z.record(z.unknown())
+    .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
+    .optional().describe('Action parameters as key-value pairs'),
   callFunction: z.string().optional().describe('For function call actions'),
   disabled: z.boolean().optional().describe('Disable this individual action'),
 });
