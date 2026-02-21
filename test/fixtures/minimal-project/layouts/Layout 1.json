@@ -1,0 +1,31 @@
+{
+	"name": "Layout 1",
+	"layers": [
+		{
+			"name": "Main",
+			"sid": 500000000000001,
+			"instances": [
+				{
+					"type": "Sprite",
+					"uid": 0,
+					"sid": 500000000000002,
+					"properties": {},
+					"world": {
+						"x": 100,
+						"y": 200,
+						"width": 64,
+						"height": 64
+					}
+				}
+			],
+			"isInitiallyVisible": true,
+			"isTransparent": true,
+			"color": [1, 1, 1, 1],
+			"blendMode": "normal"
+		}
+	],
+	"sid": 500000000000003,
+	"eventSheet": "MainSheet",
+	"width": 1920,
+	"height": 1080
+}

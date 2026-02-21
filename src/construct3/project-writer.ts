@@ -14,11 +14,45 @@ import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from './templates.js';
 /** Maximum entity file size we'll write (5MB — well above any real C3 entity) */
 const MAX_WRITE_SIZE = 5 * 1024 * 1024;
 
+/** Keys allowed at the project root level (outside properties) */
+const ALLOWED_TOP_LEVEL = new Set(['name']);
+
+/** Keys allowed inside project.properties (matches ProjectProperties interface) */
+const ALLOWED_PROPERTIES = new Set([
+  'description', 'version', 'autoIncrementVersion', 'author', 'authorEmail',
+  'authorWebsite', 'appId', 'pixelRounding', 'zAxisScale', 'fov',
+  'useLoaderLayout', 'fullscreenMode', 'fullscreenQuality', 'viewportFit',
+  'backgroundColor', 'splashColor', 'useThemeColor', 'themeColor',
+  'orientations', 'webgpu', 'gpuPreference', 'scriptsType', 'framerateMode',
+  'sampling', 'downscaling', 'renderingMode', 'anisotropicFiltering',
+  'zNear', 'zFar', 'maxSpriteSheetSize', 'loaderStyle', 'preloadSounds',
+  'cordovaiOSScheme', 'cordovaAndroidScheme', 'exportFileStructure',
+  'uidAllocationMode',
+]);
+
 export class Construct3ProjectWriter {
+  private projectLock: Promise<void> = Promise.resolve();
+
   constructor(
     private reader: Construct3ProjectReader,
     private idGen: IdGenerator,
   ) {}
+
+  /**
+   * Serialize access to the .c3proj file to prevent lost-update races.
+   */
+  private async withProjectLock<T>(fn: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const next = new Promise<void>(resolve => { release = resolve; });
+    const prev = this.projectLock;
+    this.projectLock = next;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
 
   /**
    * Resolve a path confined within the project directory.
@@ -156,28 +190,30 @@ export class Construct3ProjectWriter {
     name: string,
     subfolder?: string,
   ): Promise<void> {
-    const projectPath = this.reader.getProjectPath();
-    await this.createBackup(projectPath);
+    return this.withProjectLock(async () => {
+      const projectPath = this.reader.getProjectPath();
+      await this.createBackup(projectPath);
 
-    const content = await readFile(projectPath, 'utf-8');
-    const project = JSON.parse(content);
-    const container = project[category];
+      const content = await readFile(projectPath, 'utf-8');
+      const project = JSON.parse(content);
+      const container = project[category];
 
-    if (subfolder) {
-      const target = this.findOrCreateSubfolder(container, subfolder);
-      if (!target.items.includes(name)) {
-        target.items.push(name);
+      if (subfolder) {
+        const target = this.findOrCreateSubfolder(container, subfolder);
+        if (!target.items.includes(name)) {
+          target.items.push(name);
+        }
+      } else {
+        if (!container.items.includes(name)) {
+          container.items.push(name);
+        }
       }
-    } else {
-      if (!container.items.includes(name)) {
-        container.items.push(name);
-      }
-    }
 
-    const json = this.validateJsonData(project, 'project.c3proj');
-    await writeFile(projectPath, json, 'utf-8');
-    await this.verifyWrittenFile(projectPath, 'project.c3proj');
-    await this.reader.reloadProject();
+      const json = this.validateJsonData(project, 'project.c3proj');
+      await writeFile(projectPath, json, 'utf-8');
+      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.reader.reloadProject();
+    });
   }
 
   /**
@@ -187,54 +223,69 @@ export class Construct3ProjectWriter {
     category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
     name: string,
   ): Promise<void> {
-    const projectPath = this.reader.getProjectPath();
-    await this.createBackup(projectPath);
+    return this.withProjectLock(async () => {
+      const projectPath = this.reader.getProjectPath();
+      await this.createBackup(projectPath);
 
-    const content = await readFile(projectPath, 'utf-8');
-    const project = JSON.parse(content);
-    const container = project[category];
+      const content = await readFile(projectPath, 'utf-8');
+      const project = JSON.parse(content);
+      const container = project[category];
 
-    // Remove from root items
-    const rootIdx = container.items.indexOf(name);
-    if (rootIdx !== -1) {
-      container.items.splice(rootIdx, 1);
-    } else {
-      // Search subfolders
-      this.removeFromSubfolders(container.subfolders, name);
-    }
+      // Remove from root items
+      const rootIdx = container.items.indexOf(name);
+      if (rootIdx !== -1) {
+        container.items.splice(rootIdx, 1);
+      } else {
+        // Search subfolders
+        this.removeFromSubfolders(container.subfolders, name);
+      }
 
-    const json = this.validateJsonData(project, 'project.c3proj');
-    await writeFile(projectPath, json, 'utf-8');
-    await this.verifyWrittenFile(projectPath, 'project.c3proj');
-    await this.reader.reloadProject();
+      const json = this.validateJsonData(project, 'project.c3proj');
+      await writeFile(projectPath, json, 'utf-8');
+      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.reader.reloadProject();
+    });
   }
 
   /**
    * Update the project.c3proj properties (metadata).
    */
   async updateProjectProperties(updates: Record<string, unknown>): Promise<string> {
-    const projectPath = this.reader.getProjectPath();
-    const backupPath = await this.createBackup(projectPath);
-
-    const content = await readFile(projectPath, 'utf-8');
-    const project = JSON.parse(content);
-
-    // Apply updates to top-level and properties
-    const topLevelKeys = ['name'];
-    for (const [key, value] of Object.entries(updates)) {
-      if (topLevelKeys.includes(key)) {
-        project[key] = value;
-      } else {
-        project.properties[key] = value;
-      }
+    // Validate all keys against the allowlist before acquiring the lock
+    const unknownKeys = Object.keys(updates).filter(
+      k => !ALLOWED_TOP_LEVEL.has(k) && !ALLOWED_PROPERTIES.has(k),
+    );
+    if (unknownKeys.length > 0) {
+      const validKeys = [...ALLOWED_TOP_LEVEL, ...ALLOWED_PROPERTIES].sort().join(', ');
+      throw new Error(
+        `Unknown project property key(s): ${unknownKeys.join(', ')}. ` +
+        `Valid keys are: ${validKeys}`,
+      );
     }
 
-    const json = this.validateJsonData(project, 'project.c3proj');
-    await writeFile(projectPath, json, 'utf-8');
-    await this.verifyWrittenFile(projectPath, 'project.c3proj');
-    await this.reader.reloadProject();
+    return this.withProjectLock(async () => {
+      const projectPath = this.reader.getProjectPath();
+      const backupPath = await this.createBackup(projectPath);
 
-    return backupPath;
+      const content = await readFile(projectPath, 'utf-8');
+      const project = JSON.parse(content);
+
+      // Apply updates to top-level and properties
+      for (const [key, value] of Object.entries(updates)) {
+        if (ALLOWED_TOP_LEVEL.has(key)) {
+          project[key] = value;
+        } else {
+          project.properties[key] = value;
+        }
+      }
+
+      const json = this.validateJsonData(project, 'project.c3proj');
+      await writeFile(projectPath, json, 'utf-8');
+      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.reader.reloadProject();
+
+      return backupPath;
+    });
   }
 
   /**
@@ -286,28 +337,30 @@ export class Construct3ProjectWriter {
       );
     }
 
-    // Auto-register the addon in c3proj
-    const projectPath = this.reader.getProjectPath();
-    await this.createBackup(projectPath);
+    return this.withProjectLock(async () => {
+      // Auto-register the addon in c3proj
+      const projectPath = this.reader.getProjectPath();
+      await this.createBackup(projectPath);
 
-    const content = await readFile(projectPath, 'utf-8');
-    const project = JSON.parse(content);
+      const content = await readFile(projectPath, 'utf-8');
+      const project = JSON.parse(content);
 
-    const newAddon: Addon = {
-      type,
-      id,
-      name: displayName,
-      author: 'Scirra',
-      bundled: false,
-    };
-    project.usedAddons.push(newAddon);
+      const newAddon: Addon = {
+        type,
+        id,
+        name: displayName,
+        author: 'Scirra',
+        bundled: false,
+      };
+      project.usedAddons.push(newAddon);
 
-    const json = this.validateJsonData(project, 'project.c3proj');
-    await writeFile(projectPath, json, 'utf-8');
-    await this.verifyWrittenFile(projectPath, 'project.c3proj');
-    await this.reader.reloadProject();
+      const json = this.validateJsonData(project, 'project.c3proj');
+      await writeFile(projectPath, json, 'utf-8');
+      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.reader.reloadProject();
 
-    return `Auto-registered ${type} "${id}" in usedAddons (was not previously in the project).`;
+      return `Auto-registered ${type} "${id}" in usedAddons (was not previously in the project).`;
+    });
   }
 
   /**

@@ -1,0 +1,28 @@
+{
+	"name": "MainSheet",
+	"events": [
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-start-of-layout",
+					"objectClass": "System",
+					"sid": 400000000000001
+				}
+			],
+			"actions": [
+				{
+					"id": "set-position",
+					"objectClass": "Sprite",
+					"sid": 400000000000002,
+					"parameters": {
+						"x": "100",
+						"y": "200"
+					}
+				}
+			],
+			"sid": 400000000000003
+		}
+	],
+	"sid": 400000000000004
+}
