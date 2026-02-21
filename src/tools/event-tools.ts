@@ -1,0 +1,376 @@
+/**
+ * Event sheet tools: create_event_sheet, add_event_to_sheet, add_event_block, delete_event_sheet.
+ */
+
+import { z } from 'zod';
+import type { MutationToolDeps } from './shared.js';
+import type { WriteResult } from '../construct3/types.js';
+import { validateName, validateSubfolder, toolResult, toolError } from './shared.js';
+import {
+  conditionSchema,
+  actionSchema,
+  childEventSchema,
+  findGroupByPath,
+  validateObjectClasses,
+  collectObjectRefs,
+  buildBlockEvent,
+} from './event-helpers.js';
+import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
+import {
+  createEmptySheet,
+  createVariableEvent,
+  createGroupEvent,
+  createFunctionEvent,
+  createIncludeEvent,
+  createCommentEvent,
+} from '../construct3/templates.js';
+
+export function registerEventTools({ server, reader, writer, idGen }: MutationToolDeps) {
+  // ─── create_event_sheet ───────────────────────────────────
+
+  server.tool(
+    'create_event_sheet',
+    'Create a new event sheet in the project',
+    {
+      name: z.string().max(200).describe('Event sheet name'),
+      subfolder: z.string().max(500).optional().describe('Subfolder path'),
+      includeSheets: z.array(z.string()).optional().describe('Event sheets to auto-include'),
+    },
+    async (args) => {
+      try {
+        validateName(args.name);
+        if (args.subfolder) validateSubfolder(args.subfolder);
+
+        // Check uniqueness
+        const existing = await reader.listEventSheets();
+        if (existing.includes(args.name)) {
+          return toolError(`Event sheet "${args.name}" already exists.`);
+        }
+
+        // Validate include sheets exist
+        if (args.includeSheets) {
+          for (const sheet of args.includeSheets) {
+            if (!existing.includes(sheet)) {
+              return toolError(`Include sheet "${sheet}" does not exist. Use list_eventsheets to see available sheets.`);
+            }
+          }
+        }
+
+        const sid = await idGen.generateSid(reader);
+        const data = createEmptySheet(args.name, sid) as { events: Record<string, unknown>[] };
+
+        // Add include events
+        if (args.includeSheets) {
+          for (const sheet of args.includeSheets) {
+            data.events.push(createIncludeEvent(sheet));
+          }
+        }
+
+        await writer.writeEntityFile('eventSheets', args.name, data, args.subfolder);
+        await writer.addToProject('eventSheets', args.name, args.subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'eventsheet',
+          action: 'created',
+          generatedSid: sid,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error creating event sheet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── add_event_to_sheet ───────────────────────────────────
+
+  server.tool(
+    'add_event_to_sheet',
+    'Add an event (group, function, variable, include, or comment) to an event sheet',
+    {
+      sheetName: z.string().max(200).describe('Target event sheet'),
+      eventType: z.enum(['group', 'function', 'variable', 'include', 'comment']).describe('Type of event to add'),
+      title: z.string().max(500).optional().describe('For groups: the group title'),
+      functionName: z.string().max(200).optional().describe('For functions: function name'),
+      functionParams: z.array(z.object({
+        name: z.string().describe('Parameter name'),
+        type: z.enum(['number', 'string', 'boolean']).describe('Parameter type'),
+      })).optional().describe('For functions: parameter definitions'),
+      variableName: z.string().max(200).optional().describe('For variables: variable name'),
+      variableType: z.enum(['number', 'string', 'boolean']).optional().describe('For variables: variable type'),
+      initialValue: z.string().max(500).optional().default('').describe('For variables: initial value'),
+      includeSheet: z.string().max(200).optional().describe('For includes: sheet name to include'),
+      commentText: z.string().max(2000).optional().describe('For comments: comment text'),
+      position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event'),
+    },
+    async (args) => {
+      try {
+        // Read existing sheet — preserves ALL original events and fields
+        let sheet: Record<string, unknown>;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+        }
+
+        let event: Record<string, unknown>;
+
+        switch (args.eventType) {
+          case 'group': {
+            if (!args.title) return toolError('title is required for group events');
+            const sid = await idGen.generateSid(reader);
+            event = createGroupEvent(args.title, sid);
+            break;
+          }
+          case 'function': {
+            if (!args.functionName) return toolError('functionName is required for function events');
+            const sid = await idGen.generateSid(reader);
+            event = createFunctionEvent(args.functionName, sid, args.functionParams);
+            // Replace placeholder parameter SIDs with properly generated ones
+            const funcParams = event.functionParameters as Array<Record<string, unknown>>;
+            for (const p of funcParams) {
+              p.sid = await idGen.generateSid(reader);
+            }
+            break;
+          }
+          case 'variable': {
+            if (!args.variableName) return toolError('variableName is required for variable events');
+            const varType = args.variableType || 'number';
+            const defaultValue = args.initialValue || (varType === 'number' ? '0' : varType === 'boolean' ? 'false' : '');
+            const sid = await idGen.generateSid(reader);
+            event = createVariableEvent(args.variableName, varType, defaultValue, sid);
+            break;
+          }
+          case 'include': {
+            if (!args.includeSheet) return toolError('includeSheet is required for include events');
+            const sheets = await reader.listEventSheets();
+            if (!sheets.includes(args.includeSheet)) {
+              return toolError(`Include sheet "${args.includeSheet}" does not exist.`);
+            }
+            event = createIncludeEvent(args.includeSheet);
+            break;
+          }
+          case 'comment': {
+            if (!args.commentText) return toolError('commentText is required for comment events');
+            event = createCommentEvent(args.commentText);
+            break;
+          }
+        }
+
+        const events = sheet.events as Record<string, unknown>[];
+        if (args.position === 'start') {
+          events.unshift(event);
+        } else {
+          events.push(event);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error adding event: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── add_event_block ──────────────────────────────────────
+
+  server.tool(
+    'add_event_block',
+    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, OR conditions, and per-action disabling.',
+    {
+      sheetName: z.string().max(200).describe('Target event sheet'),
+      conditions: z.array(conditionSchema).optional().default([]).describe('Conditions array (at least one required, unless isElse is true)'),
+      actions: z.array(actionSchema).optional().default([]).describe('Actions array (standard actions or script actions)'),
+      groupPath: z.string().max(500).optional().describe('Insert inside group by title path (e.g., "Movement > Collision")'),
+      position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event block'),
+      disabled: z.boolean().optional().default(false).describe('Create the event block disabled'),
+      isElse: z.boolean().optional().default(false).describe('Mark as an else block (conditions become optional)'),
+      children: z.array(childEventSchema).optional().default([]).describe('Sub-events nested inside this block (recursive, max depth 5, max 50 total events)'),
+    },
+    async (args) => {
+      try {
+        // Validate: non-else blocks must have at least one condition
+        if (!args.isElse && args.conditions.length === 0) {
+          return toolError('At least one condition is required (unless isElse is true).');
+        }
+
+        // Read the target event sheet
+        let sheet: Record<string, unknown>;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+        }
+
+        // Collect all objectClass references from entire tree (parent + descendants)
+        const allRefs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
+        collectObjectRefs(
+          args.conditions,
+          args.actions as Array<Record<string, unknown>>,
+          args.children,
+          allRefs,
+        );
+
+        const { errors, warnings } = await validateObjectClasses(reader, allRefs);
+        if (errors.length > 0) {
+          return toolError(`Object class validation failed:\n${errors.join('\n')}`);
+        }
+
+        // Build the block event recursively (handles children, SIDs, safety limits)
+        const counter = { count: 0, warnings: [] as string[] };
+        const blockEvent = await buildBlockEvent(
+          reader,
+          idGen,
+          {
+            conditions: args.conditions,
+            actions: args.actions,
+            disabled: args.disabled,
+            isElse: args.isElse,
+            children: args.children,
+          },
+          1,
+          counter,
+        );
+        warnings.push(...counter.warnings);
+        const blockSid = blockEvent.sid as number;
+
+        // Determine target events array
+        let targetEvents: Record<string, unknown>[];
+        const events = sheet.events as Record<string, unknown>[];
+
+        if (args.groupPath) {
+          const resolved = findGroupByPath(events, args.groupPath);
+          if (!resolved) {
+            const topGroups = events
+              .filter(e => e.eventType === 'group')
+              .map(e => e.title as string);
+            const hint = topGroups.length > 0
+              ? `\nAvailable top-level groups: ${topGroups.join(', ')}`
+              : '\nNo groups found in this event sheet.';
+            return toolError(`Group path "${args.groupPath}" not found in "${args.sheetName}".${hint}`);
+          }
+          targetEvents = resolved;
+        } else {
+          targetEvents = events;
+        }
+
+        // Insert at position
+        if (args.position === 'start') {
+          targetEvents.unshift(blockEvent);
+        } else {
+          targetEvents.push(blockEvent);
+        }
+
+        // Write back
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          generatedSid: blockSid,
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error adding event block: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── delete_event_sheet ───────────────────────────────────
+
+  server.tool(
+    'delete_event_sheet',
+    'Delete an event sheet from the project (checks references first)',
+    {
+      name: z.string().max(200).describe('Event sheet name to delete'),
+      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
+    },
+    async (args) => {
+      try {
+        // Verify the event sheet exists
+        const existing = await reader.listEventSheets();
+        if (!existing.includes(args.name)) {
+          const suggestions = reader.findNearestName(args.name, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.name}" not found.${hint}`);
+        }
+
+        // Check references via project index
+        const index = await getProjectIndex(reader);
+
+        // 1. Sheets that include this one
+        const includedBy = index.eventSheetIncludedBy.get(args.name) || [];
+
+        // 2. Layouts bound to this event sheet
+        const boundLayouts: string[] = [];
+        for (const [layoutName, sheetName] of index.layoutToEventSheet) {
+          if (sheetName === args.name) {
+            boundLayouts.push(layoutName);
+          }
+        }
+
+        const hasRefs = includedBy.length > 0 || boundLayouts.length > 0;
+
+        if (hasRefs && !args.force) {
+          return toolResult({
+            success: false,
+            entity: args.name,
+            category: 'eventsheet',
+            action: 'delete_blocked',
+            message: 'Event sheet is still referenced. Use force=true to delete anyway (references will NOT be cleaned up).',
+            references: {
+              includedBy,
+              boundLayouts,
+            },
+          });
+        }
+
+        const warnings: string[] = [];
+        if (hasRefs && args.force) {
+          const refList = [...includedBy.map(s => `included by "${s}"`), ...boundLayouts.map(l => `bound to layout "${l}"`)];
+          warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
+        const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
+        await writer.removeFromProject('eventSheets', args.name);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'eventsheet',
+          action: 'deleted',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error deleting event sheet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+}

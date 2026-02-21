@@ -1,5 +1,12 @@
 /**
- * TypeScript type definitions for Construct 3 project structures
+ * TypeScript type definitions for Construct 3 project structures.
+ *
+ * Field names match the real C3 JSON format (camelCase for most fields,
+ * kebab-case for legacy keys like 'plugin-id' and 'behavior-type').
+ *
+ * All entity interfaces keep `[key: string]: unknown` index signatures
+ * for backwards compatibility — real C3 files may contain fields not
+ * yet modelled here.
  */
 
 // ─── Project Root ───────────────────────────────────────────
@@ -144,11 +151,77 @@ export interface ProjectProperties {
   uidAllocationMode: string;
 }
 
+// ─── Animation Types ────────────────────────────────────────
+
+export interface AnimationFrame {
+  width: number;
+  height: number;
+  originX: number;
+  originY: number;
+  originalSource?: string;
+  exportFormat?: string;
+  exportQuality?: number;
+  fileType?: string;
+  duration?: number;
+  tag?: string;
+  useCollisionPoly?: boolean;
+  [key: string]: unknown;
+}
+
+export interface Animation {
+  frames: AnimationFrame[];
+  sid: number;
+  name: string;
+  isLooping: boolean;
+  isPingPong: boolean;
+  repeatCount: number;
+  repeatTo: number;
+  speed: number;
+  [key: string]: unknown;
+}
+
+export interface AnimationsContainer {
+  items: Animation[];
+  subfolders: AnimationsContainer[];
+  [key: string]: unknown;
+}
+
+// ─── Instance Variable & Behavior Types ─────────────────────
+
+export interface InstanceVariable {
+  name: string;
+  type: string;
+  desc?: string;
+  show?: boolean;
+  sid: number;
+  [key: string]: unknown;
+}
+
+export interface BehaviorType {
+  behaviorId: string;
+  name: string;
+  sid: number;
+  [key: string]: unknown;
+}
+
+// ─── Singleglobal Instance ──────────────────────────────────
+
+export interface SingleglobalInst {
+  type: string;
+  properties: Record<string, unknown>;
+  uid: number;
+  sid: number;
+  tags?: string;
+  [key: string]: unknown;
+}
+
 // ─── Event Sheet Types (Discriminated Unions) ───────────────
 
 export interface EventSheet {
   name: string;
   events: C3Event[];
+  sid?: number;
+  [key: string]: unknown;
 }
 
 /** Condition within an event block */
@@ -158,6 +231,8 @@ export interface Condition {
   sid: number;
   'behavior-type'?: string;
   parameters?: Record<string, unknown>;
+  isInverted?: boolean;
+  isOr?: boolean;
   [key: string]: unknown;
 }
 
@@ -168,6 +243,7 @@ export interface StandardAction {
   sid: number;
   'behavior-type'?: string;
   parameters?: Record<string, unknown>;
+  disabled?: boolean;
   [key: string]: unknown;
 }
 
@@ -178,6 +254,7 @@ export interface FunctionCallAction {
   sid: number;
   callFunction?: string;
   parameters?: Record<string, unknown>;
+  disabled?: boolean;
   [key: string]: unknown;
 }
 
@@ -185,6 +262,7 @@ export interface FunctionCallAction {
 export interface ScriptAction {
   type: 'script';
   script: string;
+  disabled?: boolean;
   [key: string]: unknown;
 }
 
@@ -198,6 +276,7 @@ export interface BlockEvent {
   children?: C3Event[];
   sid?: number;
   disabled?: boolean;
+  isElse?: boolean;
   [key: string]: unknown;
 }
 
@@ -218,6 +297,12 @@ export interface VariableEvent {
 export interface FunctionBlockEvent {
   eventType: 'function-block';
   functionName?: string;
+  functionDescription?: string;
+  functionCategory?: string;
+  functionReturnType?: string;
+  functionCopyPicked?: boolean;
+  functionIsAsync?: boolean;
+  functionParameters?: Array<{ name: string; type: string; initialValue?: string; comment?: string; sid?: number }>;
   conditions: Condition[];
   actions: Action[];
   children?: C3Event[];
@@ -230,6 +315,7 @@ export interface FunctionBlockEvent {
 export interface GroupEvent {
   eventType: 'group';
   title: string;
+  description?: string;
   disabled?: boolean;
   isActiveOnStart?: boolean;
   children: C3Event[];
@@ -280,13 +366,13 @@ export interface ObjectType {
   name: string;
   'plugin-id': string;
   sid: number;
-  'is-global'?: boolean;
-  instanceVariables?: Record<string, unknown>;
-  behaviors?: Array<{ 'behavior-type': string; [key: string]: unknown }>;
-  animations?: Array<{
-    frames: Array<{ width: number; height: number; [key: string]: unknown }>;
-    [key: string]: unknown;
-  }>;
+  isGlobal?: boolean;
+  editorNewInstanceIsReplica?: boolean;
+  instanceVariables?: InstanceVariable[];
+  behaviorTypes?: BehaviorType[];
+  effectTypes?: Array<Record<string, unknown>>;
+  animations?: AnimationsContainer;
+  'singleglobal-inst'?: SingleglobalInst;
   [key: string]: unknown;
 }
 
@@ -294,7 +380,16 @@ export interface Layout {
   name: string;
   layers: Layer[];
   sid: number;
-  'event-sheet'?: string;
+  eventSheet?: string;
+  width?: number;
+  height?: number;
+  unboundedScrolling?: boolean;
+  vpX?: number;
+  vpY?: number;
+  projection?: string;
+  'nonworld-instances'?: Array<Record<string, unknown>>;
+  'scene-graphs-folder-root'?: { items: unknown[]; subfolders: unknown[] };
+  effectTypes?: Array<Record<string, unknown>>;
   [key: string]: unknown;
 }
 
@@ -302,6 +397,25 @@ export interface Layer {
   name: string;
   sid: number;
   instances: Instance[];
+  overriden?: number;
+  subLayers?: unknown[];
+  effectTypes?: Array<Record<string, unknown>>;
+  isInitiallyVisible?: boolean;
+  isInitiallyInteractive?: boolean;
+  isHTMLElementsLayer?: boolean;
+  color?: number[];
+  backgroundColor?: number[];
+  isTransparent?: boolean;
+  parallaxX?: number;
+  parallaxY?: number;
+  scaleRate?: number;
+  forceOwnTexture?: boolean;
+  renderingMode?: string;
+  drawOrder?: string;
+  useRenderCells?: boolean;
+  blendMode?: string;
+  zElevation?: number;
+  global?: boolean;
   [key: string]: unknown;
 }
 
@@ -310,6 +424,23 @@ export interface Instance {
   properties: Record<string, unknown>;
   uid: number;
   sid: number;
+  tags?: string;
+  instanceVariables?: Record<string, unknown>;
+  behaviors?: Record<string, unknown>;
+  showing?: boolean;
+  locked?: boolean;
+  world?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    originX?: number;
+    originY?: number;
+    color?: number[];
+    angle?: number;
+    zElevation?: number;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 
