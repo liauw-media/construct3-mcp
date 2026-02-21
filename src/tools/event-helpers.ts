@@ -66,6 +66,138 @@ export const MAX_NESTING_DEPTH = 5;
 export const MAX_TOTAL_EVENTS = 50;
 export const MAX_ITEMS_PER_BLOCK = 100;
 
+// Limits for SID-search traversal (matching index-builder.ts)
+export const MAX_SEARCH_NODES = 100_000;
+export const MAX_SEARCH_DEPTH = 50;
+
+// ─── SID-Based Event Finder ─────────────────────────────────
+
+export interface FindResult {
+  event: Record<string, unknown>;
+  parentArray: Record<string, unknown>[];
+  index: number;
+}
+
+/**
+ * Find an event by SID anywhere in the event tree.
+ * Iterative stack-based traversal (no recursion) with safety guards.
+ * Returns the event, its parent array, and index for safe splice operations.
+ */
+export function findEventBySid(
+  events: Record<string, unknown>[],
+  targetSid: number,
+): FindResult | null {
+  const stack: Array<{ events: Record<string, unknown>[]; depth: number }> = [
+    { events, depth: 0 },
+  ];
+  let nodeCount = 0;
+
+  while (stack.length > 0) {
+    if (++nodeCount > MAX_SEARCH_NODES) {
+      throw new Error(`SID search exceeded ${MAX_SEARCH_NODES} nodes`);
+    }
+    const { events: currentEvents, depth } = stack.pop()!;
+    if (depth > MAX_SEARCH_DEPTH) continue;
+
+    for (let i = 0; i < currentEvents.length; i++) {
+      const event = currentEvents[i];
+      if (event.sid === targetSid) {
+        return { event, parentArray: currentEvents, index: i };
+      }
+      // Recurse into children (groups, blocks, function-blocks)
+      if (Array.isArray(event.children)) {
+        stack.push({
+          events: event.children as Record<string, unknown>[],
+          depth: depth + 1,
+        });
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Count all descendant events inside an event (groups, blocks with children).
+ * Iterative to match safety pattern.
+ */
+export function countDescendants(event: Record<string, unknown>): number {
+  let count = 0;
+  const stack: Array<Record<string, unknown>[]> = [];
+  if (Array.isArray(event.children)) {
+    stack.push(event.children as Record<string, unknown>[]);
+  }
+
+  while (stack.length > 0) {
+    const children = stack.pop()!;
+    for (const child of children) {
+      count++;
+      if (Array.isArray(child.children)) {
+        stack.push(child.children as Record<string, unknown>[]);
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Build a navigable summary of top-level events in a sheet (for error messages).
+ * Truncated to maxItems to keep error messages manageable.
+ */
+export function summarizeEvents(
+  events: Record<string, unknown>[],
+  maxItems = 10,
+): string {
+  const lines: string[] = [];
+  const total = events.length;
+
+  for (let i = 0; i < Math.min(total, maxItems); i++) {
+    const e = events[i];
+    const type = e.eventType as string;
+    switch (type) {
+      case 'block': {
+        const sid = e.sid as number;
+        const conds = (e.conditions as unknown[] | undefined)?.length ?? 0;
+        const acts = (e.actions as unknown[] | undefined)?.length ?? 0;
+        lines.push(`  - block (SID ${sid}): ${conds} condition(s), ${acts} action(s)`);
+        break;
+      }
+      case 'group': {
+        const title = e.title as string;
+        const sid = e.sid as number;
+        const childCount = Array.isArray(e.children) ? (e.children as unknown[]).length : 0;
+        lines.push(`  - group "${title}" (SID ${sid}): ${childCount} children`);
+        break;
+      }
+      case 'function-block': {
+        const name = e.functionName as string;
+        const sid = e.sid as number;
+        lines.push(`  - function "${name}" (SID ${sid})`);
+        break;
+      }
+      case 'variable': {
+        const name = e.name as string;
+        const sid = e.sid as number;
+        lines.push(`  - variable "${name}" (SID ${sid})`);
+        break;
+      }
+      case 'include':
+        lines.push(`  - include: "${e.includeSheet as string}"`);
+        break;
+      case 'comment':
+        lines.push(`  - comment: "${(e.text as string).slice(0, 50)}"`);
+        break;
+      default:
+        lines.push(`  - ${type}`);
+    }
+  }
+
+  if (total > maxItems) {
+    lines.push(`  ... (${total - maxItems} more)`);
+  }
+
+  return lines.join('\n');
+}
+
 // ─── Group Path Traversal ───────────────────────────────────
 
 /** Traverse event tree to find a group by title path (e.g., "Movement > Collision").
