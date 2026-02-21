@@ -14,6 +14,9 @@ import {
   validateObjectClasses,
   collectObjectRefs,
   buildBlockEvent,
+  findEventBySid,
+  countDescendants,
+  summarizeEvents,
 } from './event-helpers.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
@@ -370,6 +373,403 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         return toolResult(result);
       } catch (error) {
         return toolError(`Error deleting event sheet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── delete_event_from_sheet ────────────────────────────────
+
+  server.tool(
+    'delete_event_from_sheet',
+    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Use get_eventsheet_details to find SIDs.',
+    {
+      sheetName: z.string().max(200).describe('Target event sheet'),
+      sid: z.number().int().positive().optional().describe('SID of the event to delete (for block, group, variable, function events)'),
+      includeSheet: z.string().max(200).optional().describe('For removing includes: the included sheet name'),
+      dryRun: z.boolean().optional().default(false).describe('If true, report what would be deleted without actually deleting'),
+      force: z.boolean().optional().default(false).describe('If true, delete function-blocks even if they have callers'),
+    },
+    async (args) => {
+      try {
+        // Validate exactly one identifier
+        if ((args.sid === undefined) === (args.includeSheet === undefined)) {
+          return toolError('Specify exactly one of: sid (for blocks/groups/variables/functions) or includeSheet (for includes).');
+        }
+
+        // Read the event sheet
+        let sheet: Record<string, unknown>;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+        }
+
+        const events = sheet.events as Record<string, unknown>[];
+        const warnings: string[] = [];
+
+        // ── Include deletion path ──
+        if (args.includeSheet !== undefined) {
+          const matchIndex = events.findIndex(
+            e => e.eventType === 'include' && e.includeSheet === args.includeSheet,
+          );
+
+          if (matchIndex === -1) {
+            const currentIncludes = events
+              .filter(e => e.eventType === 'include')
+              .map(e => e.includeSheet as string);
+            const hint = currentIncludes.length > 0
+              ? `\nIncludes in "${args.sheetName}": ${currentIncludes.join(', ')}`
+              : `\nNo includes found in "${args.sheetName}".`;
+            return toolError(`No include for sheet "${args.includeSheet}" found in "${args.sheetName}".${hint}`);
+          }
+
+          if (args.dryRun) {
+            return toolResult({
+              success: true,
+              dryRun: true,
+              entity: args.sheetName,
+              category: 'eventsheet',
+              action: 'would_delete',
+              deletedType: 'include',
+              deletedTarget: args.includeSheet,
+            });
+          }
+
+          events.splice(matchIndex, 1);
+
+          const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+          const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+
+          return toolResult({
+            success: true,
+            entity: args.sheetName,
+            category: 'eventsheet',
+            action: 'updated',
+            deletedType: 'include',
+            deletedTarget: args.includeSheet,
+            warnings: warnings.length > 0 ? warnings : undefined,
+            backupFile: backupPath,
+          });
+        }
+
+        // ── SID deletion path ──
+        const found = findEventBySid(events, args.sid!);
+
+        if (!found) {
+          const summary = summarizeEvents(events);
+          return toolError(
+            `Event with SID ${args.sid} not found in sheet "${args.sheetName}".\n\n` +
+            `Sheet "${args.sheetName}" contains ${events.length} top-level events:\n${summary}\n\n` +
+            `Use get_eventsheet_details to see the full event tree with SIDs.`,
+          );
+        }
+
+        const { event, parentArray, index } = found;
+        const eventType = event.eventType as string;
+        const childCount = countDescendants(event);
+
+        // Check function-block references
+        if (eventType === 'function-block' && !args.force) {
+          const funcName = event.functionName as string;
+          const projectIndex = await getProjectIndex(reader);
+          const callers = projectIndex.functionCalls.get(funcName) || [];
+          if (callers.length > 0) {
+            return toolResult({
+              success: false,
+              entity: args.sheetName,
+              category: 'eventsheet',
+              action: 'delete_blocked',
+              message: `Function "${funcName}" is called by ${callers.length} action(s). Use force=true to delete anyway.`,
+              references: {
+                callers: callers.map(c => ({ sheet: c.sheet, path: c.path })),
+              },
+            });
+          }
+        }
+
+        // Report children for groups
+        if (childCount > 0) {
+          warnings.push(`Deleted ${eventType} contained ${childCount} child event(s) that were also removed.`);
+        }
+
+        if (args.dryRun) {
+          return toolResult({
+            success: true,
+            dryRun: true,
+            entity: args.sheetName,
+            category: 'eventsheet',
+            action: 'would_delete',
+            deletedType: eventType,
+            deletedSid: args.sid,
+            childrenCount: childCount,
+            ...(eventType === 'group' ? { deletedTitle: event.title as string } : {}),
+            ...(eventType === 'function-block' ? { deletedFunction: event.functionName as string } : {}),
+          });
+        }
+
+        parentArray.splice(index, 1);
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult({
+          ...result,
+          deletedType: eventType,
+          deletedSid: args.sid,
+          childrenRemoved: childCount,
+        });
+      } catch (error) {
+        return toolError(`Error deleting event: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── update_event_block ─────────────────────────────────────
+
+  server.tool(
+    'update_event_block',
+    'Update an existing block event in an event sheet — modify action parameters, add/remove actions or conditions, toggle disabled state. Identify the block by its SID (use get_eventsheet_details to find it).',
+    {
+      sheetName: z.string().max(200).describe('Target event sheet'),
+      sid: z.number().int().positive().describe('SID of the block event to update'),
+      disabled: z.boolean().optional().describe('Enable or disable the entire block'),
+      updateActions: z.array(z.object({
+        index: z.number().int().min(0).describe('Action index (0-based)'),
+        parameters: z.record(z.unknown()).optional().describe('New parameter values (merged with existing)'),
+        disabled: z.boolean().optional().describe('Enable or disable this action'),
+      })).optional().describe('Actions to update by index'),
+      updateConditions: z.array(z.object({
+        index: z.number().int().min(0).describe('Condition index (0-based)'),
+        parameters: z.record(z.unknown()).optional().describe('New parameter values (merged with existing)'),
+        isInverted: z.boolean().optional().describe('Toggle inversion'),
+      })).optional().describe('Conditions to update by index'),
+      addActions: z.array(actionSchema).optional().describe('Append new actions to the block'),
+      addConditions: z.array(conditionSchema).optional().describe('Append new conditions to the block'),
+      removeActionIndices: z.array(z.number().int().min(0)).optional().describe('Remove actions by index (0-based, applied before adds)'),
+      removeConditionIndices: z.array(z.number().int().min(0)).optional().describe('Remove conditions by index (0-based, applied before adds)'),
+    },
+    async (args) => {
+      try {
+        // Validate at least one update is provided
+        const hasUpdate = args.disabled !== undefined
+          || (args.updateActions && args.updateActions.length > 0)
+          || (args.updateConditions && args.updateConditions.length > 0)
+          || (args.addActions && args.addActions.length > 0)
+          || (args.addConditions && args.addConditions.length > 0)
+          || (args.removeActionIndices && args.removeActionIndices.length > 0)
+          || (args.removeConditionIndices && args.removeConditionIndices.length > 0);
+
+        if (!hasUpdate) {
+          return toolError('No updates provided. Specify at least one of: disabled, updateActions, updateConditions, addActions, addConditions, removeActionIndices, removeConditionIndices.');
+        }
+
+        // Read the event sheet
+        let sheet: Record<string, unknown>;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+        } catch {
+          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
+          const hint = suggestions.length > 0
+            ? `\nDid you mean: ${suggestions.join(', ')}?`
+            : '\nUse list_eventsheets to see all available names.';
+          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+        }
+
+        const events = sheet.events as Record<string, unknown>[];
+        const found = findEventBySid(events, args.sid);
+
+        if (!found) {
+          const summary = summarizeEvents(events);
+          return toolError(
+            `Event with SID ${args.sid} not found in sheet "${args.sheetName}".\n\n` +
+            `Sheet "${args.sheetName}" contains ${events.length} top-level events:\n${summary}\n\n` +
+            `Use get_eventsheet_details to see the full event tree with SIDs.`,
+          );
+        }
+
+        const { event } = found;
+        const eventType = event.eventType as string;
+
+        // Must be a block or function-block (not a group, variable, include, etc.)
+        if (eventType !== 'block' && eventType !== 'function-block') {
+          return toolError(`Event with SID ${args.sid} is a "${eventType}", not a block or function-block. Only block events can be updated with this tool.`);
+        }
+
+        const conditions = event.conditions as Record<string, unknown>[];
+        const actions = event.actions as Record<string, unknown>[];
+        const warnings: string[] = [];
+
+        // ── Apply block-level disabled toggle ──
+        if (args.disabled !== undefined) {
+          if (args.disabled) {
+            event.disabled = true;
+          } else {
+            delete event.disabled;
+          }
+        }
+
+        // All index-based operations reference the ORIGINAL array positions.
+        // Order: updates first (non-mutating on length), then removals (shrink array).
+        // This ensures user-supplied indices are consistent across all operations.
+
+        // ── Update existing conditions by index (merge parameters) ──
+        if (args.updateConditions) {
+          for (const upd of args.updateConditions) {
+            if (upd.index < 0 || upd.index >= conditions.length) {
+              return toolError(`Condition index ${upd.index} is out of range (block has ${conditions.length} condition(s), indices 0-${conditions.length - 1}).`);
+            }
+            const cond = conditions[upd.index];
+            if (upd.parameters) {
+              cond.parameters = { ...(cond.parameters as Record<string, unknown> || {}), ...upd.parameters };
+            }
+            if (upd.isInverted !== undefined) {
+              if (upd.isInverted) {
+                cond.isInverted = true;
+              } else {
+                delete cond.isInverted;
+              }
+            }
+          }
+        }
+
+        // ── Update existing actions by index (merge parameters) ──
+        if (args.updateActions) {
+          for (const upd of args.updateActions) {
+            if (upd.index < 0 || upd.index >= actions.length) {
+              return toolError(`Action index ${upd.index} is out of range (block has ${actions.length} action(s), indices 0-${actions.length - 1}).`);
+            }
+            const act = actions[upd.index];
+            if (upd.parameters) {
+              act.parameters = { ...(act.parameters as Record<string, unknown> || {}), ...upd.parameters };
+            }
+            if (upd.disabled !== undefined) {
+              if (upd.disabled) {
+                act.disabled = true;
+              } else {
+                delete act.disabled;
+              }
+            }
+          }
+        }
+
+        // ── Remove conditions by index (descending order to avoid index shifting) ──
+        if (args.removeConditionIndices && args.removeConditionIndices.length > 0) {
+          const sorted = [...args.removeConditionIndices].sort((a, b) => b - a);
+          for (const idx of sorted) {
+            if (idx < 0 || idx >= conditions.length) {
+              return toolError(`Condition index ${idx} is out of range (block has ${conditions.length} condition(s), indices 0-${conditions.length - 1}).`);
+            }
+            conditions.splice(idx, 1);
+          }
+        }
+
+        // ── Remove actions by index (descending order) ──
+        if (args.removeActionIndices && args.removeActionIndices.length > 0) {
+          const sorted = [...args.removeActionIndices].sort((a, b) => b - a);
+          for (const idx of sorted) {
+            if (idx < 0 || idx >= actions.length) {
+              return toolError(`Action index ${idx} is out of range (block has ${actions.length} action(s), indices 0-${actions.length - 1}).`);
+            }
+            actions.splice(idx, 1);
+          }
+        }
+
+        // ── Add new conditions ──
+        if (args.addConditions && args.addConditions.length > 0) {
+          // Validate objectClasses
+          const refs = args.addConditions.map(c => ({
+            objectClass: c.objectClass,
+            'behavior-type': c['behavior-type'],
+          }));
+          const { errors, warnings: valWarnings } = await validateObjectClasses(reader, refs);
+          if (errors.length > 0) {
+            return toolError(`Object class validation failed:\n${errors.join('\n')}`);
+          }
+          warnings.push(...valWarnings);
+
+          for (const c of args.addConditions) {
+            const condSid = await idGen.generateSid(reader);
+            const built: Record<string, unknown> = {
+              id: c.id,
+              objectClass: c.objectClass,
+              sid: condSid,
+            };
+            if (c['behavior-type']) built['behavior-type'] = c['behavior-type'];
+            if (c.parameters) built.parameters = c.parameters;
+            if (c.isInverted) built.isInverted = true;
+            if (c.isOr) built.isOr = true;
+            conditions.push(built);
+          }
+        }
+
+        // ── Add new actions ──
+        if (args.addActions && args.addActions.length > 0) {
+          // Validate objectClasses for standard actions
+          const refs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
+          for (const a of args.addActions) {
+            if ('objectClass' in a && typeof a.objectClass === 'string') {
+              refs.push({ objectClass: a.objectClass, 'behavior-type': a['behavior-type'] });
+            }
+          }
+          if (refs.length > 0) {
+            const { errors, warnings: valWarnings } = await validateObjectClasses(reader, refs);
+            if (errors.length > 0) {
+              return toolError(`Object class validation failed:\n${errors.join('\n')}`);
+            }
+            warnings.push(...valWarnings);
+          }
+
+          for (const a of args.addActions) {
+            if ('type' in a && a.type === 'script') {
+              const scriptAct: Record<string, unknown> = {
+                type: 'script',
+                script: a.script,
+              };
+              if (a.disabled) scriptAct.disabled = true;
+              actions.push(scriptAct);
+            } else if ('id' in a) {
+              const actSid = await idGen.generateSid(reader);
+              const built: Record<string, unknown> = {
+                id: a.id,
+                objectClass: a.objectClass,
+                sid: actSid,
+              };
+              if (a['behavior-type']) built['behavior-type'] = a['behavior-type'];
+              if (a.parameters) built.parameters = a.parameters;
+              if (a.callFunction) built.callFunction = a.callFunction;
+              if (a.disabled) built.disabled = true;
+              actions.push(built);
+            }
+          }
+        }
+
+        // Write back
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        return toolError(`Error updating event block: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   );

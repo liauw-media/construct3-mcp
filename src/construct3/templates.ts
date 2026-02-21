@@ -537,6 +537,19 @@ export function createLayer(name: string, sid: number): Layer {
   };
 }
 
+export interface InstanceOverrides {
+  angle?: number;
+  color?: number[];
+  zElevation?: number;
+  originX?: number;
+  originY?: number;
+  instanceVariables?: Record<string, unknown>;
+  behaviors?: Record<string, unknown>;
+  tags?: string;
+  showing?: boolean;
+  locked?: boolean;
+}
+
 export function createInstance(
   objectType: string,
   uid: number,
@@ -546,6 +559,7 @@ export function createInstance(
   width: number,
   height: number,
   pluginProperties?: Record<string, unknown>,
+  overrides?: InstanceOverrides,
 ): Instance {
   // Use provided properties, or look up defaults for known plugins, or empty
   const properties = pluginProperties ?? {};
@@ -555,21 +569,21 @@ export function createInstance(
     properties,
     uid,
     sid,
-    tags: '',
-    instanceVariables: {},
-    behaviors: {},
-    showing: true,
-    locked: false,
+    tags: overrides?.tags ?? '',
+    instanceVariables: overrides?.instanceVariables ?? {},
+    behaviors: overrides?.behaviors ?? {},
+    showing: overrides?.showing ?? true,
+    locked: overrides?.locked ?? false,
     world: {
       x,
       y,
       width,
       height,
-      originX: 0.5,
-      originY: 0.5,
-      color: [1, 1, 1, 1],
-      angle: 0,
-      zElevation: 0,
+      originX: overrides?.originX ?? 0.5,
+      originY: overrides?.originY ?? 0.5,
+      color: overrides?.color ?? [1, 1, 1, 1],
+      angle: overrides?.angle ?? 0,
+      zElevation: overrides?.zElevation ?? 0,
     },
   };
 }

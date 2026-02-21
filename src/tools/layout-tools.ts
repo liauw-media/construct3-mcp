@@ -12,6 +12,7 @@ import {
   createLayout,
   createInstance,
 } from '../construct3/templates.js';
+import type { InstanceOverrides } from '../construct3/templates.js';
 
 export function registerLayoutTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_layout ────────────────────────────────────────
@@ -85,7 +86,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'add_instance_to_layout',
-    'Place an object instance on a layout layer',
+    'Place an object instance on a layout layer. For copying instances between layouts, read the source with get_layout_details and pass instance properties here — all visual and behavioral properties (angle, color, instanceVariables, behaviors, etc.) are preserved when specified.',
     {
       layoutName: z.string().max(200).describe('Target layout'),
       layerName: z.string().max(200).describe('Target layer within layout'),
@@ -94,22 +95,44 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       y: z.number().describe('Y position'),
       width: z.number().optional().default(100).describe('Instance width'),
       height: z.number().optional().default(100).describe('Instance height'),
-      properties: z.record(z.unknown()).optional().describe('Plugin-specific instance properties (auto-filled for known plugins if omitted)'),
+      properties: z.record(z.unknown())
+        .refine(obj => JSON.stringify(obj).length <= 50_000, 'Properties payload too large (max 50KB)')
+        .optional()
+        .describe('Plugin-specific instance properties (auto-filled for known plugins if omitted)'),
+      // Instance-level overrides
+      angle: z.number().optional().describe('Rotation angle in radians (default: 0)'),
+      color: z.array(z.number().min(0).max(1)).length(4).optional().describe('RGBA tint as [r, g, b, a] with values 0-1 (default: [1,1,1,1])'),
+      zElevation: z.number().optional().describe('Z elevation for 3D layering (default: 0)'),
+      originX: z.number().min(0).max(1).optional().describe('Horizontal origin 0-1 (default: 0.5 = center)'),
+      originY: z.number().min(0).max(1).optional().describe('Vertical origin 0-1 (default: 0.5 = center)'),
+      instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
+        .describe('Instance variable values as {varName: value}'),
+      behaviors: z.record(z.string(), z.record(z.unknown()))
+        .refine(obj => Object.keys(obj).length <= 50, 'Too many behaviors (max 50)')
+        .refine(obj => JSON.stringify(obj).length <= 50_000, 'Behaviors payload too large (max 50KB)')
+        .optional()
+        .describe('Behavior runtime state as {behaviorName: {prop: val}}'),
+      tags: z.string().max(500).regex(/^[a-zA-Z0-9_, ]*$/).optional()
+        .describe('Comma-separated instance tags (default: empty)'),
+      showing: z.boolean().optional().describe('Whether instance is initially visible (default: true)'),
+      locked: z.boolean().optional().describe('Whether instance is locked in the editor (default: false)'),
     },
     async (args) => {
       try {
         // Validate object type exists and read its plugin ID
         let pluginId: string | undefined;
         let isNonworld = false;
+        let objData: Record<string, unknown> | undefined;
         try {
-          const objData = await reader.readObjectType(args.objectType);
-          pluginId = objData['plugin-id'];
+          const obj = await reader.readObjectType(args.objectType);
+          objData = obj as unknown as Record<string, unknown>;
+          pluginId = obj['plugin-id'];
           // Block global-only objects from being placed on layouts
-          if ((objData as Record<string, unknown>)['singleglobal-inst']) {
+          if (objData['singleglobal-inst']) {
             return toolError(`Object "${args.objectType}" is a global plugin (${pluginId}) and cannot be placed on layouts.`);
           }
           // Nonworld-global objects (Arr, Json, Dictionary) go in nonworld-instances, not on layers
-          if ((objData as Record<string, unknown>).isGlobal === true) {
+          if (objData.isGlobal === true) {
             isNonworld = true;
           }
         } catch {
@@ -131,6 +154,42 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         const sid = await idGen.generateSid(reader);
         const warnings: string[] = [];
 
+        // Validate instanceVariables keys against object type definition
+        if (args.instanceVariables && objData) {
+          const ivDefs = objData.instanceVariables as Array<{ name: string }> | undefined;
+          const definedVars = new Set((ivDefs ?? []).map(v => v.name));
+          for (const key of Object.keys(args.instanceVariables)) {
+            if (!definedVars.has(key)) {
+              warnings.push(`Instance variable "${key}" is not defined on "${args.objectType}". Defined variables: ${[...definedVars].join(', ') || '(none)'}. It may be inherited from a family.`);
+            }
+          }
+        }
+
+        // Validate behaviors keys against object type definition
+        if (args.behaviors && objData) {
+          const bhDefs = objData.behaviorTypes as Array<{ name: string }> | undefined;
+          const definedBehaviors = new Set((bhDefs ?? []).map(b => b.name));
+          for (const key of Object.keys(args.behaviors)) {
+            if (!definedBehaviors.has(key)) {
+              warnings.push(`Behavior "${key}" is not defined on "${args.objectType}". Defined behaviors: ${[...definedBehaviors].join(', ') || '(none)'}. It may be inherited from a family.`);
+            }
+          }
+        }
+
+        // Build overrides from optional params
+        const overrides: InstanceOverrides = {};
+        if (args.angle !== undefined) overrides.angle = args.angle;
+        if (args.color !== undefined) overrides.color = args.color;
+        if (args.zElevation !== undefined) overrides.zElevation = args.zElevation;
+        if (args.originX !== undefined) overrides.originX = args.originX;
+        if (args.originY !== undefined) overrides.originY = args.originY;
+        if (args.instanceVariables !== undefined) overrides.instanceVariables = args.instanceVariables;
+        if (args.behaviors !== undefined) overrides.behaviors = args.behaviors;
+        if (args.tags !== undefined) overrides.tags = args.tags;
+        if (args.showing !== undefined) overrides.showing = args.showing;
+        if (args.locked !== undefined) overrides.locked = args.locked;
+        const hasOverrides = Object.keys(overrides).length > 0;
+
         if (isNonworld) {
           if (!layout['nonworld-instances']) layout['nonworld-instances'] = [];
           layout['nonworld-instances'].push({
@@ -138,9 +197,9 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
             properties: args.properties ?? {},
             uid,
             sid,
-            tags: '',
-            instanceVariables: {},
-            behaviors: {},
+            tags: overrides.tags ?? '',
+            instanceVariables: overrides.instanceVariables ?? {},
+            behaviors: overrides.behaviors ?? {},
           });
           warnings.push(`"${args.objectType}" is a global (nonworld) object — placed in nonworld-instances instead of on a layer. Layer and position parameters were ignored.`);
         } else {
@@ -158,7 +217,11 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
             warnings.push(`No default instance properties known for plugin "${pluginId}". Instance created with empty properties — you may need to configure them in the C3 editor.`);
           }
 
-          const instance = createInstance(args.objectType, uid, sid, args.x, args.y, args.width, args.height, pluginProps);
+          const instance = createInstance(
+            args.objectType, uid, sid, args.x, args.y, args.width, args.height,
+            pluginProps,
+            hasOverrides ? overrides : undefined,
+          );
 
           targetLayer.instances.push(instance);
         }

@@ -309,3 +309,522 @@ describe('delete_event_sheet', () => {
     expect(result.content[0].text).toContain('not found');
   });
 });
+
+describe('delete_event_from_sheet', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('delete_event_from_sheet')).toBe(true);
+  });
+
+  it('errors when neither sid nor includeSheet provided', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 1 }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('exactly one');
+  });
+
+  it('deletes a block by SID', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: 100, conditions: [], actions: [] },
+          { eventType: 'block', sid: 200, conditions: [], actions: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      sid: 100,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.deletedType).toBe('block');
+    expect(data.deletedSid).toBe(100);
+
+    // Verify the written sheet has only one event left
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    expect(events).toHaveLength(1);
+    expect(events[0].sid).toBe(200);
+  });
+
+  it('deletes a nested block inside a group', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'group', sid: 50, title: 'Movement', children: [
+              { eventType: 'block', sid: 100, conditions: [], actions: [] },
+              { eventType: 'block', sid: 200, conditions: [], actions: [] },
+            ],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      sid: 100,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const group = events[0];
+    expect((group.children as unknown[]).length).toBe(1);
+  });
+
+  it('removes include by sheet name', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          { eventType: 'include', includeSheet: 'SharedSheet' },
+          { eventType: 'block', sid: 100, conditions: [], actions: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      includeSheet: 'SharedSheet',
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.deletedType).toBe('include');
+    expect(data.deletedTarget).toBe('SharedSheet');
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('block');
+  });
+
+  it('errors on nonexistent SID with summary', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: 100, conditions: [1], actions: [1, 2] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      sid: 999,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('SID 999');
+    expect(result.content[0].text).toContain('SID 100');
+  });
+
+  it('errors on nonexistent include with list', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          { eventType: 'include', includeSheet: 'SharedSheet' },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      includeSheet: 'NonExistent',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('SharedSheet');
+  });
+
+  it('dryRun returns preview without deleting', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: 100, conditions: [], actions: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      dryRun: true,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.dryRun).toBe(true);
+    expect(data.action).toBe('would_delete');
+    // No writes should have occurred
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('reports children count for group deletion', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'group', sid: 50, title: 'Movement', children: [
+              { eventType: 'block', sid: 100, conditions: [], actions: [] },
+              { eventType: 'block', sid: 200, conditions: [], actions: [] },
+            ],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'MainSheet',
+      sid: 50,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.childrenRemoved).toBe(2);
+    expect(data.warnings).toBeDefined();
+    expect(data.warnings[0]).toContain('2 child');
+  });
+});
+
+describe('update_event_block', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('update_event_block')).toBe(true);
+  });
+
+  it('updates block disabled state', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: 100, conditions: [], actions: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      disabled: true,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    expect(events[0].disabled).toBe(true);
+  });
+
+  it('updates action parameters by index (merge semantics)', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [{
+              id: 'go-to-layout', objectClass: 'System', sid: 20,
+              parameters: { layout: '"Level 1"', transition: '"none"' },
+            }],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      updateActions: [{ index: 0, parameters: { layout: '"Level 2"' } }],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const action = (events[0].actions as Record<string, unknown>[])[0];
+    const params = action.parameters as Record<string, unknown>;
+    // New value applied
+    expect(params.layout).toBe('"Level 2"');
+    // Existing value preserved (merge semantics)
+    expect(params.transition).toBe('"none"');
+  });
+
+  it('updates condition inversion by index', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'compare', objectClass: 'System', sid: 10 }],
+            actions: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      updateConditions: [{ index: 0, isInverted: true }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const cond = (events[0].conditions as Record<string, unknown>[])[0];
+    expect(cond.isInverted).toBe(true);
+  });
+
+  it('adds new actions with generated SIDs', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Player', { name: 'Player', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ id: 'destroy', objectClass: 'Player' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const actions = events[0].actions as Record<string, unknown>[];
+    expect(actions).toHaveLength(1);
+    expect(actions[0].id).toBe('destroy');
+    expect(actions[0].sid).toBeDefined();
+  });
+
+  it('removes actions by index', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [
+              { id: 'a', objectClass: 'System', sid: 20 },
+              { id: 'b', objectClass: 'System', sid: 21 },
+              { id: 'c', objectClass: 'System', sid: 22 },
+            ],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeActionIndices: [0, 2],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const actions = events[0].actions as Record<string, unknown>[];
+    expect(actions).toHaveLength(1);
+    expect(actions[0].id).toBe('b');
+  });
+
+  it('errors on nonexistent SID', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [{ eventType: 'block', sid: 100, conditions: [], actions: [] }],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 999,
+      disabled: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('SID 999');
+  });
+
+  it('errors on out-of-range action index', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [{ id: 'a', objectClass: 'System', sid: 20 }],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      updateActions: [{ index: 5, parameters: { x: 1 } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('out of range');
+  });
+
+  it('errors when no updates provided', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [{ eventType: 'block', sid: 100, conditions: [], actions: [] }],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('No updates');
+  });
+
+  it('errors when targeting a non-block event', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [{ eventType: 'group', sid: 100, title: 'Test', children: [] }],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      disabled: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('group');
+    expect(result.content[0].text).toContain('not a block');
+  });
+
+  it('adds new conditions with generated SIDs', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addConditions: [{ id: 'every-tick', objectClass: 'System' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const conditions = events[0].conditions as Record<string, unknown>[];
+    expect(conditions).toHaveLength(2);
+    expect(conditions[1].id).toBe('every-tick');
+    expect(conditions[1].sid).toBeDefined();
+  });
+
+  it('removes conditions by index', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [
+              { id: 'a', objectClass: 'System', sid: 10 },
+              { id: 'b', objectClass: 'System', sid: 11 },
+            ],
+            actions: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeConditionIndices: [0],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const conditions = events[0].conditions as Record<string, unknown>[];
+    expect(conditions).toHaveLength(1);
+    expect(conditions[0].id).toBe('b');
+  });
+
+  it('update + remove in same call uses original indices', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [
+              { id: 'a', objectClass: 'System', sid: 20, parameters: { val: 1 } },
+              { id: 'b', objectClass: 'System', sid: 21, parameters: { val: 2 } },
+              { id: 'c', objectClass: 'System', sid: 22, parameters: { val: 3 } },
+            ],
+          },
+        ],
+      }]]),
+    });
+    // Remove index 0 (action 'a') and update index 2 (action 'c') in the same call.
+    // Both indices refer to the ORIGINAL array, so this must not error.
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      removeActionIndices: [0],
+      updateActions: [{ index: 2, parameters: { val: 99 } }],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const actions = events[0].actions as Record<string, unknown>[];
+    // After: action 'a' removed, action 'c' updated. Result: [b, c(updated)]
+    expect(actions).toHaveLength(2);
+    expect(actions[0].id).toBe('b');
+    expect(actions[1].id).toBe('c');
+    expect((actions[1].parameters as Record<string, unknown>).val).toBe(99);
+  });
+
+  it('can disable individual actions', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [{ id: 'a', objectClass: 'System', sid: 20 }],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      updateActions: [{ index: 0, disabled: true }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const events = writtenData.events as Array<Record<string, unknown>>;
+    const action = (events[0].actions as Record<string, unknown>[])[0];
+    expect(action.disabled).toBe(true);
+  });
+});

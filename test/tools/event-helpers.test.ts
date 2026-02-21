@@ -4,6 +4,9 @@ import {
   validateObjectClasses,
   collectObjectRefs,
   buildBlockEvent,
+  findEventBySid,
+  countDescendants,
+  summarizeEvents,
   MAX_NESTING_DEPTH,
   MAX_TOTAL_EVENTS,
 } from '../../src/tools/event-helpers.js';
@@ -364,5 +367,157 @@ describe('buildBlockEvent', () => {
     );
 
     expect((block.actions[0] as any).disabled).toBe(true);
+  });
+});
+
+describe('findEventBySid', () => {
+  it('finds a top-level block by SID', () => {
+    const events = [
+      { eventType: 'block', sid: 100, conditions: [], actions: [] },
+      { eventType: 'block', sid: 200, conditions: [], actions: [] },
+    ] as Record<string, unknown>[];
+
+    const result = findEventBySid(events, 200);
+    expect(result).not.toBeNull();
+    expect(result!.event.sid).toBe(200);
+    expect(result!.index).toBe(1);
+    expect(result!.parentArray).toBe(events);
+  });
+
+  it('finds a deeply nested block inside a group', () => {
+    const nestedBlock = { eventType: 'block', sid: 999, conditions: [], actions: [] };
+    const events = [
+      {
+        eventType: 'group', sid: 100, title: 'Outer', children: [
+          {
+            eventType: 'group', sid: 200, title: 'Inner', children: [
+              nestedBlock,
+            ],
+          },
+        ],
+      },
+    ] as Record<string, unknown>[];
+
+    const result = findEventBySid(events, 999);
+    expect(result).not.toBeNull();
+    expect(result!.event).toBe(nestedBlock);
+    expect(result!.index).toBe(0);
+  });
+
+  it('returns null for nonexistent SID', () => {
+    const events = [
+      { eventType: 'block', sid: 100, conditions: [], actions: [] },
+    ] as Record<string, unknown>[];
+
+    expect(findEventBySid(events, 999)).toBeNull();
+  });
+
+  it('returns parentArray and index for safe splicing', () => {
+    const innerChildren = [
+      { eventType: 'block', sid: 10, conditions: [], actions: [] },
+      { eventType: 'block', sid: 20, conditions: [], actions: [] },
+      { eventType: 'block', sid: 30, conditions: [], actions: [] },
+    ] as Record<string, unknown>[];
+    const events = [
+      { eventType: 'group', sid: 1, title: 'G', children: innerChildren },
+    ] as Record<string, unknown>[];
+
+    const result = findEventBySid(events, 20);
+    expect(result).not.toBeNull();
+    expect(result!.parentArray).toBe(innerChildren);
+    expect(result!.index).toBe(1);
+
+    // Test that splicing works correctly
+    result!.parentArray.splice(result!.index, 1);
+    expect(innerChildren).toHaveLength(2);
+    expect(innerChildren[0].sid).toBe(10);
+    expect(innerChildren[1].sid).toBe(30);
+  });
+
+  it('finds variable events by SID', () => {
+    const events = [
+      { eventType: 'variable', sid: 500, name: 'score', type: 'number' },
+    ] as Record<string, unknown>[];
+
+    const result = findEventBySid(events, 500);
+    expect(result).not.toBeNull();
+    expect(result!.event.eventType).toBe('variable');
+  });
+
+  it('finds function-block events by SID', () => {
+    const events = [
+      { eventType: 'function-block', sid: 600, functionName: 'DoStuff', conditions: [], actions: [] },
+    ] as Record<string, unknown>[];
+
+    const result = findEventBySid(events, 600);
+    expect(result).not.toBeNull();
+    expect(result!.event.functionName).toBe('DoStuff');
+  });
+});
+
+describe('countDescendants', () => {
+  it('returns 0 for events with no children', () => {
+    const event = { eventType: 'block', sid: 1 } as Record<string, unknown>;
+    expect(countDescendants(event)).toBe(0);
+  });
+
+  it('returns 0 for empty children array', () => {
+    const event = { eventType: 'group', sid: 1, children: [] } as Record<string, unknown>;
+    expect(countDescendants(event)).toBe(0);
+  });
+
+  it('counts direct children', () => {
+    const event = {
+      eventType: 'group', sid: 1, children: [
+        { eventType: 'block', sid: 10 },
+        { eventType: 'block', sid: 20 },
+      ],
+    } as Record<string, unknown>;
+    expect(countDescendants(event)).toBe(2);
+  });
+
+  it('counts deeply nested children', () => {
+    const event = {
+      eventType: 'group', sid: 1, children: [
+        {
+          eventType: 'group', sid: 10, children: [
+            { eventType: 'block', sid: 100 },
+            { eventType: 'block', sid: 101 },
+          ],
+        },
+        { eventType: 'block', sid: 20 },
+      ],
+    } as Record<string, unknown>;
+    // 3 direct + nested: group(10) + block(100) + block(101) + block(20) = 4
+    expect(countDescendants(event)).toBe(4);
+  });
+});
+
+describe('summarizeEvents', () => {
+  it('summarizes blocks with SIDs', () => {
+    const events = [
+      { eventType: 'block', sid: 100, conditions: [1, 2], actions: [1] },
+    ] as Record<string, unknown>[];
+    const summary = summarizeEvents(events);
+    expect(summary).toContain('block');
+    expect(summary).toContain('SID 100');
+    expect(summary).toContain('2 condition(s)');
+  });
+
+  it('summarizes groups', () => {
+    const events = [
+      { eventType: 'group', sid: 50, title: 'Movement', children: [1, 2, 3] },
+    ] as Record<string, unknown>[];
+    const summary = summarizeEvents(events);
+    expect(summary).toContain('group "Movement"');
+    expect(summary).toContain('3 children');
+  });
+
+  it('truncates long lists', () => {
+    const events = Array.from({ length: 15 }, (_, i) => ({
+      eventType: 'block', sid: i, conditions: [], actions: [],
+    })) as Record<string, unknown>[];
+    const summary = summarizeEvents(events, 5);
+    expect(summary).toContain('10 more');
   });
 });
