@@ -21,7 +21,7 @@ import { IdGenerator } from './construct3/id-generator.js';
 const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || process.cwd();
 
 const server = new McpServer(
-  { name: 'construct3-mcp-server', version: '1.3.0' },
+  { name: 'construct3-mcp-server', version: '1.5.0' },
   { capabilities: { resources: {}, tools: {}, prompts: {} } }
 );
 
