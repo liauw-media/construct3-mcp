@@ -9,6 +9,8 @@ import { getEventSheetFlow, getFunctionMap } from '../construct3/analyzers/event
 import { getObjectDependencies, findOrphanedObjects } from '../construct3/analyzers/object-deps.js';
 import { getAssetUsage } from '../construct3/analyzers/asset-usage.js';
 import { analyzePerformance } from '../construct3/analyzers/performance.js';
+import { validateProjectIntegrity } from '../construct3/analyzers/integrity.js';
+import { getGroupSettings } from '../construct3/analyzers/group-settings.js';
 
 const detailSchema = z.enum(['summary', 'standard', 'full']).optional().default('standard')
   .describe('Level of detail: summary (<2K tokens), standard, or full');
@@ -154,6 +156,54 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
         const result = await analyzePerformance(reader, {
           scope: args.scope,
           detail: args.detail,
+        });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool: Project integrity validation
+  server.tool(
+    'validate_project',
+    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files.',
+    {},
+    async () => {
+      try {
+        const result = await validateProjectIntegrity(reader);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool: Group settings analysis
+  server.tool(
+    'get_group_settings',
+    'Get all event group settings (isActiveOnStart, disabled) across event sheets. Useful for migration validation.',
+    {
+      eventsheet: z.string().max(200).optional().describe('Filter to a specific event sheet'),
+      activeOnly: z.boolean().optional().describe('Only show groups with isActiveOnStart=true'),
+      inactiveOnly: z.boolean().optional().describe('Only show groups with isActiveOnStart=false'),
+    },
+    async (args) => {
+      try {
+        const result = await getGroupSettings(reader, {
+          eventsheet: args.eventsheet,
+          activeOnly: args.activeOnly,
+          inactiveOnly: args.inactiveOnly,
         });
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],

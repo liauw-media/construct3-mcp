@@ -30,6 +30,10 @@ export class MockReader {
   private families: Map<string, Record<string, unknown>>;
   private meta: NonNullable<MockReaderData['metadata']>;
   private addons: NonNullable<MockReaderData['usedAddons']>;
+  // Names registered in c3proj but without corresponding data (for file-existence testing)
+  private registeredOnly: { objects: string[]; eventSheets: string[]; layouts: string[] } = {
+    objects: [], eventSheets: [], layouts: [],
+  };
 
   constructor(data: MockReaderData = {}) {
     this.objects = data.objects ?? new Map();
@@ -126,10 +130,10 @@ export class MockReader {
       bundleAddons: false,
       usedAddons: this.addons as Construct3Project['usedAddons'],
       uniqueId: 'test-project-id',
-      objectTypes: { items: Array.from(this.objects.keys()), subfolders: [] },
+      objectTypes: { items: [...Array.from(this.objects.keys()), ...this.registeredOnly.objects], subfolders: [] },
       families: { items: Array.from(this.families.keys()), subfolders: [] },
-      layouts: { items: Array.from(this.layouts.keys()), subfolders: [] },
-      eventSheets: { items: Array.from(this.eventSheets.keys()), subfolders: [] },
+      layouts: { items: [...Array.from(this.layouts.keys()), ...this.registeredOnly.layouts], subfolders: [] },
+      eventSheets: { items: [...Array.from(this.eventSheets.keys()), ...this.registeredOnly.eventSheets], subfolders: [] },
       rootFileFolders: {
         script: { items: [], subfolders: [] },
         sound: { items: [], subfolders: [] },
@@ -161,6 +165,7 @@ export class MockReader {
         themeColor: [1, 1, 1, 1],
         orientations: 'any',
         webgpu: 'auto',
+        multitexturing: 'auto',
         gpuPreference: 'high-performance',
         scriptsType: 'module',
         framerateMode: 'vsync',
@@ -220,5 +225,13 @@ export class MockReader {
 
   addLayout(name: string, data: Record<string, unknown>): void {
     this.layouts.set(name, data);
+  }
+
+  /**
+   * Register a name in c3proj containers without providing data.
+   * Simulates a missing/corrupt file for file-existence tests.
+   */
+  registerEntityName(category: 'objects' | 'eventSheets' | 'layouts', name: string): void {
+    this.registeredOnly[category].push(name);
   }
 }

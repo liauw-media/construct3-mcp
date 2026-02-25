@@ -68,7 +68,9 @@ export class ProjectIndex {
     const eventSheets = await reader.readAllEventSheets();
     for (const [sheetName, sheet] of eventSheets) {
       this.eventSheetIncludes.set(sheetName, []);
-      this.indexEventSheet(sheetName, sheet.events);
+      if (Array.isArray(sheet.events)) {
+        this.indexEventSheet(sheetName, sheet.events);
+      }
     }
 
     // Build includedBy reverse map
