@@ -4,7 +4,9 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult, ObjectType } from '../construct3/types.js';
+import type { WriteResult, ObjectType, Instance, Layout } from '../construct3/types.js';
+import type { Construct3ProjectReader } from '../construct3/project-reader.js';
+import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
 import { validateName, validateSubfolder, toolResult, toolError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
@@ -57,11 +59,35 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           data = createGlobalObject(args.name, args.pluginId, sid, uid, sgiSid);
         } else if (args.pluginId === 'Sprite') {
           const animSid = await idGen.generateSid(reader);
-          data = createSpriteObject(args.name, sid, animSid);
+          const imageSpriteId = await idGen.generateImageSpriteId(reader);
+
+          // Write placeholder PNG before JSON — abort if image fails
+          await writer.writeImageFiles([{
+            objectName: args.name,
+            animationName: 'Animation 1',
+            frameIndex: 0,
+            pluginId: 'Sprite',
+            width: 1,
+            height: 1,
+          }]);
+
+          data = createSpriteObject(args.name, sid, animSid, imageSpriteId);
         } else if (args.pluginId === 'Text') {
           data = createTextObject(args.name, sid);
         } else if (args.pluginId === 'TiledBg') {
-          data = createTiledBgObject(args.name, sid);
+          const imageSpriteId = await idGen.generateImageSpriteId(reader);
+
+          // Write placeholder PNG before JSON — abort if image fails
+          await writer.writeImageFiles([{
+            objectName: args.name,
+            animationName: '',
+            frameIndex: 0,
+            pluginId: 'TiledBg',
+            width: 1,
+            height: 1,
+          }]);
+
+          data = createTiledBgObject(args.name, sid, imageSpriteId);
         } else {
           data = createGenericObject(args.name, args.pluginId, sid);
           // Nonworld-global plugins (Arr, Json, Dictionary) are isGlobal but not singleglobal-inst
@@ -208,6 +234,15 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
         const backupPath = await writer.writeEntityFile('objectTypes', args.name, obj, subfolder);
 
+        // Sync layout instances: ensure all instances of this object have
+        // behaviors/instanceVariables dicts so C3 can resolve them on load.
+        if (args.addBehaviors?.length || args.removeBehaviors?.length || args.addVariables?.length || args.removeVariables?.length) {
+          const syncedLayouts = await syncLayoutInstances(reader, writer, args.name);
+          if (syncedLayouts.length > 0) {
+            warnings.push(`Updated instances in layout(s): ${syncedLayouts.join(', ')}`);
+          }
+        }
+
         const result: WriteResult = {
           success: true,
           entity: args.name,
@@ -290,4 +325,71 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
       }
     }
   );
+}
+
+/**
+ * Ensure all layout instances of an object type have the standard
+ * `behaviors` and `instanceVariables` dicts that C3 expects.
+ * Without these, C3 may fail to load the project after a behavior or
+ * variable is added to the object type definition.
+ *
+ * Returns the names of any layouts that were modified.
+ */
+async function syncLayoutInstances(
+  reader: Construct3ProjectReader,
+  writer: Construct3ProjectWriter,
+  objectName: string,
+): Promise<string[]> {
+  const layouts = await reader.readAllLayouts();
+  const modifiedLayouts: string[] = [];
+
+  for (const [layoutName, layout] of layouts) {
+    let modified = false;
+
+    for (const layer of layout.layers) {
+      for (const instance of layer.instances) {
+        if (instance.type === objectName) {
+          modified = ensureInstanceFields(instance) || modified;
+        }
+      }
+    }
+
+    // Also check nonworld-instances
+    const nonworld = (layout as Record<string, unknown>)['nonworld-instances'] as Instance[] | undefined;
+    if (Array.isArray(nonworld)) {
+      for (const instance of nonworld) {
+        if (instance.type === objectName) {
+          modified = ensureInstanceFields(instance) || modified;
+        }
+      }
+    }
+
+    if (modified) {
+      const subfolder = writer.getSubfolderForEntity('layouts', layoutName);
+      await writer.writeEntityFile('layouts', layoutName, layout, subfolder);
+      modifiedLayouts.push(layoutName);
+    }
+  }
+
+  return modifiedLayouts;
+}
+
+/**
+ * Ensure an instance has the standard fields C3 expects.
+ * Returns true if the instance was modified.
+ */
+function ensureInstanceFields(instance: Instance): boolean {
+  let modified = false;
+  const inst = instance as Record<string, unknown>;
+
+  if (!inst.behaviors || typeof inst.behaviors !== 'object') {
+    inst.behaviors = {};
+    modified = true;
+  }
+  if (!inst.instanceVariables || typeof inst.instanceVariables !== 'object') {
+    inst.instanceVariables = {};
+    modified = true;
+  }
+
+  return modified;
 }

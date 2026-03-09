@@ -2,6 +2,33 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [1.6.0] - 2026-03-02
+
+### Sprite Image Pipeline
+
+Automatic placeholder PNG generation for Sprites and TiledBg objects, with `imageSpriteId` linking between object JSON and image files.
+
+#### Added
+
+- **PNG Generator** (`png-generator.ts`) — Zero-dependency transparent PNG generation using zlib; follows C3 image naming conventions (`objectname-animation-000.png` for Sprites, `objectname.png` for TiledBg)
+- **`writeImageFile`** — Write a single placeholder PNG to the `images/` directory with auto-created directories
+- **`writeImageFiles`** — Batch write multiple PNGs with rollback on failure (cleans up already-written files)
+- **`generateImageSpriteId`** — 7-digit collision-checked ID generator for linking animation frames to image files
+- **`imageSpriteId` support** — `createSpriteObject`, `createTiledBgObject`, and `createAnimationFrame` templates now accept optional `imageSpriteId`
+- **Image pipeline integration tests** — 7 tests covering PNG creation, valid signatures, batch writes, Sprite/TiledBg round-trips, and ID uniqueness
+
+#### Fixed
+
+- **Behavior addition breaks project** — When `update_object_properties` adds a behavior or variable to an object type, existing layout instances of that object now get `behaviors` and `instanceVariables` dicts auto-synced so C3 can resolve them on project load. Without these fields, C3 could fail to open the project.
+- **Fixture layout instance** updated to include `behaviors`, `instanceVariables`, and `tags` fields matching real C3 projects
+
+#### Infrastructure
+
+- 278 tests (up from 262), 12 test files
+- `IdGenerator` now tracks `existingImageSpriteIds` from animation frames across the project
+- 6 behavior workflow integration tests (add behavior, addon registration, multiple behaviors, field preservation, layout instance sync, full round-trip)
+- 3 behavior unit tests (layout sync when instances exist, skip when none, preserve existing overrides)
+
 ## [1.5.0] - 2026-02-21
 
 ### Event Sheet & Layout Lifecycle

@@ -10,6 +10,7 @@ import type { IdGenerator } from './id-generator.js';
 import type { Addon, Subfolder, ProjectProperties } from './types.js';
 import { resetProjectIndex } from './analyzers/index-builder.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from './templates.js';
+import { generatePlaceholderPng, getImageFileName } from './png-generator.js';
 
 /** Maximum entity file size we'll write (5MB — well above any real C3 entity) */
 const MAX_WRITE_SIZE = 5 * 1024 * 1024;
@@ -371,6 +372,80 @@ export class Construct3ProjectWriter {
 
       return `Auto-registered ${type} "${id}" in usedAddons (was not previously in the project).`;
     });
+  }
+
+  /**
+   * Write a single placeholder PNG image file to the images/ directory.
+   *
+   * @param objectName    Object type name
+   * @param animationName Animation name (for Sprites)
+   * @param frameIndex    Frame index (0-based)
+   * @param pluginId      Plugin ID (e.g. 'Sprite', 'TiledBg')
+   * @param width         Image width in pixels (default: 1)
+   * @param height        Image height in pixels (default: 1)
+   * @returns The written file path
+   */
+  async writeImageFile(
+    objectName: string,
+    animationName: string,
+    frameIndex: number,
+    pluginId?: string,
+    width = 1,
+    height = 1,
+  ): Promise<string> {
+    const fileName = getImageFileName(objectName, animationName, frameIndex, pluginId);
+    const filePath = this.resolveProjectPath('images', fileName);
+
+    await mkdir(dirname(filePath), { recursive: true });
+
+    const png = generatePlaceholderPng(width, height);
+    await writeFile(filePath, png);
+
+    return filePath;
+  }
+
+  /**
+   * Write multiple image files atomically — if any fails, clean up the ones already written.
+   *
+   * @param files Array of image file descriptors
+   * @returns Array of written file paths
+   */
+  async writeImageFiles(
+    files: Array<{
+      objectName: string;
+      animationName: string;
+      frameIndex: number;
+      pluginId?: string;
+      width?: number;
+      height?: number;
+    }>,
+  ): Promise<string[]> {
+    const writtenPaths: string[] = [];
+
+    try {
+      for (const file of files) {
+        const path = await this.writeImageFile(
+          file.objectName,
+          file.animationName,
+          file.frameIndex,
+          file.pluginId,
+          file.width,
+          file.height,
+        );
+        writtenPaths.push(path);
+      }
+      return writtenPaths;
+    } catch (error) {
+      // Rollback: remove any images we already wrote
+      for (const path of writtenPaths) {
+        try {
+          await unlink(path);
+        } catch {
+          // Best-effort cleanup — orphaned PNGs are harmless
+        }
+      }
+      throw error;
+    }
   }
 
   /**

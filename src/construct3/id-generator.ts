@@ -10,8 +10,12 @@ const SID_MIN = 100_000_000_000_000; // 15-digit minimum
 const SID_MAX = 999_999_999_999_999; // 15-digit maximum
 const MAX_SID_RETRIES = 100;
 
+const IMAGE_SPRITE_ID_MIN = 1_000_000; // 7-digit minimum
+const IMAGE_SPRITE_ID_MAX = 9_999_999; // 7-digit maximum
+
 export class IdGenerator {
   private existingSids: Set<number> | null = null;
+  private existingImageSpriteIds: Set<number> | null = null;
   private highestUid = 0;
   private initialized = false;
 
@@ -22,6 +26,7 @@ export class IdGenerator {
     if (this.initialized) return;
 
     this.existingSids = new Set<number>();
+    this.existingImageSpriteIds = new Set<number>();
 
     // Scan c3proj file for SIDs in file items
     const project = reader.getProject();
@@ -114,6 +119,24 @@ export class IdGenerator {
   }
 
   /**
+   * Generate a unique imageSpriteId (7-digit integer, collision-checked).
+   * These IDs are used per animation frame to link to the image file.
+   */
+  async generateImageSpriteId(reader: Construct3ProjectReader): Promise<number> {
+    await this.initialize(reader);
+
+    for (let i = 0; i < MAX_SID_RETRIES; i++) {
+      const id = Math.floor(Math.random() * (IMAGE_SPRITE_ID_MAX - IMAGE_SPRITE_ID_MIN + 1)) + IMAGE_SPRITE_ID_MIN;
+      if (!this.existingImageSpriteIds!.has(id)) {
+        this.existingImageSpriteIds!.add(id);
+        return id;
+      }
+    }
+
+    throw new Error(`Failed to generate unique imageSpriteId after ${MAX_SID_RETRIES} attempts`);
+  }
+
+  /**
    * Register a newly generated SID.
    */
   addSid(sid: number): void {
@@ -134,6 +157,7 @@ export class IdGenerator {
    */
   reset(): void {
     this.existingSids = null;
+    this.existingImageSpriteIds = null;
     this.highestUid = 0;
     this.initialized = false;
   }
@@ -141,6 +165,12 @@ export class IdGenerator {
   private collectSid(sid: unknown): void {
     if (typeof sid === 'number' && sid > 0) {
       this.existingSids!.add(sid);
+    }
+  }
+
+  private collectImageSpriteId(id: unknown): void {
+    if (typeof id === 'number' && id > 0) {
+      this.existingImageSpriteIds!.add(id);
     }
   }
 
@@ -182,6 +212,7 @@ export class IdGenerator {
         if (Array.isArray(frames)) {
           for (const frame of frames) {
             this.collectSid(frame.sid);
+            this.collectImageSpriteId(frame.imageSpriteId);
           }
         }
       }

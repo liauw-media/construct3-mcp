@@ -137,7 +137,7 @@ All mutation tools follow a strict safety protocol:
 
 1. **Validation** — Names checked for reserved words, path traversal, format. Plugin/behavior IDs validated against `usedAddons`.
 2. **Backup** — Every file is backed up to `<filename>.bak` before modification.
-3. **ID Generation** — SIDs (15-digit random) and UIDs (sequential) are collision-checked against the entire project.
+3. **ID Generation** — SIDs (15-digit random), UIDs (sequential), and imageSpriteIds (7-digit) are collision-checked against the entire project.
 4. **Write** — JSON is pre-validated (round-trip test, size limit) before writing.
 5. **Verify** — Files are read back and re-parsed after writing to confirm integrity.
 6. **Cache Invalidation** — All reader caches and indexes are cleared so subsequent reads see fresh data.
@@ -147,6 +147,8 @@ Additional safeguards:
 - **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error.
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
+- **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs with correct naming conventions. Batch writes roll back on failure.
+- **Layout instance sync** — When behaviors or variables are added to an object type, all layout instances of that object are automatically updated with the required `behaviors` and `instanceVariables` dicts so C3 can load the project correctly.
 
 ## Documentation
 
@@ -287,6 +289,7 @@ construct3-mcp/
 │   │   ├── project-writer.ts       # Safe write operations with backup
 │   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
 │   │   ├── templates.ts            # Object, event sheet, layout templates
+│   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/
 │   │       ├── index-builder.ts    # Cross-reference index
@@ -393,7 +396,7 @@ We welcome contributions! Here's how to get started:
 - [x] Delete layouts (with reference checking, startup layout protection)
 - [x] Update layout properties (event sheet binding, dimensions)
 - [x] Full instance property overrides (angle, color, instanceVariables, behaviors, tags, etc.)
-- [x] 192 tests, type-safe templates, domain-split tool modules
+- [x] 278 tests, type-safe templates, domain-split tool modules
 
 ### Phase 6: Advanced Features
 - [ ] Support for .c3p (zipped) projects

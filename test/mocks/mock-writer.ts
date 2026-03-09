@@ -64,6 +64,34 @@ export class MockWriter {
     return undefined;
   }
 
+  async writeImageFile(
+    objectName: string,
+    animationName: string,
+    frameIndex: number,
+    pluginId?: string,
+    width?: number,
+    height?: number,
+  ): Promise<string> {
+    this.calls.push({ method: 'writeImageFile', args: [objectName, animationName, frameIndex, pluginId, width, height] });
+    return `/mock/project/images/${objectName.toLowerCase()}-${animationName}-${String(frameIndex).padStart(3, '0')}.png`;
+  }
+
+  async writeImageFiles(
+    files: Array<{
+      objectName: string;
+      animationName: string;
+      frameIndex: number;
+      pluginId?: string;
+      width?: number;
+      height?: number;
+    }>,
+  ): Promise<string[]> {
+    this.calls.push({ method: 'writeImageFiles', args: [files] });
+    return files.map(f =>
+      `/mock/project/images/${f.objectName.toLowerCase()}-${f.animationName}-${String(f.frameIndex).padStart(3, '0')}.png`
+    );
+  }
+
   // Helper: get calls for a specific method
   callsFor(method: string): WriterCall[] {
     return this.calls.filter(c => c.method === method);
