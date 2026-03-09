@@ -33,9 +33,22 @@ describe('Object Templates', () => {
     expect(obj.animations!.items[0].sid).toBe(200);
     expect(obj.animations!.items[0].name).toBe('Animation 1');
     expect(obj.animations!.items[0].frames).toHaveLength(1);
+    expect(obj.animations!.items[0].frames[0].collisionPoly).toEqual({ points: [] });
     expect(obj.instanceVariables).toEqual([]);
     expect(obj.behaviorTypes).toEqual([]);
     expect(obj.effectTypes).toEqual([]);
+  });
+
+  it('createSpriteObject passes through imageSpriteId', () => {
+    const obj = createSpriteObject('Hero', 100, 200, 5555555);
+    const frame = obj.animations!.items[0].frames[0];
+    expect(frame.imageSpriteId).toBe(5555555);
+  });
+
+  it('createSpriteObject omits imageSpriteId when not provided', () => {
+    const obj = createSpriteObject('Hero', 100, 200);
+    const frame = obj.animations!.items[0].frames[0];
+    expect(frame.imageSpriteId).toBeUndefined();
   });
 
   it('createTextObject creates valid Text', () => {
@@ -54,6 +67,12 @@ describe('Object Templates', () => {
     expect(obj.sid).toBe(100);
     expect((obj as any).image).toBeDefined();
     expect((obj as any).image.width).toBe(100);
+    expect((obj as any).image.collisionPoly).toEqual({ points: [] });
+  });
+
+  it('createTiledBgObject passes through imageSpriteId', () => {
+    const obj = createTiledBgObject('Background', 100, 7777777);
+    expect((obj as any).image.imageSpriteId).toBe(7777777);
   });
 
   it('createGlobalObject creates valid global plugin', () => {
@@ -208,6 +227,17 @@ describe('Animation Templates', () => {
     expect(frame.fileType).toBe('image/png');
     expect(frame.duration).toBe(1);
     expect(frame.useCollisionPoly).toBe(true);
+    expect(frame.collisionPoly).toEqual({ points: [] });
+  });
+
+  it('createAnimationFrame includes imageSpriteId when provided', () => {
+    const frame = createAnimationFrame(64, 64, 1234567);
+    expect(frame.imageSpriteId).toBe(1234567);
+  });
+
+  it('createAnimationFrame omits imageSpriteId when not provided', () => {
+    const frame = createAnimationFrame(64, 64);
+    expect(frame.imageSpriteId).toBeUndefined();
   });
 
   it('createAnimation creates valid animation', () => {

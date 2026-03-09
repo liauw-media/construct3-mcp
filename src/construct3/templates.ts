@@ -125,7 +125,7 @@ export const KNOWN_SCIRRA_BEHAVIORS: Record<string, string> = {
   Wrap: 'Wrap',
 };
 
-export function createSpriteObject(name: string, sid: number, animSid: number): ObjectType {
+export function createSpriteObject(name: string, sid: number, animSid: number, imageSpriteId?: number): ObjectType {
   return {
     name,
     'plugin-id': 'Sprite',
@@ -138,21 +138,7 @@ export function createSpriteObject(name: string, sid: number, animSid: number): 
     animations: {
       items: [
         {
-          frames: [
-            {
-              width: 100,
-              height: 100,
-              originX: 0.5,
-              originY: 0.5,
-              originalSource: '',
-              exportFormat: 'lossless',
-              exportQuality: 0.8,
-              fileType: 'image/png',
-              duration: 1,
-              tag: '',
-              useCollisionPoly: true,
-            },
-          ],
+          frames: [createAnimationFrame(100, 100, imageSpriteId)],
           sid: animSid,
           name: 'Animation 1',
           isLooping: false,
@@ -180,7 +166,7 @@ export function createTextObject(name: string, sid: number): ObjectType {
   };
 }
 
-export function createTiledBgObject(name: string, sid: number): ObjectType {
+export function createTiledBgObject(name: string, sid: number, imageSpriteId?: number): ObjectType {
   return {
     name,
     'plugin-id': 'TiledBg',
@@ -201,6 +187,8 @@ export function createTiledBgObject(name: string, sid: number): ObjectType {
       fileType: 'image/png',
       tag: '',
       useCollisionPoly: true,
+      collisionPoly: { points: [] },
+      ...(imageSpriteId !== undefined ? { imageSpriteId } : {}),
     },
   };
 }
@@ -439,6 +427,7 @@ export function createBlockEvent(
 export function createAnimationFrame(
   width: number,
   height: number,
+  imageSpriteId?: number,
 ): AnimationFrame {
   return {
     width,
@@ -452,6 +441,8 @@ export function createAnimationFrame(
     duration: 1,
     tag: '',
     useCollisionPoly: true,
+    collisionPoly: { points: [] },
+    ...(imageSpriteId !== undefined ? { imageSpriteId } : {}),
   };
 }
 

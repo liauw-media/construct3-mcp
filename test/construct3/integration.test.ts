@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, readFile, writeFile, stat, rm } from 'fs/promises';
+import { mkdtemp, cp, readFile, readdir, writeFile, stat, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
@@ -384,5 +384,281 @@ describe('Round-trip write→read', () => {
     expect(readBack['plugin-id']).toBe('Sprite');
     expect(readBack.sid).toBe(888888888888888);
     expect(readBack.isGlobal).toBe(false);
+  });
+});
+
+// ─── Image Pipeline Tests ───────────────────────────────────
+
+describe('Image pipeline (integration)', () => {
+  let tmpDir: string;
+  let reader: Construct3ProjectReader;
+  let writer: Construct3ProjectWriter;
+  let idGen: IdGenerator;
+
+  /** PNG magic bytes: 137 80 78 71 13 10 26 10 */
+  const PNG_MAGIC = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+  beforeEach(async () => {
+    tmpDir = await createTempProject();
+    reader = new Construct3ProjectReader(join(tmpDir, 'project.c3proj'));
+    await reader.loadProject();
+    idGen = new IdGenerator();
+    writer = new Construct3ProjectWriter(reader, idGen);
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('writeImageFile creates PNG in images/ directory', async () => {
+    const filePath = await writer.writeImageFile('Hero', 'Walk', 0, 'Sprite');
+
+    await expect(stat(filePath)).resolves.toBeDefined();
+    // animationName is case-preserved; only objectName is lowercased
+    expect(filePath).toContain(join('images', 'hero-Walk-000.png'));
+  });
+
+  it('written PNG has valid signature', async () => {
+    const filePath = await writer.writeImageFile('Hero', 'Idle', 0, 'Sprite');
+
+    const content = await readFile(filePath);
+    const header = content.subarray(0, 8);
+    expect(Buffer.compare(header, PNG_MAGIC)).toBe(0);
+  });
+
+  it('writeImageFiles writes multiple PNGs', async () => {
+    const paths = await writer.writeImageFiles([
+      { objectName: 'Player', animationName: 'Run', frameIndex: 0 },
+      { objectName: 'Player', animationName: 'Run', frameIndex: 1 },
+      { objectName: 'Player', animationName: 'Run', frameIndex: 2 },
+    ]);
+
+    expect(paths).toHaveLength(3);
+    const imagesDir = join(tmpDir, 'images');
+    const files = await readdir(imagesDir);
+    // animationName is case-preserved
+    expect(files).toContain('player-Run-000.png');
+    expect(files).toContain('player-Run-001.png');
+    expect(files).toContain('player-Run-002.png');
+  });
+
+  it('Sprite creation round-trip: JSON has imageSpriteId + PNG exists', async () => {
+    const sid = await idGen.generateSid(reader);
+    const animSid = await idGen.generateSid(reader);
+    const imgId = await idGen.generateImageSpriteId(reader);
+
+    // Write the PNG
+    await writer.writeImageFile('TestSprite', 'Animation 1', 0, 'Sprite');
+
+    // Write the object JSON with imageSpriteId
+    const { createSpriteObject } = await import('../../src/construct3/templates.js');
+    const spriteData = createSpriteObject('TestSprite', sid, animSid, imgId);
+    await writer.writeEntityFile('objectTypes', 'TestSprite', spriteData);
+    await writer.addToProject('objectTypes', 'TestSprite');
+
+    // Verify PNG exists
+    const pngPath = join(tmpDir, 'images', 'testsprite-animation 1-000.png');
+    await expect(stat(pngPath)).resolves.toBeDefined();
+
+    // Verify JSON has imageSpriteId on the frame
+    const readBack = await reader.readObjectType('TestSprite');
+    const frame = (readBack.animations as { items: Array<{ frames: Array<Record<string, unknown>> }> }).items[0].frames[0];
+    expect(frame.imageSpriteId).toBe(imgId);
+  });
+
+  it('TiledBg creation round-trip: JSON has imageSpriteId + PNG exists', async () => {
+    const sid = await idGen.generateSid(reader);
+    const imgId = await idGen.generateImageSpriteId(reader);
+
+    // Write the PNG (TiledBg convention: just objectname.png)
+    await writer.writeImageFile('MyBackground', '', 0, 'TiledBg');
+
+    // Write the object JSON
+    const { createTiledBgObject } = await import('../../src/construct3/templates.js');
+    const bgData = createTiledBgObject('MyBackground', sid, imgId);
+    await writer.writeEntityFile('objectTypes', 'MyBackground', bgData);
+    await writer.addToProject('objectTypes', 'MyBackground');
+
+    // Verify PNG exists with TiledBg naming
+    const pngPath = join(tmpDir, 'images', 'mybackground.png');
+    await expect(stat(pngPath)).resolves.toBeDefined();
+
+    // Verify JSON has imageSpriteId on the image field
+    const readBack = await reader.readObjectType('MyBackground');
+    const image = (readBack as Record<string, unknown>).image as Record<string, unknown>;
+    expect(image.imageSpriteId).toBe(imgId);
+  });
+
+  it('generateImageSpriteId returns 7-digit unique values', async () => {
+    const id = await idGen.generateImageSpriteId(reader);
+    expect(id).toBeGreaterThanOrEqual(1_000_000);
+    expect(id).toBeLessThanOrEqual(9_999_999);
+  });
+
+  it('imageSpriteIds are unique across multiple calls', async () => {
+    const ids = new Set<number>();
+    for (let i = 0; i < 10; i++) {
+      ids.add(await idGen.generateImageSpriteId(reader));
+    }
+    expect(ids.size).toBe(10);
+  });
+});
+
+// ─── Behavior Workflow Tests ────────────────────────────────
+
+describe('Behavior workflow (integration)', () => {
+  let tmpDir: string;
+  let reader: Construct3ProjectReader;
+  let writer: Construct3ProjectWriter;
+  let idGen: IdGenerator;
+
+  beforeEach(async () => {
+    tmpDir = await createTempProject();
+    reader = new Construct3ProjectReader(join(tmpDir, 'project.c3proj'));
+    await reader.loadProject();
+    idGen = new IdGenerator();
+    writer = new Construct3ProjectWriter(reader, idGen);
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('add behavior to object: JSON has correct behaviorTypes entry', async () => {
+    // Read existing Sprite, add a behavior, write back
+    const obj = await reader.readObjectType('Sprite') as Record<string, unknown>;
+    const sid = await idGen.generateSid(reader);
+    const { createBehavior } = await import('../../src/construct3/templates.js');
+    const behavior = createBehavior('Platform', 'Platform', sid);
+
+    const behaviors = obj.behaviorTypes as Array<Record<string, unknown>>;
+    behaviors.push(behavior);
+
+    await writer.writeEntityFile('objectTypes', 'Sprite', obj);
+
+    // Read back and verify
+    reader.invalidateCaches();
+    const readBack = await reader.readObjectType('Sprite');
+    const readBehaviors = readBack.behaviorTypes as Array<Record<string, unknown>>;
+    expect(readBehaviors).toHaveLength(1);
+    expect(readBehaviors[0].behaviorId).toBe('Platform');
+    expect(readBehaviors[0].name).toBe('Platform');
+    expect(readBehaviors[0].sid).toBe(sid);
+  });
+
+  it('add behavior registers addon in usedAddons', async () => {
+    await writer.ensureAddonRegistered('behavior', 'Platform');
+
+    const content = await readFile(join(tmpDir, 'project.c3proj'), 'utf-8');
+    const project = JSON.parse(content);
+    const platformAddon = project.usedAddons.find(
+      (a: { type: string; id: string }) => a.type === 'behavior' && a.id === 'Platform',
+    );
+    expect(platformAddon).toBeDefined();
+    expect(platformAddon.name).toBe('Platform');
+    expect(platformAddon.author).toBe('Scirra');
+  });
+
+  it('add multiple behaviors: all present with unique SIDs', async () => {
+    const obj = await reader.readObjectType('Sprite') as Record<string, unknown>;
+    const { createBehavior } = await import('../../src/construct3/templates.js');
+
+    const sid1 = await idGen.generateSid(reader);
+    const sid2 = await idGen.generateSid(reader);
+    const behaviors = obj.behaviorTypes as Array<Record<string, unknown>>;
+    behaviors.push(createBehavior('Platform', 'Platform', sid1));
+    behaviors.push(createBehavior('Solid', 'Solid', sid2));
+
+    await writer.writeEntityFile('objectTypes', 'Sprite', obj);
+
+    reader.invalidateCaches();
+    const readBack = await reader.readObjectType('Sprite');
+    const readBehaviors = readBack.behaviorTypes as Array<Record<string, unknown>>;
+    expect(readBehaviors).toHaveLength(2);
+    expect(readBehaviors[0].behaviorId).toBe('Platform');
+    expect(readBehaviors[1].behaviorId).toBe('Solid');
+    expect(readBehaviors[0].sid).not.toBe(readBehaviors[1].sid);
+  });
+
+  it('add behavior preserves all existing object fields', async () => {
+    const obj = await reader.readObjectType('Sprite') as Record<string, unknown>;
+    const originalKeys = Object.keys(obj).sort();
+
+    const { createBehavior } = await import('../../src/construct3/templates.js');
+    const sid = await idGen.generateSid(reader);
+    (obj.behaviorTypes as Array<Record<string, unknown>>).push(
+      createBehavior('Tween', 'Tween', sid),
+    );
+    await writer.writeEntityFile('objectTypes', 'Sprite', obj);
+
+    reader.invalidateCaches();
+    const readBack = await reader.readObjectType('Sprite') as Record<string, unknown>;
+    const readBackKeys = Object.keys(readBack).sort();
+    expect(readBackKeys).toEqual(originalKeys);
+
+    // Verify animations are intact
+    const animations = readBack.animations as { items: Array<Record<string, unknown>> };
+    expect(animations.items).toHaveLength(1);
+    expect(animations.items[0].name).toBe('Animation 1');
+  });
+
+  it('layout instance has behaviors and instanceVariables dicts', async () => {
+    // Verify the fixture layout instance has the standard fields
+    const layout = await reader.readLayout('Layout 1');
+    const instance = layout.layers[0].instances[0] as Record<string, unknown>;
+    expect(instance.behaviors).toBeDefined();
+    expect(instance.instanceVariables).toBeDefined();
+    expect(typeof instance.behaviors).toBe('object');
+    expect(typeof instance.instanceVariables).toBe('object');
+  });
+
+  it('full round-trip: create Sprite, add behavior, verify project integrity', async () => {
+    const { createSpriteObject, createBehavior } = await import('../../src/construct3/templates.js');
+
+    // Create a new Sprite
+    const sid = await idGen.generateSid(reader);
+    const animSid = await idGen.generateSid(reader);
+    const imgId = await idGen.generateImageSpriteId(reader);
+    const spriteData = createSpriteObject('Hero', sid, animSid, imgId);
+    await writer.writeImageFiles([{
+      objectName: 'Hero', animationName: 'Animation 1',
+      frameIndex: 0, pluginId: 'Sprite',
+    }]);
+    await writer.writeEntityFile('objectTypes', 'Hero', spriteData);
+    await writer.addToProject('objectTypes', 'Hero');
+
+    // Add Platform behavior
+    await writer.ensureAddonRegistered('behavior', 'Platform');
+    reader.invalidateCaches();
+    idGen.reset();
+
+    const obj = await reader.readObjectType('Hero') as Record<string, unknown>;
+    const bSid = await idGen.generateSid(reader);
+    (obj.behaviorTypes as Array<Record<string, unknown>>).push(
+      createBehavior('Platform', 'Platform', bSid),
+    );
+    await writer.writeEntityFile('objectTypes', 'Hero', obj);
+
+    // Verify object type
+    reader.invalidateCaches();
+    const finalObj = await reader.readObjectType('Hero');
+    expect(finalObj.name).toBe('Hero');
+    expect(finalObj['plugin-id']).toBe('Sprite');
+    expect(finalObj.behaviorTypes).toHaveLength(1);
+    expect((finalObj.behaviorTypes as Array<Record<string, unknown>>)[0].behaviorId).toBe('Platform');
+
+    // Verify usedAddons
+    await reader.reloadProject();
+    const addons = reader.getUsedAddons();
+    expect(addons.some(a => a.type === 'behavior' && a.id === 'Platform')).toBe(true);
+
+    // Verify animations still intact
+    const animations = (finalObj as Record<string, unknown>).animations as { items: Array<Record<string, unknown>> };
+    expect(animations.items).toHaveLength(1);
+    expect(animations.items[0].name).toBe('Animation 1');
+
+    // Verify PNG still exists
+    const pngPath = join(tmpDir, 'images', 'hero-Animation 1-000.png');
+    await expect(stat(pngPath)).resolves.toBeDefined();
   });
 });

@@ -9,7 +9,10 @@
 					"type": "Sprite",
 					"uid": 0,
 					"sid": 500000000000002,
+					"tags": "",
 					"properties": {},
+					"instanceVariables": {},
+					"behaviors": {},
 					"world": {
 						"x": 100,
 						"y": 200,

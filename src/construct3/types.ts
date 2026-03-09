@@ -170,7 +170,7 @@ export interface AnimationFrame {
   duration?: number;
   tag?: string;
   useCollisionPoly?: boolean;
-  imageSpriteId?: string;
+  imageSpriteId?: number;
   collisionPoly?: { points: number[] };
   [key: string]: unknown;
 }

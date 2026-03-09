@@ -74,6 +74,42 @@ describe('add_animation_to_sprite', () => {
     expect((items[1].frames as unknown[]).length).toBe(4);
   });
 
+  it('writes placeholder PNGs for each frame with imageSpriteId', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', makeSpriteObj()]]),
+    });
+    await server.callTool('add_animation_to_sprite', {
+      objectName: 'Hero',
+      animationName: 'Run',
+      frameCount: 3,
+    });
+
+    // Verify writeImageFiles was called with 3 files
+    const imageCalls = writer.callsFor('writeImageFiles');
+    expect(imageCalls).toHaveLength(1);
+    const files = imageCalls[0].args[0] as Array<Record<string, unknown>>;
+    expect(files).toHaveLength(3);
+    expect(files[0].objectName).toBe('Hero');
+    expect(files[0].animationName).toBe('Run');
+    expect(files[0].frameIndex).toBe(0);
+    expect(files[1].frameIndex).toBe(1);
+    expect(files[2].frameIndex).toBe(2);
+
+    // Verify each frame in the written data has an imageSpriteId
+    const writtenData = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const animations = writtenData.animations as Record<string, unknown>;
+    const items = animations.items as Array<Record<string, unknown>>;
+    const newAnim = items[1];
+    const frames = newAnim.frames as Array<Record<string, unknown>>;
+    for (const frame of frames) {
+      expect(frame.imageSpriteId).toBeDefined();
+      expect(typeof frame.imageSpriteId).toBe('number');
+    }
+    // Each frame should have a unique imageSpriteId
+    const ids = frames.map(f => f.imageSpriteId);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it('errors on nonexistent object', async () => {
     const { server } = setup();
     const result = await server.callTool('add_animation_to_sprite', {

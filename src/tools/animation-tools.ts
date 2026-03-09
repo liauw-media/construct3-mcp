@@ -66,11 +66,32 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
           }
         }
 
-        // Generate frames
+        // Generate frames with imageSpriteIds and write placeholder PNGs
         const frames: AnimationFrame[] = [];
+        const imageFiles: Array<{
+          objectName: string;
+          animationName: string;
+          frameIndex: number;
+          pluginId: string;
+          width: number;
+          height: number;
+        }> = [];
+
         for (let i = 0; i < args.frameCount; i++) {
-          frames.push(createAnimationFrame(frameWidth, frameHeight));
+          const imageSpriteId = await idGen.generateImageSpriteId(reader);
+          frames.push(createAnimationFrame(frameWidth, frameHeight, imageSpriteId));
+          imageFiles.push({
+            objectName: args.objectName,
+            animationName: args.animationName,
+            frameIndex: i,
+            pluginId: 'Sprite',
+            width: 1,
+            height: 1,
+          });
         }
+
+        // Write placeholder PNGs before JSON — abort if image write fails
+        await writer.writeImageFiles(imageFiles);
 
         // Generate SID for the animation
         const animSid = await idGen.generateSid(reader);
