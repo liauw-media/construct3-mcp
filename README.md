@@ -120,6 +120,28 @@ node dist/index.js /path/to/your/project.c3proj
 | `add_animation_to_sprite` | Add a new animation to a Sprite object |
 | `update_animation_properties` | Update animation speed, looping, ping-pong on a Sprite |
 
+### Runtime Tools (Live Game Control)
+
+| Tool | Description |
+|------|-------------|
+| `inject_runtime_bridge` | Inject a bridge script into the C3 project that exposes the runtime via `globalThis.__c3bridge` |
+| `remove_runtime_bridge` | Remove the bridge script and clean up the project |
+| `get_bridge_commands` | List all commands the bridge supports (callFunction, getGlobalVar, getObjectState, etc.) |
+| `generate_bridge_eval_script` | Generate a ClawForge-compatible script to execute a bridge command |
+| `export_for_preview` | Pre-flight checks (worker mode, bridge injection) for preview testing |
+| `clone_project` | Deep-copy the project with optional bridge injection |
+
+The runtime bridge enables external tools (ClawForge, Playwright) to control a running C3 game. Once injected and the game is previewed, you can:
+
+```javascript
+// From the browser console or via ClawForge exec
+globalThis.__c3bridge.submit("callFunction", { name: "StartGame", params: [] });
+globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" });
+globalThis.__c3bridge.submit("getObjectState", { objectName: "Player" });
+```
+
+See the [Omnitronix Construct MCP](https://github.com/omnitronix/omnitronix-construct-mcp) for a domain-specific layer built on top of these runtime tools for slot machine testing.
+
 ### Prompts (Workflow Templates)
 
 | Prompt | Purpose |
@@ -302,6 +324,8 @@ construct3-mcp/
 │   ├── resources/
 │   │   ├── project.ts              # MCP resources
 │   │   └── docs.ts                 # Construct 3 documentation access
+│   ├── runtime/
+│   │   └── bridge.ts               # Injectable C3 runtime bridge script generator
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
 │   │   ├── analysis.ts             # 6 analysis tools
@@ -311,7 +335,8 @@ construct3-mcp/
 │   │   ├── layout-tools.ts         # Layout mutation tools
 │   │   ├── object-tools.ts         # Object mutation tools
 │   │   ├── animation-tools.ts      # Animation mutation tools
-│   │   └── project-tools.ts        # Project metadata tools
+│   │   ├── project-tools.ts        # Project metadata tools
+│   │   └── runtime-tools.ts        # 6 runtime control tools
 │   └── prompts/
 │       └── workflows.ts            # 6 workflow prompts
 ├── dist/                           # Compiled JavaScript (generated)
@@ -398,7 +423,14 @@ We welcome contributions! Here's how to get started:
 - [x] Full instance property overrides (angle, color, instanceVariables, behaviors, tags, etc.)
 - [x] 278 tests, type-safe templates, domain-split tool modules
 
-### Phase 6: Advanced Features
+### Phase 6: Runtime Control ✅
+- [x] Injectable runtime bridge (runOnStartup, command queue, tick processing)
+- [x] Bridge commands: callFunction, get/setGlobalVar, getObjectState, evaluateExpression, etc.
+- [x] Project cloning with bridge injection
+- [x] Export-for-preview pre-flight checks (worker mode, bridge registration)
+- [x] ClawForge eval script generation
+
+### Phase 7: Advanced Features
 - [ ] Support for .c3p (zipped) projects
 - [ ] Rename with reference updates (dry-run preview)
 - [ ] Bulk operations
@@ -408,7 +440,7 @@ We welcome contributions! Here's how to get started:
 
 - **Folder Format Only**: Works with .c3proj folder projects, not .c3p ZIP files
 - **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned for Phase 5)
-- **No Runtime**: Cannot execute or test games, only analyze and modify structure
+- **Runtime Bridge Requires Desktop Automation**: The runtime tools inject a bridge script but need an external tool (ClawForge, Playwright) to drive the browser and interact with the running game
 - **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs)
 
 ## License
