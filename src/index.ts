@@ -16,6 +16,7 @@ import { registerAnalysisTools } from './tools/analysis.js';
 import { registerMutationTools } from './tools/mutations.js';
 import { Construct3ProjectWriter } from './construct3/project-writer.js';
 import { IdGenerator } from './construct3/id-generator.js';
+import { registerRuntimeTools } from './tools/runtime-tools.js';
 
 // Use explicit path if given, otherwise auto-detect .c3proj in current working directory
 const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || process.cwd();
@@ -64,6 +65,9 @@ async function main() {
     const idGen = new IdGenerator();
     const writer = new Construct3ProjectWriter(reader, idGen);
     registerMutationTools(server, reader, writer, idGen);
+
+    // Phase 4: Runtime Control (for live game testing via ClawForge/browser)
+    registerRuntimeTools({ server, reader, writer });
 
     // Start transport
     const transport = new StdioServerTransport();
