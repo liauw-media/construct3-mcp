@@ -13,10 +13,11 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
 import { generateBridgeScript, getBridgeScriptPath } from '../runtime/bridge.js';
-import { writeFile, mkdir, readFile } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { writeFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { join, dirname, relative } from 'node:path';
 import { existsSync } from 'node:fs';
 import { toolResult, toolError } from './shared.js';
+import { writeZip } from '../runtime/zip-writer.js';
 
 const BRIDGE_FILENAME = 'c3-runtime-bridge.js';
 
@@ -407,4 +408,106 @@ print(json.dumps({
       }
     },
   );
+
+  // ── pack_project ──────────────────────────────────────────
+
+  server.tool(
+    'pack_project',
+    'Pack the C3 project folder into a .c3p file (zip archive). The .c3p can be uploaded to a EditorBridge worker and imported into the Construct 3 editor. Optionally injects the runtime bridge before packing.',
+    {
+      outputPath: z.string().describe('Output path for the .c3p file (e.g. "/tmp/game.c3p")'),
+      injectBridge: z.boolean().optional().default(true).describe('Inject the runtime bridge before packing'),
+    },
+    async ({ outputPath, injectBridge }) => {
+      try {
+        const projectDir = reader.getProjectDir();
+
+        // Optionally inject bridge first
+        if (injectBridge) {
+          const bridgePath = join(projectDir, getBridgeScriptPath());
+          const bridgeDir = dirname(bridgePath);
+          if (!existsSync(bridgeDir)) {
+            await mkdir(bridgeDir, { recursive: true });
+          }
+          await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
+
+          const c3projPath = reader.getProjectPath();
+          const c3projRaw = await readFile(c3projPath, 'utf-8');
+          const c3proj = JSON.parse(c3projRaw);
+          if (!findBridgeInScripts(c3proj)) {
+            addBridgeToScripts(c3proj);
+            await writeFile(c3projPath, JSON.stringify(c3proj, null, '\t'), 'utf-8');
+            await reader.loadProject();
+          }
+        }
+
+        // Collect all project files
+        const files = await collectFiles(projectDir);
+
+        // Build the zip using Node.js built-in zlib
+        // .c3p format is a standard zip file
+        await buildZip(projectDir, files, outputPath);
+
+        const outputStat = await stat(outputPath);
+
+        return toolResult({
+          packed: true,
+          outputPath,
+          fileCount: files.length,
+          sizeBytes: outputStat.size,
+          sizeMB: (outputStat.size / 1024 / 1024).toFixed(2),
+          bridgeInjected: injectBridge,
+        });
+      } catch (error) {
+        return toolError(`Failed to pack project: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  );
+}
+
+
+// ── File helpers ──────────────────────────────────────────
+
+/** Directories to skip when packing a C3 project. */
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.bak', '__MACOSX']);
+const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db']);
+
+/**
+ * Recursively collect all files in a directory, returning paths relative
+ * to the root. Skips .git, node_modules, backups, and OS junk.
+ */
+async function collectFiles(rootDir: string, subDir = ''): Promise<string[]> {
+  const results: string[] = [];
+  const fullDir = subDir ? join(rootDir, subDir) : rootDir;
+  const entries = await readdir(fullDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (SKIP_FILES.has(entry.name)) continue;
+    const relPath = subDir ? `${subDir}/${entry.name}` : entry.name;
+
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const subFiles = await collectFiles(rootDir, relPath);
+      results.push(...subFiles);
+    } else if (entry.isFile()) {
+      // Skip .bak files from the writer's backup system
+      if (entry.name.endsWith('.bak')) continue;
+      results.push(relPath);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Build a .c3p (ZIP) file from a project directory.
+ */
+async function buildZip(projectDir: string, files: string[], outputPath: string): Promise<void> {
+  const entries = await Promise.all(
+    files.map(async (filePath) => ({
+      path: filePath.replace(/\\/g, '/'), // ensure forward slashes in zip
+      data: await readFile(join(projectDir, filePath)),
+    })),
+  );
+  await writeZip(entries, outputPath);
 }

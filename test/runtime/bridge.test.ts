@@ -4,10 +4,12 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { generateBridgeScript, getBridgeScriptPath, getBridgeProjectEntry } from '../../src/runtime/bridge.js';
-import { readFile, writeFile, cp, rm, mkdir, readdir } from 'node:fs/promises';
+import { writeZip } from '../../src/runtime/zip-writer.js';
+import { readFile, writeFile, cp, rm, mkdir, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 const FIXTURE_DIR = join(import.meta.dirname, '..', 'fixtures', 'minimal-project');
 
@@ -226,5 +228,125 @@ describe('bridge injection into c3proj', () => {
     const c3projPath = join(tempDir, 'project.c3proj');
     const c3proj = JSON.parse(await readFile(c3projPath, 'utf-8'));
     expect(c3proj.useWorker).toBe('dom');
+  });
+});
+
+describe('writeZip (c3p packing)', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `c3-zip-test-${Date.now()}`);
+    await mkdir(tempDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    if (tempDir && existsSync(tempDir)) {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a valid zip file from entries', async () => {
+    const outputPath = join(tempDir, 'test.c3p');
+    await writeZip([
+      { path: 'project.c3proj', data: Buffer.from('{"name":"Test"}') },
+      { path: 'scripts/main.js', data: Buffer.from('console.log("hello")') },
+    ], outputPath);
+
+    expect(existsSync(outputPath)).toBe(true);
+    const zipData = await readFile(outputPath);
+    // ZIP magic number: PK\x03\x04
+    expect(zipData[0]).toBe(0x50); // P
+    expect(zipData[1]).toBe(0x4B); // K
+    expect(zipData[2]).toBe(0x03);
+    expect(zipData[3]).toBe(0x04);
+  });
+
+  it('produces a zip with the correct number of entries', async () => {
+    const entries = [
+      { path: 'a.txt', data: Buffer.from('aaa') },
+      { path: 'b.txt', data: Buffer.from('bbb') },
+      { path: 'sub/c.txt', data: Buffer.from('ccc') },
+    ];
+    const outputPath = join(tempDir, 'multi.c3p');
+    await writeZip(entries, outputPath);
+
+    const zipData = await readFile(outputPath);
+    // Count local file headers (PK\x03\x04)
+    let count = 0;
+    for (let i = 0; i < zipData.length - 4; i++) {
+      if (zipData[i] === 0x50 && zipData[i+1] === 0x4B &&
+          zipData[i+2] === 0x03 && zipData[i+3] === 0x04) {
+        count++;
+      }
+    }
+    expect(count).toBe(3);
+  });
+
+  it('stores file data that can be read back', async () => {
+    const content = 'Hello from Construct 3!';
+    const outputPath = join(tempDir, 'readable.c3p');
+    await writeZip([
+      { path: 'test.txt', data: Buffer.from(content) },
+    ], outputPath);
+
+    const zipData = await readFile(outputPath);
+    // STORE method means data is uncompressed in the zip
+    expect(zipData.includes(Buffer.from(content))).toBe(true);
+  });
+
+  it('handles empty entries array', async () => {
+    const outputPath = join(tempDir, 'empty.c3p');
+    await writeZip([], outputPath);
+
+    expect(existsSync(outputPath)).toBe(true);
+    const zipData = await readFile(outputPath);
+    // Should at least have EOCD (end of central directory)
+    expect(zipData.length).toBeGreaterThan(0);
+    // EOCD signature: PK\x05\x06
+    const eocdSig = zipData.indexOf(Buffer.from([0x50, 0x4B, 0x05, 0x06]));
+    expect(eocdSig).toBeGreaterThanOrEqual(0);
+  });
+
+  it('handles binary file data', async () => {
+    const binaryData = Buffer.alloc(256);
+    for (let i = 0; i < 256; i++) binaryData[i] = i;
+
+    const outputPath = join(tempDir, 'binary.c3p');
+    await writeZip([
+      { path: 'image.png', data: binaryData },
+    ], outputPath);
+
+    const zipData = await readFile(outputPath);
+    expect(zipData.includes(binaryData)).toBe(true);
+  });
+
+  it('can pack the minimal project fixture', async () => {
+    const fixtureDir = FIXTURE_DIR;
+    const entries: Array<{ path: string; data: Buffer }> = [];
+
+    // Collect all fixture files
+    async function collect(dir: string, prefix = '') {
+      const items = await readdir(dir, { withFileTypes: true });
+      for (const item of items) {
+        const relPath = prefix ? `${prefix}/${item.name}` : item.name;
+        if (item.isDirectory()) {
+          await collect(join(dir, item.name), relPath);
+        } else if (item.isFile()) {
+          entries.push({
+            path: relPath,
+            data: await readFile(join(dir, item.name)),
+          });
+        }
+      }
+    }
+    await collect(fixtureDir);
+
+    const outputPath = join(tempDir, 'minimal-project.c3p');
+    await writeZip(entries, outputPath);
+
+    expect(existsSync(outputPath)).toBe(true);
+    const zipStat = await stat(outputPath);
+    expect(zipStat.size).toBeGreaterThan(100);
+    expect(entries.length).toBeGreaterThan(3); // at least c3proj + some other files
   });
 });
