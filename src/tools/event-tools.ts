@@ -532,6 +532,256 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     }
   );
 
+  // ─── remove_event_from_sheet ─────────────────────────────────
+
+  server.tool(
+    'remove_event_from_sheet',
+    'Remove an include block from an event sheet by target sheet name. Use delete_event_from_sheet with a SID to remove other event types.',
+    {
+      sheetName: z.string().max(200).describe('Event sheet to modify'),
+      includeSheet: z.string().max(200).describe('Name of the included sheet to remove'),
+    },
+    async (args) => {
+      try {
+        let sheet: EventSheet;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName);
+        } catch {
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
+        }
+
+        const events = sheet.events as Record<string, unknown>[];
+        const before = events.length;
+        const filtered = events.filter(
+          e => !(e.eventType === 'include' && e.includeSheet === args.includeSheet),
+        );
+        const removed = before - filtered.length;
+
+        if (removed === 0) {
+          const currentIncludes = events
+            .filter(e => e.eventType === 'include')
+            .map(e => e.includeSheet as string);
+          const hint = currentIncludes.length > 0
+            ? `\nIncludes in "${args.sheetName}": ${currentIncludes.join(', ')}`
+            : `\nNo includes found in "${args.sheetName}".`;
+          return toolError(`No include for sheet "${args.includeSheet}" found in "${args.sheetName}".${hint}`);
+        }
+
+        sheet.events = filtered as unknown as C3Event[];
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
+
+        return toolResult({
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          removedCount: removed,
+          removedInclude: args.includeSheet,
+          backupFile: backupPath,
+        });
+      } catch (error) {
+        console.error('[remove_event_from_sheet] failed:', error);
+        return toolError(`Error removing include: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── update_event_block_action ───────────────────────────────
+
+  server.tool(
+    'update_event_block_action',
+    'Replace parameters on a single action within an existing event block. Identify the block by SID and the action by its 0-based index. Use get_eventsheet_details to find SIDs and action indices.',
+    {
+      sheetName: z.string().max(200).describe('Target event sheet'),
+      blockSid: z.number().int().positive().describe('SID of the block event containing the action'),
+      actionIndex: z.number().int().min(0).describe('0-based index of the action to update'),
+      parameters: z.record(z.unknown()).describe('New parameter values (replaces existing parameters entirely)'),
+    },
+    async (args) => {
+      try {
+        let sheet: EventSheet;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName);
+        } catch {
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
+        }
+
+        const events = sheet.events as Record<string, unknown>[];
+        const found = findEventBySid(events, args.blockSid);
+
+        if (!found) {
+          const summary = summarizeEvents(events);
+          return toolError(
+            `Event with SID ${args.blockSid} not found in sheet "${args.sheetName}".\n\n` +
+            `Sheet "${args.sheetName}" contains ${events.length} top-level events:\n${summary}\n\n` +
+            `Use get_eventsheet_details to see the full event tree with SIDs.`,
+          );
+        }
+
+        const { event } = found;
+        const eventType = event.eventType as string;
+
+        if (eventType !== 'block' && eventType !== 'function-block') {
+          return toolError(`Event with SID ${args.blockSid} is a "${eventType}", not a block or function-block. Only block events have actions.`);
+        }
+
+        const actions = event.actions as Record<string, unknown>[];
+        if (args.actionIndex < 0 || args.actionIndex >= actions.length) {
+          return toolError(
+            `Action index ${args.actionIndex} is out of range (block has ${actions.length} action(s), ` +
+            `indices 0-${Math.max(0, actions.length - 1)}).`,
+          );
+        }
+
+        const action = actions[args.actionIndex];
+        action.parameters = args.parameters;
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
+
+        return toolResult({
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          updatedBlockSid: args.blockSid,
+          updatedActionIndex: args.actionIndex,
+          actionId: action.id,
+          backupFile: backupPath,
+        });
+      } catch (error) {
+        console.error('[update_event_block_action] failed:', error);
+        return toolError(`Error updating action: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── move_events_between_sheets ──────────────────────────────
+
+  server.tool(
+    'move_events_between_sheets',
+    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved.',
+    {
+      sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
+      targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
+      sids: z.array(z.number().int().positive()).min(1).describe('SIDs of the top-level events to copy/move'),
+      deleteSource: z.boolean().optional().default(false).describe('If true, remove the events from the source sheet after copying (move semantics)'),
+      targetGroupPath: z.string().max(500).optional().describe('Insert into a group in the target sheet by title path (e.g. "Movement > Collision")'),
+      position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert events in the target sheet or group'),
+    },
+    async (args) => {
+      try {
+        if (args.sourceSheet === args.targetSheet) {
+          return toolError('sourceSheet and targetSheet must be different sheets.');
+        }
+
+        // Read source sheet
+        let sourceSheetData: EventSheet;
+        try {
+          sourceSheetData = await reader.readEventSheet(args.sourceSheet);
+        } catch {
+          return notFoundError('Event sheet', args.sourceSheet, reader.findNearestName(args.sourceSheet, 'eventsheets'), 'list_eventsheets');
+        }
+
+        // Read target sheet
+        let targetSheetData: EventSheet;
+        try {
+          targetSheetData = await reader.readEventSheet(args.targetSheet);
+        } catch {
+          return notFoundError('Event sheet', args.targetSheet, reader.findNearestName(args.targetSheet, 'eventsheets'), 'list_eventsheets');
+        }
+
+        const sourceEvents = sourceSheetData.events as Record<string, unknown>[];
+        const targetEvents = targetSheetData.events as Record<string, unknown>[];
+
+        // Find each requested SID in the source top-level events only
+        const eventsToMove: Record<string, unknown>[] = [];
+        const notFoundSids: number[] = [];
+
+        for (const sid of args.sids) {
+          const idx = sourceEvents.findIndex(e => e.sid === sid);
+          if (idx === -1) {
+            notFoundSids.push(sid);
+          } else {
+            eventsToMove.push(sourceEvents[idx]);
+          }
+        }
+
+        if (notFoundSids.length > 0) {
+          const summary = summarizeEvents(sourceEvents);
+          return toolError(
+            `SIDs not found as top-level events in "${args.sourceSheet}": ${notFoundSids.join(', ')}.\n\n` +
+            `Only top-level events can be moved. Source sheet events:\n${summary}\n\n` +
+            `Use get_eventsheet_details to see the full tree.`,
+          );
+        }
+
+        // Determine target insertion array
+        let insertTarget: Record<string, unknown>[];
+        if (args.targetGroupPath) {
+          const resolved = findGroupByPath(targetEvents, args.targetGroupPath);
+          if (!resolved) {
+            const topGroups = targetEvents
+              .filter(e => e.eventType === 'group')
+              .map(e => e.title as string);
+            const hint = topGroups.length > 0
+              ? `\nAvailable top-level groups in "${args.targetSheet}": ${topGroups.join(', ')}`
+              : `\nNo groups found in "${args.targetSheet}".`;
+            return toolError(`Group path "${args.targetGroupPath}" not found in "${args.targetSheet}".${hint}`);
+          }
+          insertTarget = resolved;
+        } else {
+          insertTarget = targetEvents;
+        }
+
+        // Deep-copy events to avoid reference aliasing between sheets
+        const copiedEvents = eventsToMove.map(e => JSON.parse(JSON.stringify(e)) as Record<string, unknown>);
+
+        // Insert into target
+        if (args.position === 'start') {
+          insertTarget.unshift(...copiedEvents);
+        } else {
+          insertTarget.push(...copiedEvents);
+        }
+
+        // If move semantics: remove from source
+        if (args.deleteSource) {
+          const sidSet = new Set(args.sids);
+          sourceSheetData.events = sourceEvents.filter(e => !sidSet.has(e.sid as number)) as unknown as C3Event[];
+        }
+
+        // Write target sheet first, then source (if modified)
+        const targetSubfolder = writer.getSubfolderForEntity('eventSheets', args.targetSheet);
+        const targetBackup = await writer.writeEntityFile('eventSheets', args.targetSheet, targetSheetData, targetSubfolder);
+
+        let sourceBackup: string | undefined;
+        if (args.deleteSource) {
+          const sourceSubfolder = writer.getSubfolderForEntity('eventSheets', args.sourceSheet);
+          sourceBackup = await writer.writeEntityFile('eventSheets', args.sourceSheet, sourceSheetData, sourceSubfolder);
+        }
+
+        resetProjectIndex();
+
+        return toolResult({
+          success: true,
+          sourceSheet: args.sourceSheet,
+          targetSheet: args.targetSheet,
+          movedSids: args.sids,
+          movedCount: eventsToMove.length,
+          deleteSource: args.deleteSource,
+          backupFiles: [targetBackup, ...(sourceBackup ? [sourceBackup] : [])].filter(Boolean),
+        });
+      } catch (error) {
+        console.error('[move_events_between_sheets] failed:', error);
+        return toolError(`Error moving events: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
   // ─── update_event_block ─────────────────────────────────────
 
   server.tool(
