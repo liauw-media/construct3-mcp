@@ -2,6 +2,57 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [1.8.0] - 2026-04-16
+
+### M1 Release — Community Governance & End-to-End Validation
+
+Milestone 1 closure: full primitive surface, community-ready codebase, end-to-end acceptance test.
+
+#### GOV-01 — Internal reference scrub
+
+- Removed all ClawForge, Omnitronix, and RGS-specific references from `src/` and `test/`
+- `src/runtime/bridge.ts` — doc comment rewritten to generic automation language (Playwright, curl, CDP)
+- `src/tools/runtime-tools.ts` — all five ClawForge references replaced with generic equivalents; `OmnitronixPlatformConnect` example replaced with `MyPlugin`
+- `src/index.ts` — Phase 4 comment updated to remove ClawForge reference
+
+#### GOV-02 — Public docs scrub
+
+- `README.md` — removed Omnitronix Construct MCP cross-link and slot machine reference; updated Authors section; reworded ClawForge references to Playwright/CDP; updated roadmap and Known Limitations
+- `docs/EXAMPLES.md` — replaced `Omnitronix` author example with `My Studio`
+- `package.json` — `author` field changed from `Omnitronix` to `construct3-mcp contributors`
+
+#### GOV-03 — Version bump
+
+- `package.json` version: `1.6.0` → `1.8.0` (minor bump; new tools are additive, no breaking changes)
+- `src/index.ts` MCP server version: `1.5.0` → `1.8.0`
+- Version rationale: Phases 6–7 added runtime tools, pack_project, and acceptance test infrastructure — all additive; backward compatible with existing tool callers
+
+#### VAL-01 — Test suite
+
+- 415 tests across 15 test files — all passing (no regressions from Phases 1–6)
+
+#### VAL-02 — End-to-end acceptance test
+
+- New: `test/acceptance/m1-end-to-end.test.ts`
+- Exercises the full primitive tool chain using real MCP tool handler functions (no direct JSON manipulation):
+  1. `create_object` (Sprite with animation)
+  2. `create_event_sheet`
+  3. `create_layout` (with layer)
+  4. `add_instance_to_layout`
+  5. `add_event_block` (condition + action)
+  6. `pack_project` → `.c3p` ZIP archive
+- Asserts: `.c3p` exists on disk, ZIP unpacks without error, event sheet referenced by layout exists, object referenced in layout exists, structure is internally consistent
+
+#### VAL-03 — Coverage gate
+
+- Audited all tools added in Phases 4–7 against existing test coverage
+- All tools have at least one passing test; no gaps found requiring new additions beyond VAL-02
+
+#### Infrastructure
+
+- `pack_project` tool description updated (removed ClawForge upload reference)
+- `generate_bridge_eval_script` description updated (generic CDP language)
+
 ## [1.6.0] - 2026-03-02
 
 ### Sprite Image Pipeline

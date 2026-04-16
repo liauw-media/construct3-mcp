@@ -1,6 +1,6 @@
 {
   "name": "construct3-mcp-server",
-  "version": "1.6.0",
+  "version": "1.8.0",
   "description": "Model Context Protocol server for Construct 3 game engine projects",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     "game-engine",
     "model-context-protocol"
   ],
-  "author": "Omnitronix",
+  "author": "construct3-mcp contributors",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
