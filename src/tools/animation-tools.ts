@@ -181,6 +181,16 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         if (args.isPingPong !== undefined) anim.isPingPong = args.isPingPong;
         if (args.repeatCount !== undefined) anim.repeatCount = args.repeatCount;
 
+        // Warn: isLooping:true + repeatCount>1 is contradictory — C3 ignores repeatCount when looping.
+        const warnings: string[] = [];
+        const effectiveLooping = args.isLooping !== undefined ? args.isLooping : anim.isLooping;
+        const effectiveRepeat = args.repeatCount !== undefined ? args.repeatCount : anim.repeatCount;
+        if (effectiveLooping === true && typeof effectiveRepeat === 'number' && effectiveRepeat > 1) {
+          const msg = `isLooping is true but repeatCount is ${effectiveRepeat} — C3 ignores repeatCount when looping is enabled. Set isLooping: false to use repeatCount.`;
+          console.warn('[update_animation_properties]', msg);
+          warnings.push(msg);
+        }
+
         // Write back
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
         const backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
@@ -191,6 +201,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
           category: 'object',
           action: 'updated',
           backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
