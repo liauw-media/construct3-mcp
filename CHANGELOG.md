@@ -2,6 +2,32 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [1.8.1] - 2026-04-16
+
+### VAL-02 Remediation — Honest Acceptance Contract
+
+Post-release: VAL-02's original "builds a minimal playable project" claim was structurally verified but never proven against the Construct 3 editor itself. When attempted, C3 rejected the output with "Failed to open project" — the hand-built fixture was never a valid C3 project. Fixed:
+
+#### Added
+
+- **`scripts/derive-minimal-fixture.ts`** — Reproducer that prunes a known-good C3 project into a minimal, shippable fixture. Two-stage prune (drop third-party addons → aggressive minimize to one empty layout + one empty event sheet). Iterated via live Construct 3 editor feedback.
+- **`test/fixtures/c3-loadable-minimal/`** — 11 files, ~18 KB packed. IP-free. **Validated 2026-04-16** by loading into Construct 3 editor via EditorBridge automation — opens cleanly, no "Failed to open project" dialog.
+- **Third VAL-02 test** — Packs the C3-loadable fixture and verifies structural invariants. Protects the committed fixture from drift.
+
+#### Changed
+
+- **`test/acceptance/m1-end-to-end.test.ts`** — Renamed suite + test to "M1 Structural Round-Trip Acceptance" / "builds a structurally consistent project." Docstring now explicitly warns against self-referential validation: reader/writer sharing blind spots can pass a structural test while the output is rejected by C3.
+
+#### Learnings (preserved for future fixture work)
+
+- C3 halts load on any reference from manifest to missing file (`rootFileFolders.general` entries pointing at deleted files surface as "missing file path 'X'").
+- Event-sheet `objectClass` references to dropped object types halt load with "cannot find object 'X'". Empty-out `events[]` in every sheet clears this class of refs in one pass.
+- Pruning subdirectories under `objectTypes/` must be recursive — top-level readdir misses grouped plugins (e.g. `objectTypes/Array/*.json`).
+
+#### Tests
+
+- 418 passing (up from 417), no skips
+
 ## [1.8.0] - 2026-04-16
 
 ### M1 Release — Community Governance & End-to-End Validation
