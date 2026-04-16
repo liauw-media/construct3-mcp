@@ -354,7 +354,7 @@ function checkDuplicateSids(
 
   // Event sheets
   for (const [name, sheet] of sheets) {
-    track((sheet as unknown as Record<string, unknown>).sid, `eventSheets/${name}`);
+    track(sheet.sid, `eventSheets/${name}`);
     if (Array.isArray(sheet.events)) {
       scanEventSidsForDupes(sheet.events, `eventSheets/${name}`, track);
     }

@@ -91,7 +91,7 @@ export async function getAssetUsage(
       // Check if object is global
       const objectTypes = await reader.readAllObjectTypes();
       const objData = objectTypes.get(baseName);
-      if (objData?.['is-global'] === true) {
+      if (objData?.isGlobal === true) {
         isGlobal = true;
       }
     }

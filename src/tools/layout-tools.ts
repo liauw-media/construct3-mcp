@@ -123,17 +123,17 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         // Validate object type exists and read its plugin ID
         let pluginId: string | undefined;
         let isNonworld = false;
-        let objData: Record<string, unknown> | undefined;
+        let objData: import('../construct3/types.js').ObjectType | undefined;
         try {
           const obj = await reader.readObjectType(args.objectType);
-          objData = obj as unknown as Record<string, unknown>;
+          objData = obj;
           pluginId = obj['plugin-id'];
           // Block global-only objects from being placed on layouts
-          if (objData['singleglobal-inst']) {
+          if (obj['singleglobal-inst']) {
             return toolError(`Object "${args.objectType}" is a global plugin (${pluginId}) and cannot be placed on layouts.`);
           }
           // Nonworld-global objects (Arr, Json, Dictionary) go in nonworld-instances, not on layers
-          if (objData.isGlobal === true) {
+          if (obj.isGlobal === true) {
             isNonworld = true;
           }
         } catch {
@@ -153,8 +153,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
         // Validate instanceVariables keys against object type definition
         if (args.instanceVariables && objData) {
-          const ivDefs = objData.instanceVariables as Array<{ name: string }> | undefined;
-          const definedVars = new Set((ivDefs ?? []).map(v => v.name));
+          const definedVars = new Set((objData.instanceVariables ?? []).map(v => v.name));
           for (const key of Object.keys(args.instanceVariables)) {
             if (!definedVars.has(key)) {
               warnings.push(`Instance variable "${key}" is not defined on "${args.objectType}". Defined variables: ${[...definedVars].join(', ') || '(none)'}. It may be inherited from a family.`);
@@ -164,8 +163,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
         // Validate behaviors keys against object type definition
         if (args.behaviors && objData) {
-          const bhDefs = objData.behaviorTypes as Array<{ name: string }> | undefined;
-          const definedBehaviors = new Set((bhDefs ?? []).map(b => b.name));
+          const definedBehaviors = new Set((objData.behaviorTypes ?? []).map(b => b.name));
           for (const key of Object.keys(args.behaviors)) {
             if (!definedBehaviors.has(key)) {
               warnings.push(`Behavior "${key}" is not defined on "${args.objectType}". Defined behaviors: ${[...definedBehaviors].join(', ') || '(none)'}. It may be inherited from a family.`);

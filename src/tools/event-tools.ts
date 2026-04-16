@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult } from '../construct3/types.js';
+import type { C3Event, EventSheet, FunctionBlockEvent, WriteResult } from '../construct3/types.js';
 import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
 import {
   conditionSchema,
@@ -112,14 +112,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     async (args) => {
       try {
         // Read existing sheet — preserves ALL original events and fields
-        let sheet: Record<string, unknown>;
+        let sheet: EventSheet;
         try {
-          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+          sheet = await reader.readEventSheet(args.sheetName);
         } catch {
           return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
 
-        let event: Record<string, unknown>;
+        let event: C3Event;
 
         switch (args.eventType) {
           case 'group': {
@@ -131,12 +131,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           case 'function': {
             if (!args.functionName) return toolError('functionName is required for function events');
             const sid = await idGen.generateSid(reader);
-            event = createFunctionEvent(args.functionName, sid, args.functionParams);
+            const funcEvent = createFunctionEvent(args.functionName, sid, args.functionParams);
             // Replace placeholder parameter SIDs with properly generated ones
-            const funcParams = event.functionParameters as Array<Record<string, unknown>>;
-            for (const p of funcParams) {
-              p.sid = await idGen.generateSid(reader);
+            if (funcEvent.functionParameters) {
+              for (const p of funcEvent.functionParameters) {
+                p.sid = await idGen.generateSid(reader);
+              }
             }
+            event = funcEvent;
             break;
           }
           case 'variable': {
@@ -163,11 +165,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
         }
 
-        const events = sheet.events as Record<string, unknown>[];
         if (args.position === 'start') {
-          events.unshift(event);
+          sheet.events.unshift(event);
         } else {
-          events.push(event);
+          sheet.events.push(event);
         }
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
@@ -211,9 +212,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         // Read the target event sheet
-        let sheet: Record<string, unknown>;
+        let sheet: EventSheet;
         try {
-          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+          sheet = await reader.readEventSheet(args.sheetName);
         } catch {
           return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
@@ -393,9 +394,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         // Read the event sheet
-        let sheet: Record<string, unknown>;
+        let sheet: EventSheet;
         try {
-          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+          sheet = await reader.readEventSheet(args.sheetName);
         } catch {
           return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
@@ -571,9 +572,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         // Read the event sheet
-        let sheet: Record<string, unknown>;
+        let sheet: EventSheet;
         try {
-          sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
+          sheet = await reader.readEventSheet(args.sheetName);
         } catch {
           return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
