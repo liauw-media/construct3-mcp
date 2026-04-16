@@ -32,6 +32,9 @@ pnpm-debug.log*
 # Claude Code local config
 .claude/
 
+# GSD planning (internal; keep out of community OSS release)
+.planning/
+
 # IDE
 .vscode/
 .idea/
