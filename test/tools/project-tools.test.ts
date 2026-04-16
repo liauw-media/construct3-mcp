@@ -69,3 +69,101 @@ describe('update_project_metadata', () => {
     expect(updates.name).toBeUndefined();
   });
 });
+
+// ─── list_addons ──────────────────────────────────────────
+
+describe('list_addons', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('list_addons')).toBe(true);
+  });
+
+  it('lists all addons', async () => {
+    const { server } = setup({
+      usedAddons: [
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+        { type: 'behavior', id: 'Tween', name: 'Tween', author: 'Scirra', bundled: false },
+      ],
+    });
+    const result = await server.callTool('list_addons', {});
+    const data = JSON.parse(result.content[0].text);
+    expect(data.count).toBe(2);
+    expect(data.addons).toHaveLength(2);
+  });
+
+  it('filters by type', async () => {
+    const { server } = setup({
+      usedAddons: [
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+        { type: 'behavior', id: 'Tween', name: 'Tween', author: 'Scirra', bundled: false },
+        { type: 'effect', id: 'hsladjust', name: 'Adjust HSL', author: 'Scirra', bundled: false },
+      ],
+    });
+    const result = await server.callTool('list_addons', { type: 'behavior' });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.count).toBe(1);
+    expect(data.addons[0].id).toBe('Tween');
+  });
+});
+
+// ─── register_addon ───────────────────────────────────────
+
+describe('register_addon', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('register_addon')).toBe(true);
+  });
+
+  it('reports already_registered when addon exists', async () => {
+    const { server } = setup({
+      usedAddons: [
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+      ],
+    });
+    const result = await server.callTool('register_addon', {
+      type: 'plugin',
+      id: 'Sprite',
+      name: 'Sprite',
+    });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.success).toBe(true);
+    expect(data.action).toBe('already_registered');
+  });
+});
+
+// ─── unregister_addon ─────────────────────────────────────
+
+describe('unregister_addon', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('unregister_addon')).toBe(true);
+  });
+
+  it('errors on addon not found', async () => {
+    const { server } = setup({
+      usedAddons: [
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+      ],
+    });
+    const result = await server.callTool('unregister_addon', {
+      type: 'behavior',
+      id: 'Ghost',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not registered');
+  });
+
+  it('blocks removal of known built-in without force', async () => {
+    const { server } = setup({
+      usedAddons: [
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+      ],
+    });
+    const result = await server.callTool('unregister_addon', {
+      type: 'plugin',
+      id: 'Sprite',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('force=true');
+  });
+});
