@@ -127,7 +127,7 @@ export async function findOrphanedObjects(
       orphaned.push({
         name: objName,
         pluginId: objData?.['plugin-id'] || 'unknown',
-        isGlobal: objData?.['is-global'] === true,
+        isGlobal: objData?.isGlobal === true,
       });
     }
   }

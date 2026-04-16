@@ -4,7 +4,7 @@
  */
 
 import type { Construct3ProjectReader } from './project-reader.js';
-import type { C3Event, Layout } from './types.js';
+import type { AnimationsContainer, C3Event, Layout, RootFileFolders } from './types.js';
 
 const SID_MIN = 100_000_000_000_000; // 15-digit minimum
 const SID_MAX = 999_999_999_999_999; // 15-digit maximum
@@ -30,49 +30,40 @@ export class IdGenerator {
 
     // Scan c3proj file for SIDs in file items
     const project = reader.getProject();
-    this.scanContainerSids(project.rootFileFolders as unknown as Record<string, unknown>);
+    this.scanContainerSids(project.rootFileFolders);
 
     // Scan all object types
     const objects = await reader.readAllObjectTypes();
     for (const [, obj] of objects) {
       this.collectSid(obj.sid);
-      // Behavior SIDs
-      if (Array.isArray(obj.behaviors)) {
-        for (const b of obj.behaviors) {
-          this.collectSid((b as Record<string, unknown>).sid as number);
-        }
-      }
       // Also check behaviorTypes (C3 uses this key)
-      const behaviorTypes = (obj as Record<string, unknown>).behaviorTypes as Array<Record<string, unknown>> | undefined;
-      if (Array.isArray(behaviorTypes)) {
-        for (const b of behaviorTypes) {
-          this.collectSid(b.sid as number);
+      if (Array.isArray(obj.behaviorTypes)) {
+        for (const b of obj.behaviorTypes) {
+          this.collectSid(b.sid);
         }
       }
       // Instance variable SIDs
-      const vars = (obj as Record<string, unknown>).instanceVariables;
-      if (Array.isArray(vars)) {
-        for (const v of vars as Array<Record<string, unknown>>) {
-          this.collectSid(v.sid as number);
+      if (Array.isArray(obj.instanceVariables)) {
+        for (const v of obj.instanceVariables) {
+          this.collectSid(v.sid);
         }
       }
       // Animation SIDs
-      const animations = (obj as Record<string, unknown>).animations;
-      if (animations && typeof animations === 'object') {
-        this.scanAnimationSids(animations as Record<string, unknown>);
+      if (obj.animations) {
+        this.scanAnimationSids(obj.animations);
       }
       // Singleglobal instance
-      const sgi = (obj as Record<string, unknown>)['singleglobal-inst'] as Record<string, unknown> | undefined;
+      const sgi = obj['singleglobal-inst'];
       if (sgi) {
-        this.collectSid(sgi.sid as number);
-        this.trackUid(sgi.uid as number);
+        this.collectSid(sgi.sid);
+        this.trackUid(sgi.uid);
       }
     }
 
     // Scan all event sheets
     const sheets = await reader.readAllEventSheets();
     for (const [, sheet] of sheets) {
-      this.collectSid((sheet as unknown as Record<string, unknown>).sid as number);
+      this.collectSid(sheet.sid);
       this.scanEventSids(sheet.events);
     }
 
@@ -180,7 +171,7 @@ export class IdGenerator {
     }
   }
 
-  private scanContainerSids(rootFolders: Record<string, unknown>): void {
+  private scanContainerSids(rootFolders: RootFileFolders): void {
     for (const folder of Object.values(rootFolders)) {
       if (folder && typeof folder === 'object') {
         this.scanFileFolderSids(folder as Record<string, unknown>);
@@ -203,25 +194,16 @@ export class IdGenerator {
     }
   }
 
-  private scanAnimationSids(animations: Record<string, unknown>): void {
-    const items = animations.items as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(items)) {
-      for (const anim of items) {
-        this.collectSid(anim.sid);
-        const frames = anim.frames as Array<Record<string, unknown>> | undefined;
-        if (Array.isArray(frames)) {
-          for (const frame of frames) {
-            this.collectSid(frame.sid);
-            this.collectImageSpriteId(frame.imageSpriteId);
-          }
-        }
+  private scanAnimationSids(animations: AnimationsContainer): void {
+    for (const anim of animations.items) {
+      this.collectSid(anim.sid);
+      for (const frame of anim.frames) {
+        this.collectSid(frame.sid);
+        this.collectImageSpriteId(frame.imageSpriteId);
       }
     }
-    const subfolders = animations.subfolders as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(subfolders)) {
-      for (const sub of subfolders) {
-        this.scanAnimationSids(sub);
-      }
+    for (const sub of animations.subfolders) {
+      this.scanAnimationSids(sub);
     }
   }
 
@@ -229,7 +211,7 @@ export class IdGenerator {
     const stack = [...events];
     while (stack.length > 0) {
       const event = stack.pop()!;
-      this.collectSid((event as Record<string, unknown>).sid);
+      this.collectSid((event as { sid?: unknown }).sid);
 
       // Conditions & actions
       if ('conditions' in event && Array.isArray(event.conditions)) {
@@ -239,20 +221,13 @@ export class IdGenerator {
       }
       if ('actions' in event && Array.isArray(event.actions)) {
         for (const a of event.actions) {
-          this.collectSid((a as Record<string, unknown>).sid);
+          this.collectSid((a as { sid?: unknown }).sid);
         }
       }
 
-      // Function parameters
-      if ('parameters' in event && Array.isArray(event.parameters)) {
-        for (const p of event.parameters as Array<Record<string, unknown>>) {
-          this.collectSid(p.sid);
-        }
-      }
-      // Also check functionParameters
-      const funcParams = (event as Record<string, unknown>).functionParameters;
-      if (Array.isArray(funcParams)) {
-        for (const p of funcParams as Array<Record<string, unknown>>) {
+      // Function parameters (functionParameters on FunctionBlockEvent)
+      if ('functionParameters' in event && Array.isArray(event.functionParameters)) {
+        for (const p of event.functionParameters) {
           this.collectSid(p.sid);
         }
       }
@@ -273,9 +248,9 @@ export class IdGenerator {
       }
     }
     // Nonworld instances
-    const nonworld = (layout as Record<string, unknown>)['nonworld-instances'] as Array<Record<string, unknown>> | undefined;
+    const nonworld = layout['nonworld-instances'];
     if (Array.isArray(nonworld)) {
-      for (const inst of nonworld) {
+      for (const inst of nonworld as Array<{ sid?: unknown; uid?: unknown }>) {
         this.collectSid(inst.sid);
         this.trackUid(inst.uid);
       }
