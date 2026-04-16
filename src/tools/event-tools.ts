@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { C3Event, EventSheet, FunctionBlockEvent, WriteResult } from '../construct3/types.js';
-import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
 import {
   conditionSchema,
   actionSchema,
@@ -131,14 +131,16 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           case 'function': {
             if (!args.functionName) return toolError('functionName is required for function events');
             const sid = await idGen.generateSid(reader);
-            const funcEvent = createFunctionEvent(args.functionName, sid, args.functionParams);
-            // Replace placeholder parameter SIDs with properly generated ones
-            if (funcEvent.functionParameters) {
-              for (const p of funcEvent.functionParameters) {
-                p.sid = await idGen.generateSid(reader);
-              }
-            }
-            event = funcEvent;
+            // Pre-generate real SIDs for each parameter before passing to the template.
+            const paramsWithSids = args.functionParams
+              ? await Promise.all(
+                  args.functionParams.map(async (p) => ({
+                    ...p,
+                    sid: await idGen.generateSid(reader),
+                  }))
+                )
+              : undefined;
+            event = createFunctionEvent(args.functionName, sid, paramsWithSids);
             break;
           }
           case 'variable': {
@@ -598,7 +600,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       sheetName: z.string().max(200).describe('Target event sheet'),
       blockSid: z.number().int().positive().describe('SID of the block event containing the action'),
       actionIndex: z.number().int().min(0).describe('0-based index of the action to update'),
-      parameters: z.record(z.unknown()).describe('New parameter values (replaces existing parameters entirely)'),
+      parameters: boundedRecord().describe('New parameter values — replaces existing parameters entirely (max 100 keys, depth 6)'),
     },
     async (args) => {
       try {
@@ -793,12 +795,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       disabled: z.boolean().optional().describe('Enable or disable the entire block'),
       updateActions: z.array(z.object({
         index: z.number().int().min(0).describe('Action index (0-based)'),
-        parameters: z.record(z.unknown()).optional().describe('New parameter values (merged with existing)'),
+        parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
         disabled: z.boolean().optional().describe('Enable or disable this action'),
       })).optional().describe('Actions to update by index'),
       updateConditions: z.array(z.object({
         index: z.number().int().min(0).describe('Condition index (0-based)'),
-        parameters: z.record(z.unknown()).optional().describe('New parameter values (merged with existing)'),
+        parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
         isInverted: z.boolean().optional().describe('Toggle inversion'),
       })).optional().describe('Conditions to update by index'),
       addActions: z.array(actionSchema).optional().describe('Append new actions to the block'),
