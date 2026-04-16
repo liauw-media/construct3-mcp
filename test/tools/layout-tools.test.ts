@@ -522,3 +522,345 @@ describe('update_layout', () => {
     expect(result.isError).toBe(true);
   });
 });
+
+// ─── add_layer ────────────────────────────────────────────
+
+function makeLayout(name = 'Level 1') {
+  return {
+    name,
+    sid: 1,
+    layers: [
+      { name: 'Layer 0', sid: 2, instances: [], effectTypes: [] },
+    ],
+    'nonworld-instances': [],
+    effectTypes: [],
+    width: 1920,
+    height: 1080,
+  };
+}
+
+describe('add_layer', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('add_layer')).toBe(true);
+  });
+
+  it('adds a layer with defaults', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('add_layer', {
+      layoutName: 'Level 1',
+      layerName: 'UI',
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.generatedSid).toBeDefined();
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers).toHaveLength(2);
+    expect(written.layers[1].name).toBe('UI');
+  });
+
+  it('inserts at specified index', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    await server.callTool('add_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Background',
+      index: 0,
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers[0].name).toBe('Background');
+    expect(written.layers[1].name).toBe('Layer 0');
+  });
+
+  it('rejects duplicate layer name', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('add_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('already exists');
+  });
+
+  it('errors on nonexistent layout', async () => {
+    const { server } = setup();
+    const result = await server.callTool('add_layer', {
+      layoutName: 'Ghost',
+      layerName: 'UI',
+    });
+    expect(result.isError).toBe(true);
+  });
+});
+
+// ─── delete_layer ─────────────────────────────────────────
+
+describe('delete_layer', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('delete_layer')).toBe(true);
+  });
+
+  it('deletes a layer', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', {
+        ...makeLayout(),
+        layers: [
+          { name: 'Background', sid: 2, instances: [], effectTypes: [] },
+          { name: 'UI', sid: 3, instances: [], effectTypes: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_layer', {
+      layoutName: 'Level 1',
+      layerName: 'UI',
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers).toHaveLength(1);
+    expect(written.layers[0].name).toBe('Background');
+  });
+
+  it('blocks deletion of last layer', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('delete_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('last layer');
+  });
+
+  it('blocks deletion of layer with instances without force', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', {
+        ...makeLayout(),
+        layers: [
+          { name: 'Layer 0', sid: 2, instances: [{ uid: 1, type: 'Sprite' }], effectTypes: [] },
+          { name: 'UI', sid: 3, instances: [], effectTypes: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(false);
+    expect(data.action).toBe('delete_blocked');
+  });
+
+  it('deletes layer with instances when force=true', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', {
+        ...makeLayout(),
+        layers: [
+          { name: 'Layer 0', sid: 2, instances: [{ uid: 1, type: 'Sprite' }], effectTypes: [] },
+          { name: 'UI', sid: 3, instances: [], effectTypes: [] },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+      force: true,
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+});
+
+// ─── update_layer ─────────────────────────────────────────
+
+describe('update_layer', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('update_layer')).toBe(true);
+  });
+
+  it('renames a layer', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('update_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+      newName: 'Background',
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers[0].name).toBe('Background');
+  });
+
+  it('updates parallax and blend mode', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    await server.callTool('update_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+      parallaxX: 0.5,
+      parallaxY: 0.5,
+      blendMode: 'additive',
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers[0].parallaxX).toBe(0.5);
+    expect(written.layers[0].blendMode).toBe('additive');
+  });
+
+  it('errors with no updates', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('update_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Layer 0',
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  it('errors on nonexistent layer', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('update_layer', {
+      layoutName: 'Level 1',
+      layerName: 'Ghost',
+      isInitiallyVisible: false,
+    });
+    expect(result.isError).toBe(true);
+  });
+});
+
+// ─── delete_instance_from_layout ─────────────────────────
+
+describe('delete_instance_from_layout', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('delete_instance_from_layout')).toBe(true);
+  });
+
+  it('removes an instance by UID', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', {
+        ...makeLayout(),
+        layers: [
+          {
+            name: 'Layer 0', sid: 2, instances: [
+              { uid: 42, sid: 100, type: 'Player', world: { x: 0, y: 0 }, properties: {} },
+            ], effectTypes: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('delete_instance_from_layout', {
+      layoutName: 'Level 1',
+      uid: 42,
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers[0].instances).toHaveLength(0);
+  });
+
+  it('errors on UID not found', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('delete_instance_from_layout', {
+      layoutName: 'Level 1',
+      uid: 9999,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not found');
+  });
+});
+
+// ─── update_instance ─────────────────────────────────────
+
+describe('update_instance', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('update_instance')).toBe(true);
+  });
+
+  it('updates position and angle', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', {
+        ...makeLayout(),
+        layers: [
+          {
+            name: 'Layer 0', sid: 2, instances: [
+              { uid: 42, sid: 100, type: 'Player', world: { x: 0, y: 0, width: 100, height: 100, angle: 0 }, properties: {} },
+            ], effectTypes: [],
+          },
+        ],
+      }]]),
+    });
+    const result = await server.callTool('update_instance', {
+      layoutName: 'Level 1',
+      uid: 42,
+      x: 300,
+      y: 200,
+      angle: 1.57,
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    const inst = written.layers[0].instances[0];
+    expect(inst.world.x).toBe(300);
+    expect(inst.world.y).toBe(200);
+    expect(inst.world.angle).toBe(1.57);
+  });
+
+  it('updates instance variables', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([['Level 1', {
+        ...makeLayout(),
+        layers: [
+          {
+            name: 'Layer 0', sid: 2, instances: [
+              { uid: 42, sid: 100, type: 'Player', world: { x: 0, y: 0 }, instanceVariables: { health: 100 }, properties: {} },
+            ], effectTypes: [],
+          },
+        ],
+      }]]),
+    });
+    await server.callTool('update_instance', {
+      layoutName: 'Level 1',
+      uid: 42,
+      instanceVariables: { health: 50, speed: 5 },
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.layers[0].instances[0].instanceVariables.health).toBe(50);
+    expect(written.layers[0].instances[0].instanceVariables.speed).toBe(5);
+  });
+
+  it('errors with no updates', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('update_instance', {
+      layoutName: 'Level 1',
+      uid: 42,
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  it('errors on UID not found', async () => {
+    const { server } = setup({
+      layouts: new Map([['Level 1', makeLayout()]]),
+    });
+    const result = await server.callTool('update_instance', {
+      layoutName: 'Level 1',
+      uid: 9999,
+      x: 100,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not found');
+  });
+});
