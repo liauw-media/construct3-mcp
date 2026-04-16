@@ -510,7 +510,7 @@ describe('update_layout', () => {
       eventSheet: 'NonExistent',
     });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('does not exist');
+    expect(result.content[0].text).toContain('not found');
   });
 
   it('errors on nonexistent layout', async () => {
