@@ -118,6 +118,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[add_animation_to_sprite] failed:', error);
         return toolError(`Error adding animation: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -188,6 +189,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[update_animation_properties] failed:', error);
         return toolError(`Error updating animation: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

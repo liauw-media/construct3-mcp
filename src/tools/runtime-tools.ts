@@ -116,6 +116,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           message: 'Runtime bridge script updated (was already registered in project.c3proj).',
         });
       } catch (error) {
+        console.error('[inject_runtime_bridge] failed:', error);
         return toolError(`Failed to inject runtime bridge: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
@@ -154,6 +155,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           message: 'Runtime bridge removed from project.',
         });
       } catch (error) {
+        console.error('[remove_runtime_bridge] failed:', error);
         return toolError(`Failed to remove runtime bridge: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
@@ -354,6 +356,7 @@ print(json.dumps({
           ],
         });
       } catch (error) {
+        console.error('[export_for_preview] failed:', error);
         return toolError(`Failed to prepare for preview: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
@@ -404,6 +407,7 @@ print(json.dumps({
           bridgeIncluded: includeBridge,
         });
       } catch (error) {
+        console.error('[clone_project] failed:', error);
         return toolError(`Failed to clone project: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
@@ -459,6 +463,7 @@ print(json.dumps({
           bridgeInjected: injectBridge,
         });
       } catch (error) {
+        console.error('[pack_project] failed:', error);
         return toolError(`Failed to pack project: ${error instanceof Error ? error.message : String(error)}`);
       }
     },

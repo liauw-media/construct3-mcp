@@ -77,6 +77,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[create_layout] failed:', error);
         return toolError(`Error creating layout: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -238,6 +239,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[add_instance_to_layout] failed:', error);
         return toolError(`Error adding instance: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -316,6 +318,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[delete_layout] failed:', error);
         return toolError(`Error deleting layout: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -376,6 +379,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[update_layout] failed:', error);
         return toolError(`Error updating layout: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

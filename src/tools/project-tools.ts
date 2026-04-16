@@ -40,6 +40,7 @@ export function registerProjectTools({ server, writer }: MutationToolDeps) {
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[update_project_metadata] failed:', error);
         return toolError(`Error updating project metadata: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

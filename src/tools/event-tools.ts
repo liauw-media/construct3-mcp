@@ -82,6 +82,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[create_event_sheet] failed:', error);
         return toolError(`Error creating event sheet: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -181,6 +182,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[add_event_to_sheet] failed:', error);
         return toolError(`Error adding event: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -291,6 +293,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[add_event_block] failed:', error);
         return toolError(`Error adding event block: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -364,6 +367,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[delete_event_sheet] failed:', error);
         return toolError(`Error deleting event sheet: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -521,6 +525,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           childrenRemoved: childCount,
         });
       } catch (error) {
+        console.error('[delete_event_from_sheet] failed:', error);
         return toolError(`Error deleting event: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -761,6 +766,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[update_event_block] failed:', error);
         return toolError(`Error updating event block: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
