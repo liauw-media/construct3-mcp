@@ -1,16 +1,18 @@
 /**
- * Layout tools: create_layout, add_instance_to_layout, delete_layout, update_layout.
+ * Layout tools: create_layout, add_instance_to_layout, delete_layout, update_layout,
+ * add_layer, delete_layer, update_layer, delete_instance_from_layout, update_instance.
  */
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult, Layout } from '../construct3/types.js';
+import type { WriteResult, Layout, Layer } from '../construct3/types.js';
 import { validateName, toolResult, toolError, notFoundError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   DEFAULT_INSTANCE_PROPERTIES,
   createLayout,
   createInstance,
+  createLayer,
 } from '../construct3/templates.js';
 import type { InstanceOverrides } from '../construct3/templates.js';
 
@@ -379,6 +381,388 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       } catch (error) {
         console.error('[update_layout] failed:', error);
         return toolError(`Error updating layout: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── add_layer ────────────────────────────────────────────
+
+  server.tool(
+    'add_layer',
+    'Add a new layer to an existing layout',
+    {
+      layoutName: z.string().max(200).describe('Layout to add the layer to'),
+      layerName: z.string().max(200).describe('New layer name (must be unique within the layout)'),
+      index: z.number().int().min(0).optional().describe('Insert at this position (0 = bottom, default: append to top)'),
+      isInitiallyVisible: z.boolean().optional().default(true).describe('Layer starts visible (default: true)'),
+      isTransparent: z.boolean().optional().default(true).describe('Layer is transparent (default: true)'),
+      parallaxX: z.number().optional().default(1).describe('Horizontal parallax rate (default: 1)'),
+      parallaxY: z.number().optional().default(1).describe('Vertical parallax rate (default: 1)'),
+      blendMode: z.enum(['normal', 'additive', 'xor', 'copy', 'destination-over', 'source-in', 'destination-in', 'source-out', 'destination-out', 'source-atop', 'destination-atop']).optional().default('normal').describe('Blend mode (default: normal)'),
+    },
+    async (args) => {
+      try {
+        let layout: Layout;
+        try {
+          layout = await reader.readLayout(args.layoutName);
+        } catch {
+          return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
+        }
+
+        // Check for duplicate layer name within this layout
+        if (layout.layers.some(l => l.name === args.layerName)) {
+          return toolError(`Layer "${args.layerName}" already exists in layout "${args.layoutName}".`);
+        }
+
+        const layerSid = await idGen.generateSid(reader);
+        const newLayer: Layer = {
+          ...createLayer(args.layerName, layerSid),
+          isInitiallyVisible: args.isInitiallyVisible,
+          isTransparent: args.isTransparent,
+          parallaxX: args.parallaxX,
+          parallaxY: args.parallaxY,
+          blendMode: args.blendMode,
+        };
+
+        if (args.index !== undefined) {
+          layout.layers.splice(args.index, 0, newLayer);
+        } else {
+          layout.layers.push(newLayer);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
+        const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.layoutName,
+          category: 'layout',
+          action: 'updated',
+          generatedSid: layerSid,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[add_layer] failed:', error);
+        return toolError(`Error adding layer: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── delete_layer ─────────────────────────────────────────
+
+  server.tool(
+    'delete_layer',
+    'Delete a layer from a layout (must not be the last layer)',
+    {
+      layoutName: z.string().max(200).describe('Layout name'),
+      layerName: z.string().max(200).describe('Layer name to delete'),
+      force: z.boolean().optional().default(false).describe('Delete even if the layer contains instances (instances will be lost)'),
+    },
+    async (args) => {
+      try {
+        let layout: Layout;
+        try {
+          layout = await reader.readLayout(args.layoutName);
+        } catch {
+          return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
+        }
+
+        const layerIdx = layout.layers.findIndex(l => l.name === args.layerName);
+        if (layerIdx === -1) {
+          const available = layout.layers.map(l => l.name).join(', ');
+          return toolError(`Layer "${args.layerName}" not found in layout "${args.layoutName}". Available layers: ${available}`);
+        }
+
+        // Prevent deleting the last layer
+        if (layout.layers.length <= 1) {
+          return toolError(`Cannot delete the last layer in layout "${args.layoutName}". A layout must have at least one layer.`);
+        }
+
+        const layer = layout.layers[layerIdx];
+        const instanceCount = layer.instances.length;
+
+        if (instanceCount > 0 && !args.force) {
+          return toolResult({
+            success: false,
+            entity: args.layoutName,
+            category: 'layout',
+            action: 'delete_blocked',
+            message: `Layer "${args.layerName}" contains ${instanceCount} instance(s). Use force=true to delete the layer and all its instances.`,
+            instanceCount,
+          });
+        }
+
+        layout.layers.splice(layerIdx, 1);
+
+        const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
+        const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.layoutName,
+          category: 'layout',
+          action: 'updated',
+          backupFile: backupPath,
+          warnings: instanceCount > 0 ? [`Deleted layer contained ${instanceCount} instance(s) — they have been removed.`] : undefined,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[delete_layer] failed:', error);
+        return toolError(`Error deleting layer: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── update_layer ─────────────────────────────────────────
+
+  server.tool(
+    'update_layer',
+    'Update properties of an existing layer (name, visibility, parallax, blend mode, etc.)',
+    {
+      layoutName: z.string().max(200).describe('Layout name'),
+      layerName: z.string().max(200).describe('Layer name to update'),
+      newName: z.string().max(200).optional().describe('Rename the layer'),
+      isInitiallyVisible: z.boolean().optional().describe('Change initial visibility'),
+      isInitiallyInteractive: z.boolean().optional().describe('Change initial interactivity'),
+      isTransparent: z.boolean().optional().describe('Change transparency'),
+      parallaxX: z.number().optional().describe('Horizontal parallax rate'),
+      parallaxY: z.number().optional().describe('Vertical parallax rate'),
+      blendMode: z.enum(['normal', 'additive', 'xor', 'copy', 'destination-over', 'source-in', 'destination-in', 'source-out', 'destination-out', 'source-atop', 'destination-atop']).optional().describe('Blend mode'),
+      scaleRate: z.number().optional().describe('Scale rate (parallax zoom)'),
+      zElevation: z.number().optional().describe('Z elevation for 3D layering'),
+    },
+    async (args) => {
+      try {
+        const hasUpdates = args.newName !== undefined || args.isInitiallyVisible !== undefined ||
+          args.isInitiallyInteractive !== undefined || args.isTransparent !== undefined ||
+          args.parallaxX !== undefined || args.parallaxY !== undefined ||
+          args.blendMode !== undefined || args.scaleRate !== undefined || args.zElevation !== undefined;
+
+        if (!hasUpdates) {
+          return toolError('No updates provided. Specify at least one of: newName, isInitiallyVisible, isInitiallyInteractive, isTransparent, parallaxX, parallaxY, blendMode, scaleRate, zElevation.');
+        }
+
+        let layout: Layout;
+        try {
+          layout = await reader.readLayout(args.layoutName);
+        } catch {
+          return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
+        }
+
+        const layer = layout.layers.find(l => l.name === args.layerName);
+        if (!layer) {
+          const available = layout.layers.map(l => l.name).join(', ');
+          return toolError(`Layer "${args.layerName}" not found in layout "${args.layoutName}". Available layers: ${available}`);
+        }
+
+        // Check new name uniqueness
+        if (args.newName !== undefined && args.newName !== args.layerName) {
+          if (layout.layers.some(l => l.name === args.newName)) {
+            return toolError(`Layer "${args.newName}" already exists in layout "${args.layoutName}".`);
+          }
+          layer.name = args.newName;
+        }
+
+        if (args.isInitiallyVisible !== undefined) layer.isInitiallyVisible = args.isInitiallyVisible;
+        if (args.isInitiallyInteractive !== undefined) layer.isInitiallyInteractive = args.isInitiallyInteractive;
+        if (args.isTransparent !== undefined) layer.isTransparent = args.isTransparent;
+        if (args.parallaxX !== undefined) layer.parallaxX = args.parallaxX;
+        if (args.parallaxY !== undefined) layer.parallaxY = args.parallaxY;
+        if (args.blendMode !== undefined) layer.blendMode = args.blendMode;
+        if (args.scaleRate !== undefined) layer.scaleRate = args.scaleRate;
+        if (args.zElevation !== undefined) layer.zElevation = args.zElevation;
+
+        const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
+        const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.layoutName,
+          category: 'layout',
+          action: 'updated',
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[update_layer] failed:', error);
+        return toolError(`Error updating layer: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── delete_instance_from_layout ─────────────────────────
+
+  server.tool(
+    'delete_instance_from_layout',
+    'Remove a placed object instance from a layout by its UID',
+    {
+      layoutName: z.string().max(200).describe('Layout name'),
+      uid: z.number().int().describe('UID of the instance to remove'),
+    },
+    async (args) => {
+      try {
+        let layout: Layout;
+        try {
+          layout = await reader.readLayout(args.layoutName);
+        } catch {
+          return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
+        }
+
+        // Search layers
+        let found = false;
+        let removedType: string | undefined;
+
+        for (const layer of layout.layers) {
+          const idx = layer.instances.findIndex(inst => inst.uid === args.uid);
+          if (idx !== -1) {
+            removedType = layer.instances[idx].type;
+            layer.instances.splice(idx, 1);
+            found = true;
+            break;
+          }
+        }
+
+        // Search nonworld-instances
+        if (!found) {
+          const nonworld = layout['nonworld-instances'] as Array<Record<string, unknown>> | undefined;
+          if (Array.isArray(nonworld)) {
+            const idx = nonworld.findIndex(inst => inst.uid === args.uid);
+            if (idx !== -1) {
+              removedType = nonworld[idx].type as string;
+              nonworld.splice(idx, 1);
+              found = true;
+            }
+          }
+        }
+
+        if (!found) {
+          return toolError(`Instance with UID ${args.uid} not found in layout "${args.layoutName}". Use get_layout_details to see all instance UIDs.`);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
+        const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.layoutName,
+          category: 'layout',
+          action: 'updated',
+          backupFile: backupPath,
+          warnings: removedType ? [`Removed instance of "${removedType}" (UID ${args.uid}).`] : undefined,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[delete_instance_from_layout] failed:', error);
+        return toolError(`Error deleting instance: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── update_instance ─────────────────────────────────────
+
+  server.tool(
+    'update_instance',
+    'Update properties of a placed instance on a layout (position, size, angle, visibility, etc.)',
+    {
+      layoutName: z.string().max(200).describe('Layout name'),
+      uid: z.number().int().describe('UID of the instance to update'),
+      x: z.number().optional().describe('New X position'),
+      y: z.number().optional().describe('New Y position'),
+      width: z.number().optional().describe('New width'),
+      height: z.number().optional().describe('New height'),
+      angle: z.number().optional().describe('New rotation angle in radians'),
+      zElevation: z.number().optional().describe('New Z elevation'),
+      color: z.array(z.number().min(0).max(1)).length(4).optional().describe('New RGBA tint [r,g,b,a] values 0-1'),
+      showing: z.boolean().optional().describe('Initial visibility'),
+      locked: z.boolean().optional().describe('Locked in editor'),
+      tags: z.string().max(500).optional().describe('Comma-separated tags'),
+      instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe('Instance variable values to update'),
+    },
+    async (args) => {
+      try {
+        const hasUpdates = args.x !== undefined || args.y !== undefined || args.width !== undefined ||
+          args.height !== undefined || args.angle !== undefined || args.zElevation !== undefined ||
+          args.color !== undefined || args.showing !== undefined || args.locked !== undefined ||
+          args.tags !== undefined || args.instanceVariables !== undefined;
+
+        if (!hasUpdates) {
+          return toolError('No updates provided. Specify at least one property to update.');
+        }
+
+        let layout: Layout;
+        try {
+          layout = await reader.readLayout(args.layoutName);
+        } catch {
+          return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
+        }
+
+        // Find the instance in layers
+        let found = false;
+
+        for (const layer of layout.layers) {
+          const inst = layer.instances.find(i => i.uid === args.uid);
+          if (inst) {
+            // Update world properties
+            if (inst.world) {
+              if (args.x !== undefined) inst.world.x = args.x;
+              if (args.y !== undefined) inst.world.y = args.y;
+              if (args.width !== undefined) inst.world.width = args.width;
+              if (args.height !== undefined) inst.world.height = args.height;
+              if (args.angle !== undefined) inst.world.angle = args.angle;
+              if (args.zElevation !== undefined) inst.world.zElevation = args.zElevation;
+              if (args.color !== undefined) inst.world.color = args.color;
+            }
+            if (args.showing !== undefined) inst.showing = args.showing;
+            if (args.locked !== undefined) inst.locked = args.locked;
+            if (args.tags !== undefined) inst.tags = args.tags;
+            if (args.instanceVariables !== undefined) {
+              inst.instanceVariables = { ...(inst.instanceVariables ?? {}), ...args.instanceVariables };
+            }
+            found = true;
+            break;
+          }
+        }
+
+        // Also check nonworld-instances (no world prop, but can update other fields)
+        if (!found) {
+          const nonworld = layout['nonworld-instances'] as Array<Record<string, unknown>> | undefined;
+          if (Array.isArray(nonworld)) {
+            const inst = nonworld.find(i => i.uid === args.uid);
+            if (inst) {
+              if (args.showing !== undefined) inst.showing = args.showing;
+              if (args.locked !== undefined) inst.locked = args.locked;
+              if (args.tags !== undefined) inst.tags = args.tags;
+              if (args.instanceVariables !== undefined) {
+                inst.instanceVariables = { ...(inst.instanceVariables as Record<string, unknown> ?? {}), ...args.instanceVariables };
+              }
+              const ignoredWorldProps = [args.x, args.y, args.width, args.height, args.angle, args.zElevation, args.color].filter(v => v !== undefined);
+              if (ignoredWorldProps.length > 0) {
+                // nonworld instances have no position — silently ignore spatial props
+              }
+              found = true;
+            }
+          }
+        }
+
+        if (!found) {
+          return toolError(`Instance with UID ${args.uid} not found in layout "${args.layoutName}". Use get_layout_details to see all instance UIDs.`);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
+        const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.layoutName,
+          category: 'layout',
+          action: 'updated',
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[update_instance] failed:', error);
+        return toolError(`Error updating instance: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   );
