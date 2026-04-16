@@ -235,6 +235,38 @@ describe('update_animation_properties', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not a Sprite');
   });
+
+  it('warns when isLooping:true and repeatCount>1 are set simultaneously', async () => {
+    const { server } = setup({
+      objects: new Map([['Hero', makeSpriteObj()]]),
+    });
+    const result = await server.callTool('update_animation_properties', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      isLooping: true,
+      repeatCount: 3,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(Array.isArray(data.warnings)).toBe(true);
+    expect(data.warnings[0]).toContain('repeatCount');
+    expect(data.warnings[0]).toContain('looping');
+  });
+
+  it('does not warn when isLooping:true and repeatCount is 1', async () => {
+    const { server } = setup({
+      objects: new Map([['Hero', makeSpriteObj()]]),
+    });
+    const result = await server.callTool('update_animation_properties', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      isLooping: true,
+      repeatCount: 1,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+  });
 });
 
 // ─── delete_animation ─────────────────────────────────────
