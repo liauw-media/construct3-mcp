@@ -3,6 +3,7 @@
  * Extracted from mutations.ts to reduce duplication.
  */
 
+import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
@@ -81,4 +82,67 @@ export function notFoundError(
     ? `\nDid you mean: ${suggestions.join(', ')}?`
     : `\nUse ${listTool} to see all available names.`;
   return toolError(`${entityKind} "${name}" not found.${hint}`);
+}
+
+// ─── Parameter Naming Convention ────────────────────────────
+//
+// All MCP tool Zod schemas use the `<entityKind>Name` convention:
+//   objectName    — name of the object type (Sprite, Text, etc.)
+//   layoutName    — name of the layout
+//   sheetName     — name of the event sheet
+//   animationName — name of the animation
+//   familyName    — name of the family
+//   timelineName  — name of the timeline
+//   layerName     — name of the layer
+//
+// Exception: `objectType` in add_instance_to_layout refers to the *kind* of
+// object being instantiated (its plugin type identity), not a mutable entity
+// name — it is intentionally kept distinct for semantic clarity.
+//
+// Generic `name` is used only when the tool itself creates an entity (the
+// name of the thing being created), e.g., create_layout { name }, create_object { name }.
+
+// ─── Bounded Record Validator ────────────────────────────────
+
+/**
+ * Computes the maximum nesting depth of an object value.
+ * Returns early once `maxDepth` is exceeded to keep it O(nodes).
+ */
+function depthOf(value: unknown, maxDepth: number, currentDepth = 0): number {
+  if (currentDepth > maxDepth) return currentDepth;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return currentDepth;
+  }
+  let max = currentDepth;
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    const d = depthOf(v, maxDepth, currentDepth + 1);
+    if (d > max) max = d;
+    if (max > maxDepth) return max; // short-circuit
+  }
+  return max;
+}
+
+/**
+ * A Zod record validator with explicit key-count and nesting-depth guards.
+ * Prevents unbounded payloads from reaching C3 project files.
+ *
+ * @param maxKeys   Maximum number of top-level keys (default: 100)
+ * @param maxDepth  Maximum object nesting depth (default: 6)
+ */
+export function boundedRecord(maxKeys = 100, maxDepth = 6) {
+  return z.record(z.unknown()).superRefine((val, ctx) => {
+    const keys = Object.keys(val);
+    if (keys.length > maxKeys) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Too many keys: ${keys.length} (max ${maxKeys})`,
+      });
+    }
+    if (depthOf(val, maxDepth) > maxDepth) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Object nesting too deep (max depth ${maxDepth})`,
+      });
+    }
+  });
 }

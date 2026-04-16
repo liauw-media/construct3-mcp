@@ -9,6 +9,7 @@ import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { IdGenerator } from '../construct3/id-generator.js';
 import type { Condition, Action, BlockEvent } from '../construct3/types.js';
 import { createBlockEvent } from '../construct3/templates.js';
+import { boundedRecord } from './shared.js';
 
 // ─── Zod Schemas ────────────────────────────────────────────
 
@@ -17,9 +18,9 @@ export const conditionSchema = z.object({
   id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
   objectClass: z.string().describe('Object name or "System"'),
   'behavior-type': z.string().optional().describe('Behavior type (e.g., "Platform", "8Direction")'),
-  parameters: z.record(z.unknown())
+  parameters: boundedRecord()
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
-    .optional().describe('Condition parameters as key-value pairs'),
+    .optional().describe('Condition parameters as key-value pairs (max 100 keys, depth 6)'),
   isInverted: z.boolean().optional().describe('Negate the condition'),
   isOr: z.boolean().optional().describe('OR-combine with previous condition (default: AND)'),
 });
@@ -29,9 +30,9 @@ export const standardActionSchema = z.object({
   id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
   objectClass: z.string().describe('Object name or "System"'),
   'behavior-type': z.string().optional().describe('Behavior type'),
-  parameters: z.record(z.unknown())
+  parameters: boundedRecord()
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
-    .optional().describe('Action parameters as key-value pairs'),
+    .optional().describe('Action parameters as key-value pairs (max 100 keys, depth 6)'),
   callFunction: z.string().optional().describe('For function call actions'),
   disabled: z.boolean().optional().describe('Disable this individual action'),
 });
@@ -240,12 +241,8 @@ export async function validateObjectClasses(
   refs: Array<{ objectClass: string; 'behavior-type'?: string }>,
 ): Promise<{ errors: string[]; warnings: string[] }> {
   const objects = await reader.listObjectTypes();
-  let families: string[] = [];
-  try {
-    families = await reader.listFamilies();
-  } catch {
-    // families may not exist in all projects
-  }
+  // listFamilies() reads from an in-memory Map and never throws — no try/catch needed.
+  const families = await reader.listFamilies();
   const validClasses = new Set([...objects, ...families, 'System']);
 
   const errors: string[] = [];
