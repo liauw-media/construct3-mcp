@@ -4,7 +4,8 @@
  */
 
 import { readFile, writeFile, copyFile, unlink, mkdir, stat } from 'fs/promises';
-import { dirname, resolve, relative, isAbsolute } from 'path';
+import { dirname } from 'path';
+import { resolveProjectPath } from './path-utils.js';
 import type { Construct3ProjectReader } from './project-reader.js';
 import type { IdGenerator } from './id-generator.js';
 import type { Addon, Subfolder, ProjectProperties } from './types.js';
@@ -59,20 +60,6 @@ export class Construct3ProjectWriter {
     } finally {
       release();
     }
-  }
-
-  /**
-   * Resolve a path confined within the project directory.
-   * Rejects path traversal attempts.
-   */
-  private resolveProjectPath(...segments: string[]): string {
-    const projectDir = this.reader.getProjectDir();
-    const resolved = resolve(projectDir, ...segments);
-    const rel = relative(projectDir, resolved);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
-      throw new Error('Path traversal detected: path escapes project directory');
-    }
-    return resolved;
   }
 
   /**
@@ -147,7 +134,7 @@ export class Construct3ProjectWriter {
     const segments = subfolder
       ? [category, subfolder, `${name}.json`]
       : [category, `${name}.json`];
-    const filePath = this.resolveProjectPath(...segments);
+    const filePath = resolveProjectPath(this.reader.getProjectDir(), ...segments);
 
     // Ensure directory exists
     await mkdir(dirname(filePath), { recursive: true });
@@ -173,7 +160,7 @@ export class Construct3ProjectWriter {
     const segments = subfolder
       ? [category, subfolder, `${name}.json`]
       : [category, `${name}.json`];
-    const filePath = this.resolveProjectPath(...segments);
+    const filePath = resolveProjectPath(this.reader.getProjectDir(), ...segments);
 
     const backupPath = await this.createBackup(filePath);
     try {
@@ -394,7 +381,7 @@ export class Construct3ProjectWriter {
     height = 1,
   ): Promise<string> {
     const fileName = getImageFileName(objectName, animationName, frameIndex, pluginId);
-    const filePath = this.resolveProjectPath('images', fileName);
+    const filePath = resolveProjectPath(this.reader.getProjectDir(), 'images', fileName);
 
     await mkdir(dirname(filePath), { recursive: true });
 

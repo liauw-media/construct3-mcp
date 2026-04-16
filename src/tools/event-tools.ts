@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult } from '../construct3/types.js';
-import { validateName, validateSubfolder, toolResult, toolError } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
 import {
   conditionSchema,
   actionSchema,
@@ -115,11 +115,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         try {
           sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
         } catch {
-          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_eventsheets to see all available names.';
-          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
 
         let event: Record<string, unknown>;
@@ -217,11 +213,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         try {
           sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
         } catch {
-          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_eventsheets to see all available names.';
-          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
 
         // Collect all objectClass references from entire tree (parent + descendants)
@@ -318,11 +310,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Verify the event sheet exists
         const existing = await reader.listEventSheets();
         if (!existing.includes(args.name)) {
-          const suggestions = reader.findNearestName(args.name, 'eventsheets');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_eventsheets to see all available names.';
-          return toolError(`Event sheet "${args.name}" not found.${hint}`);
+          return notFoundError('Event sheet', args.name, reader.findNearestName(args.name, 'eventsheets'), 'list_eventsheets');
         }
 
         // Check references via project index
@@ -405,11 +393,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         try {
           sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
         } catch {
-          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_eventsheets to see all available names.';
-          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
 
         const events = sheet.events as Record<string, unknown>[];
@@ -586,11 +570,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         try {
           sheet = await reader.readEventSheet(args.sheetName) as unknown as Record<string, unknown>;
         } catch {
-          const suggestions = reader.findNearestName(args.sheetName, 'eventsheets');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_eventsheets to see all available names.';
-          return toolError(`Event sheet "${args.sheetName}" not found.${hint}`);
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
 
         const events = sheet.events as Record<string, unknown>[];

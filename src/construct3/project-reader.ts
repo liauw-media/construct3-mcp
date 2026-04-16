@@ -3,7 +3,7 @@
  */
 
 import { readFile, readdir, stat } from 'fs/promises';
-import { join, dirname, resolve, relative, isAbsolute } from 'path';
+import { join, dirname } from 'path';
 import type {
   Construct3Project,
   EventSheet,
@@ -11,6 +11,7 @@ import type {
   Layout,
   Subfolder,
 } from './types.js';
+import { resolveProjectPath } from './path-utils.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -32,20 +33,6 @@ export class Construct3ProjectReader {
 
   constructor(projectPath: string) {
     this.projectPath = projectPath;
-  }
-
-  /**
-   * Resolve a path confined within the project directory.
-   * Rejects path traversal attempts.
-   */
-  private resolveProjectPath(...segments: string[]): string {
-    const projectDir = this.getProjectDir();
-    const resolved = resolve(projectDir, ...segments);
-    const rel = relative(projectDir, resolved);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
-      throw new Error('Path traversal detected: path escapes project directory');
-    }
-    return resolved;
   }
 
   /**
@@ -136,7 +123,7 @@ export class Construct3ProjectReader {
     const segments = subPath
       ? ['eventSheets', subPath, `${name}.json`]
       : ['eventSheets', `${name}.json`];
-    const eventSheetPath = this.resolveProjectPath(...segments);
+    const eventSheetPath = resolveProjectPath(this.getProjectDir(), ...segments);
     try {
       const content = await this.readProjectFile(eventSheetPath);
       return JSON.parse(content) as EventSheet;
@@ -156,7 +143,7 @@ export class Construct3ProjectReader {
     const segments = subPath
       ? ['objectTypes', subPath, `${name}.json`]
       : ['objectTypes', `${name}.json`];
-    const objectPath = this.resolveProjectPath(...segments);
+    const objectPath = resolveProjectPath(this.getProjectDir(), ...segments);
     try {
       const content = await this.readProjectFile(objectPath);
       return JSON.parse(content) as ObjectType;
@@ -176,7 +163,7 @@ export class Construct3ProjectReader {
     const segments = subPath
       ? ['layouts', subPath, `${name}.json`]
       : ['layouts', `${name}.json`];
-    const layoutPath = this.resolveProjectPath(...segments);
+    const layoutPath = resolveProjectPath(this.getProjectDir(), ...segments);
     try {
       const content = await this.readProjectFile(layoutPath);
       return JSON.parse(content) as Layout;
@@ -196,7 +183,7 @@ export class Construct3ProjectReader {
     const segments = subPath
       ? ['families', subPath, `${name}.json`]
       : ['families', `${name}.json`];
-    const familyPath = this.resolveProjectPath(...segments);
+    const familyPath = resolveProjectPath(this.getProjectDir(), ...segments);
     try {
       const content = await this.readProjectFile(familyPath);
       return JSON.parse(content) as Record<string, unknown>;
