@@ -1301,3 +1301,141 @@ describe('move_events_between_sheets', () => {
     expect(targetEvents[1].sid).toBe(999);
   });
 });
+
+// ─── update_event_variable ────────────────────────────────
+
+describe('update_event_variable', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('update_event_variable')).toBe(true);
+  });
+
+  it('renames a variable event', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Game', {
+        name: 'Game',
+        events: [
+          { eventType: 'variable', name: 'score', type: 'number', initialValue: '0', sid: 55 },
+        ],
+        sid: 1,
+      }]]),
+    });
+    const result = await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 55,
+      newName: 'totalScore',
+    });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.events[0].name).toBe('totalScore');
+  });
+
+  it('changes variable type and initial value', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Game', {
+        name: 'Game',
+        events: [
+          { eventType: 'variable', name: 'flag', type: 'number', initialValue: '0', sid: 66 },
+        ],
+        sid: 1,
+      }]]),
+    });
+    await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 66,
+      newType: 'boolean',
+      newInitialValue: 'false',
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.events[0].type).toBe('boolean');
+    expect(written.events[0].initialValue).toBe('false');
+  });
+
+  it('sets static and constant flags', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Game', {
+        name: 'Game',
+        events: [
+          { eventType: 'variable', name: 'max', type: 'number', initialValue: '100', sid: 77 },
+        ],
+        sid: 1,
+      }]]),
+    });
+    await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 77,
+      isConstant: true,
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.events[0].isConstant).toBe(true);
+  });
+
+  it('errors if SID not found', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Game', { name: 'Game', events: [], sid: 1 }]]),
+    });
+    const result = await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 9999,
+      newName: 'x',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('SID 9999');
+  });
+
+  it('errors if SID points to non-variable event', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Game', {
+        name: 'Game',
+        events: [
+          { eventType: 'block', conditions: [], actions: [], sid: 88 },
+        ],
+        sid: 1,
+      }]]),
+    });
+    const result = await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 88,
+      newName: 'x',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not a variable event');
+  });
+
+  it('errors if new name already used', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Game', {
+        name: 'Game',
+        events: [
+          { eventType: 'variable', name: 'score', type: 'number', initialValue: '0', sid: 55 },
+          { eventType: 'variable', name: 'lives', type: 'number', initialValue: '3', sid: 56 },
+        ],
+        sid: 1,
+      }]]),
+    });
+    const result = await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 55,
+      newName: 'lives',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('already exists');
+  });
+
+  it('errors with no updates', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Game', {
+        name: 'Game',
+        events: [{ eventType: 'variable', name: 'score', type: 'number', initialValue: '0', sid: 55 }],
+        sid: 1,
+      }]]),
+    });
+    const result = await server.callTool('update_event_variable', {
+      sheetName: 'Game',
+      sid: 55,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('No updates');
+  });
+});
