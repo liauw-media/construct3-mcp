@@ -2,9 +2,9 @@
  * C3 Runtime Bridge — injectable script for Construct 3 projects.
  *
  * This module generates a JavaScript file that, when added to a C3 project's
- * script files, exposes the C3 runtime via a local HTTP endpoint on the page.
- * External tools (EditorBridge, Playwright, etc.) can then POST commands to
- * control the game and read state.
+ * script files, exposes the C3 runtime via a command queue on globalThis.
+ * External tools (Playwright, browser console, desktop automation, etc.) can
+ * then submit commands to control the game and read state.
  *
  * The bridge runs INSIDE the browser alongside the C3 game. It:
  * 1. Captures the IRuntime reference via runOnStartup()
@@ -13,16 +13,16 @@
  *    evaluateExpression, getLayout, subscribeEvent
  *
  * Why fetch-polling instead of WebSocket:
- * - No additional server needed on the VM
- * - Works through EditorBridge's exec_command (curl) or browser console
+ * - No additional server needed on the host machine
+ * - Works via browser console or any CDP-capable automation tool
  * - Simpler to implement, debug, and doesn't require extra ports
  *
  * Architecture:
- *   EditorBridge VM
- *   ├── Firefox with C3 game loaded
+ *   Host machine
+ *   ├── Browser with C3 game loaded
  *   │   └── runtime-bridge.js (this script)
  *   │       └── window.__c3bridge = { command queue + result store }
- *   └── curl / python script reads __c3bridge via Firefox CDP or DOM injection
+ *   └── curl / python / Playwright reads __c3bridge via CDP or DOM injection
  */
 
 /**
