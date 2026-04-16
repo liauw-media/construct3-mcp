@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, Layout, Layer } from '../construct3/types.js';
-import { validateName, toolResult, toolError, notFoundError } from './shared.js';
+import { validateName, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   DEFAULT_INSTANCE_PROPERTIES,
@@ -98,10 +98,10 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       y: z.number().describe('Y position'),
       width: z.number().optional().default(100).describe('Instance width'),
       height: z.number().optional().default(100).describe('Instance height'),
-      properties: z.record(z.unknown())
+      properties: boundedRecord()
         .refine(obj => JSON.stringify(obj).length <= 50_000, 'Properties payload too large (max 50KB)')
         .optional()
-        .describe('Plugin-specific instance properties (auto-filled for known plugins if omitted)'),
+        .describe('Plugin-specific instance properties — auto-filled for known plugins if omitted (max 100 keys, depth 6)'),
       // Instance-level overrides
       angle: z.number().optional().describe('Rotation angle in radians (default: 0)'),
       color: z.array(z.number().min(0).max(1)).length(4).optional().describe('RGBA tint as [r, g, b, a] with values 0-1 (default: [1,1,1,1])'),
@@ -110,11 +110,11 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       originY: z.number().min(0).max(1).optional().describe('Vertical origin 0-1 (default: 0.5 = center)'),
       instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
         .describe('Instance variable values as {varName: value}'),
-      behaviors: z.record(z.string(), z.record(z.unknown()))
+      behaviors: z.record(z.string(), boundedRecord())
         .refine(obj => Object.keys(obj).length <= 50, 'Too many behaviors (max 50)')
         .refine(obj => JSON.stringify(obj).length <= 50_000, 'Behaviors payload too large (max 50KB)')
         .optional()
-        .describe('Behavior runtime state as {behaviorName: {prop: val}}'),
+        .describe('Behavior runtime state as {behaviorName: {prop: val}} (each behavior props: max 100 keys, depth 6)'),
       tags: z.string().max(500).regex(/^[a-zA-Z0-9_, ]*$/).optional()
         .describe('Comma-separated instance tags (default: empty)'),
       showing: z.boolean().optional().describe('Whether instance is initially visible (default: true)'),

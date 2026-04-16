@@ -16,7 +16,7 @@ import { generateBridgeScript, getBridgeScriptPath } from '../runtime/bridge.js'
 import { writeFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { join, dirname, relative } from 'node:path';
 import { existsSync } from 'node:fs';
-import { toolResult, toolError } from './shared.js';
+import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
 
 const BRIDGE_FILENAME = 'c3-runtime-bridge.js';
@@ -232,7 +232,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
     'Generate a shell command (using curl or python) that can be run on a ClawForge worker to execute a bridge command in the running C3 game. The command interacts with the game via Firefox remote debugging.',
     {
       command: z.string().describe('Bridge command type (e.g. "callFunction", "getGlobalVar", "getObjectState")'),
-      args: z.record(z.unknown()).optional().describe('Command arguments as key-value pairs'),
+      args: boundedRecord().optional().describe('Command arguments as key-value pairs (max 100 keys, depth 6)'),
     },
     async ({ command, args }) => {
       const bridgeCmd = JSON.stringify({ type: command, args: args ?? {} });
