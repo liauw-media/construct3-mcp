@@ -1,9 +1,25 @@
 /**
- * M1 End-to-End Acceptance Test (VAL-02)
+ * M1 Structural Round-Trip Acceptance Test (VAL-02)
  *
  * Proves that the MCP primitive surface built in Phases 1-6 is sufficient to
- * build a minimal playable Construct 3 project from scratch using ONLY the
- * registered tool handlers — no direct JSON manipulation.
+ * build a structurally consistent Construct 3 project from scratch using ONLY
+ * the registered tool handlers — no direct JSON manipulation.
+ *
+ * SCOPE: this test asserts structural integrity only — that the reader can
+ * round-trip what the writer produced, and that ZIP/JSON invariants agree
+ * with our own templates. It does NOT prove Construct 3 will load the output.
+ *
+ * LIMITATION (discovered 2026-04-16): self-validation through our own reader
+ * is insufficient to prove editor acceptance. Reader and writer can share
+ * blind spots. An early VAL-02 pass hid the fact that C3 rejected the output
+ * with "Failed to open project." The real acceptance proof requires loading
+ * the output in the actual Construct 3 editor.
+ *
+ * FIXTURE DERIVATION (2026-04-16): scripts/derive-minimal-fixture.ts prunes
+ * a known-good seed into a minimal, slot-IP-free fixture committed at
+ * test/fixtures/c3-loadable-minimal/. That fixture was validated to open
+ * cleanly in the Construct 3 editor via ClawForge. The third test below
+ * ("packs the C3-loadable minimal fixture cleanly") protects it from drift.
  *
  * Flow:
  *   1. create_object      — Sprite with default animation
@@ -13,7 +29,7 @@
  *   5. add_event_block    — condition + action event block on the sheet
  *   6. pack_project       — produce a .c3p ZIP archive
  *
- * Assertions:
+ * Assertions (structural only):
  *   (a) .c3p file exists on disk
  *   (b) ZIP contains project.c3proj (can be unpacked without error)
  *   (c) Event sheet referenced by layout exists in the project
@@ -86,7 +102,7 @@ async function listZipEntries(zipPath: string): Promise<string[]> {
 
 // ── test suite ─────────────────────────────────────────────────────────────
 
-describe('M1 End-to-End Acceptance (VAL-02)', () => {
+describe('M1 Structural Round-Trip Acceptance (VAL-02)', () => {
   let tmpDir: string;
   let reader: Construct3ProjectReader;
   let writer: Construct3ProjectWriter;
@@ -121,7 +137,7 @@ describe('M1 End-to-End Acceptance (VAL-02)', () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('builds a minimal playable project end-to-end through MCP tool calls', async () => {
+  it('builds a structurally consistent project end-to-end through MCP tool calls', async () => {
 
     // ── Step 1: create_object (Sprite) ─────────────────────────────────────
     const createObjResult = parseResult(
@@ -206,6 +222,18 @@ describe('M1 End-to-End Acceptance (VAL-02)', () => {
     const hasC3proj = zipEntries.some(e => e.endsWith('.c3proj'));
     expect(hasC3proj).toBe(true);
 
+    // Optionally persist the generated .c3p for manual smoke test in Construct 3.
+    // Enable with: SMOKE_PERSIST=1 npx vitest run test/acceptance/m1-end-to-end.test.ts
+    if (process.env.SMOKE_PERSIST === '1') {
+      const { cp: copyFile, mkdir } = await import('fs/promises');
+      const outDir = join(__dirname, '..', '..', 'test-outputs');
+      await mkdir(outDir, { recursive: true });
+      const persistPath = join(outDir, 'smoke-m1-end-to-end.c3p');
+      await copyFile(outputC3p, persistPath);
+      // eslint-disable-next-line no-console
+      console.log(`[SMOKE_PERSIST] .c3p copied to ${persistPath}`);
+    }
+
     // ── Assertion (c): Event sheet referenced by layout exists ─────────────
     // Re-read project after all mutations to get fresh state
     await reader.loadProject();
@@ -248,6 +276,48 @@ describe('M1 End-to-End Acceptance (VAL-02)', () => {
 
     const layoutItems: string[] = c3proj.layouts?.items ?? [];
     expect(layoutItems).toContain('GameLevel');
+  });
+
+  // Packs the C3-loadable fixture (test/fixtures/c3-loadable-minimal/) and
+  // verifies structural integrity. The fixture itself was derived from a
+  // known-good seed via scripts/derive-minimal-fixture.ts and validated
+  // against the Construct 3 editor on 2026-04-16 — it opens cleanly without
+  // the "Failed to open project" dialog that tripped up earlier hand-built
+  // fixtures. This test protects against drift: if someone edits the fixture
+  // in a way that breaks structural consistency, packing will fail here.
+  //
+  // Full editor-load acceptance remains a manual step (or ClawForge-driven,
+  // not in CI) until browser automation is wired into the test runner.
+  it('packs the C3-loadable minimal fixture cleanly', async () => {
+    const loadableDir = join(__dirname, '..', 'fixtures', 'c3-loadable-minimal');
+    const tmp = await mkdtemp(join(tmpdir(), 'c3-loadable-'));
+    try {
+      await cp(loadableDir, tmp, { recursive: true });
+
+      const localReader = new Construct3ProjectReader(join(tmp, 'project.c3proj'));
+      await localReader.loadProject();
+      const localIdGen = new IdGenerator();
+      await localIdGen.initialize(localReader);
+      const localWriter = new Construct3ProjectWriter(localReader, localIdGen);
+      const localServer = new MockServer();
+      registerRuntimeTools({ server: localServer, reader: localReader, writer: localWriter, idGen: localIdGen } as any);
+
+      const out = join(tmp, 'c3-loadable-minimal.c3p');
+      const packResult = parseResult(
+        await localServer.callTool('pack_project', { outputPath: out, injectBridge: false }),
+      );
+      expect(packResult.packed).toBe(true);
+
+      const entries = await listZipEntries(out);
+      expect(entries).toContain('project.c3proj');
+
+      expect(localReader.projectData?.name).toBe('C3 Minimal Base');
+      expect(localReader.projectData?.layouts.items).toEqual(['Start']);
+      expect(localReader.projectData?.eventSheets.items).toEqual(['MainSheet']);
+      expect(localReader.projectData?.objectTypes.items).toEqual([]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it('pack_project produces a non-empty ZIP with correct structure', async () => {
