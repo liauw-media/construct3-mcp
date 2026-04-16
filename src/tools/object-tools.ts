@@ -113,6 +113,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[create_object] failed:', error);
         return toolError(`Error creating object: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -249,6 +250,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[update_object_properties] failed:', error);
         return toolError(`Error updating object: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -313,6 +315,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         };
         return toolResult(result);
       } catch (error) {
+        console.error('[delete_object] failed:', error);
         return toolError(`Error deleting object: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
