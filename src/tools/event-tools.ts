@@ -1022,4 +1022,92 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       }
     }
   );
+
+  // ─── update_event_variable ────────────────────────────────
+
+  server.tool(
+    'update_event_variable',
+    'Update an existing event variable declaration (rename, change type, change initial value)',
+    {
+      sheetName: z.string().max(200).describe('Event sheet containing the variable'),
+      sid: z.number().int().describe('SID of the variable event to update'),
+      newName: z.string().max(200).optional().describe('New variable name'),
+      newType: z.enum(['number', 'string', 'boolean']).optional().describe('New variable type'),
+      newInitialValue: z.string().max(1000).optional().describe('New initial value (as string — use "0", "false", or "" for defaults)'),
+      isStatic: z.boolean().optional().describe('Mark as static (value persists between calls)'),
+      isConstant: z.boolean().optional().describe('Mark as constant (cannot be changed at runtime)'),
+    },
+    async (args) => {
+      try {
+        const hasUpdates = args.newName !== undefined || args.newType !== undefined ||
+          args.newInitialValue !== undefined || args.isStatic !== undefined || args.isConstant !== undefined;
+        if (!hasUpdates) {
+          return toolError('No updates provided. Specify at least one of: newName, newType, newInitialValue, isStatic, isConstant.');
+        }
+
+        let sheet: EventSheet;
+        try {
+          sheet = await reader.readEventSheet(args.sheetName);
+        } catch {
+          return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
+        }
+
+        // Find the variable event by SID (search flat and nested)
+        const findResult = findEventBySid(sheet.events as Record<string, unknown>[], args.sid);
+        if (!findResult) {
+          return toolError(`No event with SID ${args.sid} found in sheet "${args.sheetName}".`);
+        }
+        if (findResult.event.eventType !== 'variable') {
+          return toolError(`Event SID ${args.sid} is a "${findResult.event.eventType}" event, not a variable event.`);
+        }
+
+        const varEvent = findResult.event as unknown as import('../construct3/types.js').VariableEvent;
+
+        // Check name uniqueness if renaming
+        if (args.newName !== undefined && args.newName !== varEvent.name) {
+          const nameInUse = findVariableNameInUse(sheet.events, args.newName, args.sid);
+          if (nameInUse) {
+            return toolError(`A variable named "${args.newName}" already exists in sheet "${args.sheetName}".`);
+          }
+          varEvent.name = args.newName;
+        }
+
+        if (args.newType !== undefined) varEvent.type = args.newType;
+        if (args.newInitialValue !== undefined) varEvent.initialValue = args.newInitialValue;
+        if (args.isStatic !== undefined) varEvent.isStatic = args.isStatic;
+        if (args.isConstant !== undefined) varEvent.isConstant = args.isConstant;
+
+        const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        resetProjectIndex();
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.sheetName,
+          category: 'eventsheet',
+          action: 'updated',
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[update_event_variable] failed:', error);
+        return toolError(`Error updating event variable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+}
+
+/**
+ * Check whether a variable name is already used in the event list (excluding the event with the given SID).
+ */
+function findVariableNameInUse(events: C3Event[], name: string, excludeSid: number): boolean {
+  for (const ev of events) {
+    if (ev.eventType === 'variable' && (ev as import('../construct3/types.js').VariableEvent).name === name) {
+      if ((ev as { sid?: number }).sid !== excludeSid) return true;
+    }
+    if ('children' in ev && Array.isArray((ev as { children?: C3Event[] }).children)) {
+      if (findVariableNameInUse((ev as { children: C3Event[] }).children, name, excludeSid)) return true;
+    }
+  }
+  return false;
 }
