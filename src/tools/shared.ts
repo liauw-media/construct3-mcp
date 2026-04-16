@@ -61,3 +61,24 @@ export function toolError(message: string) {
     isError: true as const,
   };
 }
+
+/**
+ * Build a "not found" toolError response with name suggestions.
+ * Replaces the copy-pasted 3-line suggestion block in all mutation tools.
+ *
+ * @param entityKind  Human-readable entity kind (e.g., 'Object', 'Event sheet', 'Layout')
+ * @param name        The name that was not found
+ * @param suggestions Names returned by reader.findNearestName()
+ * @param listTool    The MCP tool name users can call to see all valid names (e.g., 'list_objects')
+ */
+export function notFoundError(
+  entityKind: string,
+  name: string,
+  suggestions: string[],
+  listTool: string,
+): ReturnType<typeof toolError> {
+  const hint = suggestions.length > 0
+    ? `\nDid you mean: ${suggestions.join(', ')}?`
+    : `\nUse ${listTool} to see all available names.`;
+  return toolError(`${entityKind} "${name}" not found.${hint}`);
+}

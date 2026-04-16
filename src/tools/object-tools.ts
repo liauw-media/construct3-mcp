@@ -7,7 +7,7 @@ import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Instance, Layout } from '../construct3/types.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
-import { validateName, validateSubfolder, toolResult, toolError } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   GLOBAL_PLUGINS,
@@ -149,11 +149,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         try {
           obj = await reader.readObjectType(args.name);
         } catch {
-          const suggestions = reader.findNearestName(args.name, 'objects');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_objects to see all available names.';
-          return toolError(`Object "${args.name}" not found.${hint}`);
+          return notFoundError('Object', args.name, reader.findNearestName(args.name, 'objects'), 'list_objects');
         }
 
         const warnings: string[] = [];
@@ -272,11 +268,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         // Verify the object exists
         const existing = await reader.listObjectTypes();
         if (!existing.includes(args.name)) {
-          const suggestions = reader.findNearestName(args.name, 'objects');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_objects to see all available names.';
-          return toolError(`Object "${args.name}" not found.${hint}`);
+          return notFoundError('Object', args.name, reader.findNearestName(args.name, 'objects'), 'list_objects');
         }
 
         // Check references

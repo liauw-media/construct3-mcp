@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, AnimationFrame } from '../construct3/types.js';
-import { toolResult, toolError } from './shared.js';
+import { toolResult, toolError, notFoundError } from './shared.js';
 import { createAnimation, createAnimationFrame } from '../construct3/templates.js';
 
 export function registerAnimationTools({ server, reader, writer, idGen }: MutationToolDeps) {
@@ -32,11 +32,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         try {
           obj = await reader.readObjectType(args.objectName);
         } catch {
-          const suggestions = reader.findNearestName(args.objectName, 'objects');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_objects to see all available names.';
-          return toolError(`Object "${args.objectName}" not found.${hint}`);
+          return notFoundError('Object', args.objectName, reader.findNearestName(args.objectName, 'objects'), 'list_objects');
         }
 
         // Verify it's a Sprite
@@ -147,11 +143,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         try {
           obj = await reader.readObjectType(args.objectName);
         } catch {
-          const suggestions = reader.findNearestName(args.objectName, 'objects');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_objects to see all available names.';
-          return toolError(`Object "${args.objectName}" not found.${hint}`);
+          return notFoundError('Object', args.objectName, reader.findNearestName(args.objectName, 'objects'), 'list_objects');
         }
 
         // Verify it's a Sprite

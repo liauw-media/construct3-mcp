@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, Layout } from '../construct3/types.js';
-import { validateName, toolResult, toolError } from './shared.js';
+import { validateName, toolResult, toolError, notFoundError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   DEFAULT_INSTANCE_PROPERTIES,
@@ -143,11 +143,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         try {
           layout = await reader.readLayout(args.layoutName);
         } catch {
-          const suggestions = reader.findNearestName(args.layoutName, 'layouts');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_layouts to see all available names.';
-          return toolError(`Layout "${args.layoutName}" not found.${hint}`);
+          return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
         }
 
         const uid = await idGen.generateUid(reader);
@@ -261,11 +257,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         // Verify the layout exists
         const existing = await reader.listLayouts();
         if (!existing.includes(args.name)) {
-          const suggestions = reader.findNearestName(args.name, 'layouts');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_layouts to see all available names.';
-          return toolError(`Layout "${args.name}" not found.${hint}`);
+          return notFoundError('Layout', args.name, reader.findNearestName(args.name, 'layouts'), 'list_layouts');
         }
 
         // Block deletion of the startup layout unconditionally
@@ -352,11 +344,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         try {
           layout = await reader.readLayout(args.name);
         } catch {
-          const suggestions = reader.findNearestName(args.name, 'layouts');
-          const hint = suggestions.length > 0
-            ? `\nDid you mean: ${suggestions.join(', ')}?`
-            : '\nUse list_layouts to see all available names.';
-          return toolError(`Layout "${args.name}" not found.${hint}`);
+          return notFoundError('Layout', args.name, reader.findNearestName(args.name, 'layouts'), 'list_layouts');
         }
 
         const warnings: string[] = [];
@@ -365,11 +353,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         if (args.eventSheet !== undefined) {
           const sheets = await reader.listEventSheets();
           if (!sheets.includes(args.eventSheet)) {
-            const suggestions = reader.findNearestName(args.eventSheet, 'eventsheets');
-            const hint = suggestions.length > 0
-              ? ` Did you mean: ${suggestions.join(', ')}?`
-              : ' Use list_eventsheets to see available sheets.';
-            return toolError(`Event sheet "${args.eventSheet}" does not exist.${hint}`);
+            return notFoundError('Event sheet', args.eventSheet, reader.findNearestName(args.eventSheet, 'eventsheets'), 'list_eventsheets');
           }
           layout.eventSheet = args.eventSheet;
         }
