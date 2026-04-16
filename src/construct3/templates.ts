@@ -357,7 +357,7 @@ export function createGroupEvent(title: string, sid: number): GroupEvent {
 export function createFunctionEvent(
   funcName: string,
   sid: number,
-  params?: Array<{ name: string; type: string }>,
+  params?: Array<{ name: string; type: string; sid: number }>,
 ): FunctionBlockEvent {
   const functionParameters: Array<{ name: string; type: string; initialValue: string; comment: string; sid: number }> = [];
   if (params) {
@@ -367,7 +367,7 @@ export function createFunctionEvent(
         type: p.type,
         initialValue: p.type === 'number' ? '0' : p.type === 'boolean' ? 'false' : '',
         comment: '',
-        sid: sid + functionParameters.length + 1,
+        sid: p.sid, // caller must supply a real SID from IdGenerator
       });
     }
   }
