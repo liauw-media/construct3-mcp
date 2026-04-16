@@ -34,6 +34,7 @@ pnpm-debug.log*
 
 # GSD planning (internal; keep out of community OSS release)
 .planning/
+CLAUDE.md
 
 # IDE
 .vscode/
