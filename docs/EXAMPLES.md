@@ -307,9 +307,9 @@ Returns success with a warning that references were NOT cleaned up.
 ### Update Project Metadata
 
 **Query:**
-> "Set the project version to 1.1.0 and author to Omnitronix"
+> "Set the project version to 1.1.0 and author to My Studio"
 
-**Claude uses**: `update_project_metadata` with `version: "1.1.0"`, `author: "Omnitronix"`
+**Claude uses**: `update_project_metadata` with `version: "1.1.0"`, `author: "My Studio"`
 
 ---
 

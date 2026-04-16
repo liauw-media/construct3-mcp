@@ -2,8 +2,9 @@
  * Runtime control tools for Construct 3 games.
  *
  * These tools bridge the gap between static project manipulation and
- * live game control. They use ClawForge (or any desktop automation)
- * to interact with a running C3 preview via an injected bridge script.
+ * live game control. They work with any desktop automation tool (Playwright,
+ * curl, etc.) to interact with a running C3 preview via an injected bridge
+ * script.
  *
  * Generic — not tied to any specific game or addon.
  */
@@ -75,7 +76,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'inject_runtime_bridge',
-    'Inject the C3 runtime bridge script into the project. This enables external tools (ClawForge, Playwright) to control the running game via globalThis.__c3bridge. The bridge script auto-runs via runOnStartup() and processes commands each tick.',
+    'Inject the C3 runtime bridge script into the project. This enables external automation tools (Playwright, browser console, curl) to control the running game via globalThis.__c3bridge. The bridge script auto-runs via runOnStartup() and processes commands each tick.',
     {},
     async () => {
       try {
@@ -205,9 +206,9 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           args: { name: 'string (layout name)' },
         },
         evaluateExpression: {
-          description: 'Read a plugin expression from an object instance (e.g., Platform Connect expressions)',
+          description: 'Read a plugin expression from an object instance',
           args: {
-            objectName: 'string (object type name, e.g. "OmnitronixPlatformConnect")',
+            objectName: 'string (object type name, e.g. "MyPlugin")',
             expression: 'string (property/expression name on the instance)',
           },
         },
@@ -229,7 +230,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'generate_bridge_eval_script',
-    'Generate a shell command (using curl or python) that can be run on a ClawForge worker to execute a bridge command in the running C3 game. The command interacts with the game via Firefox remote debugging.',
+    'Generate a shell command (using curl or python) to execute a bridge command in the running C3 game. The command interacts with the game via the browser remote debugging protocol.',
     {
       command: z.string().describe('Bridge command type (e.g. "callFunction", "getGlobalVar", "getObjectState")'),
       args: boundedRecord().optional().describe('Command arguments as key-value pairs (max 100 keys, depth 6)'),
@@ -264,8 +265,8 @@ js_poll = """
 })(%d)
 """
 
-# This script should be executed via ClawForge's exec_command or exec_python
-# with Firefox started using: firefox-esr --remote-debugging-port=9222
+# Run this script in any environment with access to the browser CDP endpoint.
+# Start Firefox/Chrome with: --remote-debugging-port=9222
 # The actual CDP communication depends on the runtime bridge setup.
 print(json.dumps({
   "js_submit": js_submit.strip(),
@@ -352,7 +353,7 @@ print(json.dumps({
             'Click Preview to launch the game',
             'The runtime bridge will activate via runOnStartup()',
             'Access via: globalThis.__c3bridge.submit("ping", {})',
-            'Or use ClawForge to automate the entire flow',
+            'Or use Playwright or any CDP-capable tool to automate the entire flow',
           ],
         });
       } catch (error) {
@@ -417,7 +418,7 @@ print(json.dumps({
 
   server.tool(
     'pack_project',
-    'Pack the C3 project folder into a .c3p file (zip archive). The .c3p can be uploaded to a ClawForge worker and imported into the Construct 3 editor. Optionally injects the runtime bridge before packing.',
+    'Pack the C3 project folder into a .c3p file (zip archive). The .c3p can be opened directly in the Construct 3 editor. Optionally injects the runtime bridge before packing.',
     {
       outputPath: z.string().describe('Output path for the .c3p file (e.g. "/tmp/game.c3p")'),
       injectBridge: z.boolean().optional().default(true).describe('Inject the runtime bridge before packing'),

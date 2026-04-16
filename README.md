@@ -2,7 +2,7 @@
 
 > A Model Context Protocol (MCP) server that enables AI assistants (Claude, Cursor, Antigravity, and any MCP-compatible tool) to safely read, analyze, and modify Construct 3 game engine projects.
 
-> **Work in Progress** — Phases 1-4 are complete and functional. Phase 5 (advanced features) is in development. See the [Roadmap](#roadmap) for details.
+> **v1.8.0 (M1 release)** — Full primitive surface complete. See the [Roadmap](#roadmap) and [CHANGELOG](CHANGELOG.md) for details.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
@@ -127,20 +127,18 @@ node dist/index.js /path/to/your/project.c3proj
 | `inject_runtime_bridge` | Inject a bridge script into the C3 project that exposes the runtime via `globalThis.__c3bridge` |
 | `remove_runtime_bridge` | Remove the bridge script and clean up the project |
 | `get_bridge_commands` | List all commands the bridge supports (callFunction, getGlobalVar, getObjectState, etc.) |
-| `generate_bridge_eval_script` | Generate a ClawForge-compatible script to execute a bridge command |
+| `generate_bridge_eval_script` | Generate a curl/python script to execute a bridge command via browser remote debugging |
 | `export_for_preview` | Pre-flight checks (worker mode, bridge injection) for preview testing |
 | `clone_project` | Deep-copy the project with optional bridge injection |
 
-The runtime bridge enables external tools (ClawForge, Playwright) to control a running C3 game. Once injected and the game is previewed, you can:
+The runtime bridge enables external tools (Playwright, browser console, curl) to control a running C3 game. Once injected and the game is previewed, you can:
 
 ```javascript
-// From the browser console or via ClawForge exec
+// From the browser console or any CDP-capable automation tool
 globalThis.__c3bridge.submit("callFunction", { name: "StartGame", params: [] });
 globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" });
 globalThis.__c3bridge.submit("getObjectState", { objectName: "Player" });
 ```
-
-See the [Omnitronix Construct MCP](https://github.com/omnitronix/omnitronix-construct-mcp) for a domain-specific layer built on top of these runtime tools for slot machine testing.
 
 ### Prompts (Workflow Templates)
 
@@ -428,7 +426,7 @@ We welcome contributions! Here's how to get started:
 - [x] Bridge commands: callFunction, get/setGlobalVar, getObjectState, evaluateExpression, etc.
 - [x] Project cloning with bridge injection
 - [x] Export-for-preview pre-flight checks (worker mode, bridge registration)
-- [x] ClawForge eval script generation
+- [x] Bridge eval script generation (curl/python for browser CDP)
 
 ### Phase 7: Advanced Features
 - [ ] Support for .c3p (zipped) projects
@@ -440,7 +438,7 @@ We welcome contributions! Here's how to get started:
 
 - **Folder Format Only**: Works with .c3proj folder projects, not .c3p ZIP files
 - **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned for Phase 5)
-- **Runtime Bridge Requires Desktop Automation**: The runtime tools inject a bridge script but need an external tool (ClawForge, Playwright) to drive the browser and interact with the running game
+- **Runtime Bridge Requires Browser Automation**: The runtime tools inject a bridge script but need an external tool (Playwright, curl, or any CDP-capable tool) to drive the browser and interact with the running game
 - **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs)
 
 ## License
@@ -449,8 +447,8 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 ## Authors
 
-**Omnitronix Team**
-- Initial development for Bonny's Fortune game project
+**Contributors**
+- Initial development and architecture
 
 ## Acknowledgments
 

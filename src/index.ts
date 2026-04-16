@@ -22,7 +22,7 @@ import { registerRuntimeTools } from './tools/runtime-tools.js';
 const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || process.cwd();
 
 const server = new McpServer(
-  { name: 'construct3-mcp-server', version: '1.5.0' },
+  { name: 'construct3-mcp-server', version: '1.8.0' },
   { capabilities: { resources: {}, tools: {}, prompts: {} } }
 );
 
@@ -66,7 +66,7 @@ async function main() {
     const writer = new Construct3ProjectWriter(reader, idGen);
     registerMutationTools(server, reader, writer, idGen);
 
-    // Phase 4: Runtime Control (for live game testing via ClawForge/browser)
+    // Runtime Control (for live game testing via browser automation)
     registerRuntimeTools({ server, reader, writer });
 
     // Start transport
