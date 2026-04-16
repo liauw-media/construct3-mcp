@@ -3,7 +3,7 @@
  * Safety model: backup → validate → write → verify → invalidate caches.
  */
 
-import { readFile, writeFile, copyFile, unlink, mkdir, stat } from 'fs/promises';
+import { readFile, writeFile, copyFile, unlink, mkdir, stat, rename } from 'fs/promises';
 import { dirname } from 'path';
 import { resolveProjectPath } from './path-utils.js';
 import type { Construct3ProjectReader } from './project-reader.js';
@@ -59,6 +59,29 @@ export class Construct3ProjectWriter {
       return await fn();
     } finally {
       release();
+    }
+  }
+
+  /**
+   * Atomically replace a file by writing to a temp path then renaming.
+   * On Windows, rename fails with EEXIST if destination exists — we handle
+   * this by deleting the destination first, then retrying the rename.
+   */
+  private async atomicWrite(filePath: string, content: string | Buffer): Promise<void> {
+    const tmpPath = filePath + '.tmp';
+    await writeFile(tmpPath, content, typeof content === 'string' ? 'utf-8' : undefined);
+    try {
+      await rename(tmpPath, filePath);
+    } catch (e: unknown) {
+      if (e && typeof e === 'object' && 'code' in e && e.code === 'EEXIST') {
+        // Windows: destination exists — delete it then retry
+        await unlink(filePath);
+        await rename(tmpPath, filePath);
+      } else {
+        // Cleanup temp file before re-throwing
+        try { await unlink(tmpPath); } catch { /* best-effort */ }
+        throw e;
+      }
     }
   }
 
@@ -140,7 +163,7 @@ export class Construct3ProjectWriter {
     await mkdir(dirname(filePath), { recursive: true });
 
     const backupPath = await this.createBackup(filePath);
-    await writeFile(filePath, json, 'utf-8');
+    await this.atomicWrite(filePath, json);
 
     // Post-write verification
     await this.verifyWrittenFile(filePath, name);
@@ -204,7 +227,7 @@ export class Construct3ProjectWriter {
       }
 
       const json = this.validateJsonData(project, 'project.c3proj');
-      await writeFile(projectPath, json, 'utf-8');
+      await this.atomicWrite(projectPath, json);
       await this.verifyWrittenFile(projectPath, 'project.c3proj');
       await this.reader.reloadProject();
     });
@@ -235,7 +258,7 @@ export class Construct3ProjectWriter {
       }
 
       const json = this.validateJsonData(project, 'project.c3proj');
-      await writeFile(projectPath, json, 'utf-8');
+      await this.atomicWrite(projectPath, json);
       await this.verifyWrittenFile(projectPath, 'project.c3proj');
       await this.reader.reloadProject();
     });
@@ -274,7 +297,7 @@ export class Construct3ProjectWriter {
       }
 
       const json = this.validateJsonData(project, 'project.c3proj');
-      await writeFile(projectPath, json, 'utf-8');
+      await this.atomicWrite(projectPath, json);
       await this.verifyWrittenFile(projectPath, 'project.c3proj');
       await this.reader.reloadProject();
 
@@ -353,7 +376,7 @@ export class Construct3ProjectWriter {
       project.usedAddons.push(newAddon);
 
       const json = this.validateJsonData(project, 'project.c3proj');
-      await writeFile(projectPath, json, 'utf-8');
+      await this.atomicWrite(projectPath, json);
       await this.verifyWrittenFile(projectPath, 'project.c3proj');
       await this.reader.reloadProject();
 
