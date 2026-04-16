@@ -236,3 +236,258 @@ describe('update_animation_properties', () => {
     expect(result.content[0].text).toContain('not a Sprite');
   });
 });
+
+// ─── delete_animation ─────────────────────────────────────
+
+describe('delete_animation', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('delete_animation')).toBe(true);
+  });
+
+  it('deletes an animation', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', {
+        ...makeSpriteObj(),
+        animations: {
+          items: [
+            { name: 'Idle', sid: 10, frames: [], isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 0 },
+            { name: 'Walk', sid: 11, frames: [], isLooping: true, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 5 },
+          ],
+          subfolders: [],
+        },
+      }]]),
+    });
+    const result = await server.callTool('delete_animation', {
+      objectName: 'Hero',
+      animationName: 'Walk',
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items).toHaveLength(1);
+    expect(written.animations.items[0].name).toBe('Idle');
+  });
+
+  it('blocks deletion of last animation', async () => {
+    const { server } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('delete_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('last animation');
+  });
+
+  it('errors on nonexistent animation', async () => {
+    const { server } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('delete_animation', {
+      objectName: 'Hero',
+      animationName: 'Ghost',
+    });
+    expect(result.isError).toBe(true);
+  });
+});
+
+// ─── rename_animation ─────────────────────────────────────
+
+describe('rename_animation', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('rename_animation')).toBe(true);
+  });
+
+  it('renames an animation', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('rename_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      newName: 'Idle',
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items[0].name).toBe('Idle');
+  });
+
+  it('rejects duplicate name', async () => {
+    const { server } = setup({
+      objects: new Map([['Hero', {
+        ...makeSpriteObj(),
+        animations: {
+          items: [
+            { name: 'Idle', sid: 10, frames: [], isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 0 },
+            { name: 'Walk', sid: 11, frames: [], isLooping: true, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 5 },
+          ],
+          subfolders: [],
+        },
+      }]]),
+    });
+    const result = await server.callTool('rename_animation', {
+      objectName: 'Hero',
+      animationName: 'Idle',
+      newName: 'Walk',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('already exists');
+  });
+});
+
+// ─── add_frame_to_animation ───────────────────────────────
+
+describe('add_frame_to_animation', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('add_frame_to_animation')).toBe(true);
+  });
+
+  it('appends a frame', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('add_frame_to_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      width: 64,
+      height: 64,
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items[0].frames).toHaveLength(2);
+    expect(written.animations.items[0].frames[1].width).toBe(64);
+  });
+
+  it('inserts a frame at index 0', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    await server.callTool('add_frame_to_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      index: 0,
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items[0].frames).toHaveLength(2);
+  });
+});
+
+// ─── delete_frame_from_animation ─────────────────────────
+
+describe('delete_frame_from_animation', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('delete_frame_from_animation')).toBe(true);
+  });
+
+  it('deletes a frame', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', {
+        ...makeSpriteObj(),
+        animations: {
+          items: [{
+            name: 'Animation 1', sid: 10, isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 0,
+            frames: [
+              { width: 100, height: 100, originX: 0.5, originY: 0.5, imageSpriteId: 1 },
+              { width: 100, height: 100, originX: 0.5, originY: 0.5, imageSpriteId: 2 },
+            ],
+          }],
+          subfolders: [],
+        },
+      }]]),
+    });
+    const result = await server.callTool('delete_frame_from_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      frameIndex: 0,
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items[0].frames).toHaveLength(1);
+    expect(written.animations.items[0].frames[0].imageSpriteId).toBe(2);
+  });
+
+  it('blocks deletion of last frame', async () => {
+    const { server } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('delete_frame_from_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      frameIndex: 0,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('last frame');
+  });
+
+  it('errors on out-of-range index', async () => {
+    const { server } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('delete_frame_from_animation', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      frameIndex: 99,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('out of range');
+  });
+});
+
+// ─── update_frame ─────────────────────────────────────────
+
+describe('update_frame', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('update_frame')).toBe(true);
+  });
+
+  it('updates frame duration and dimensions', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('update_frame', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      frameIndex: 0,
+      width: 64,
+      height: 64,
+      duration: 0.5,
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    const frame = written.animations.items[0].frames[0];
+    expect(frame.width).toBe(64);
+    expect(frame.duration).toBe(0.5);
+  });
+
+  it('errors with no updates', async () => {
+    const { server } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('update_frame', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      frameIndex: 0,
+    });
+    expect(result.isError).toBe(true);
+  });
+});
+
+// ─── replace_sprite_image ─────────────────────────────────
+
+describe('replace_sprite_image', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('replace_sprite_image')).toBe(true);
+  });
+
+  it('rejects invalid base64 / non-PNG data', async () => {
+    const { server } = setup({
+      objects: new Map([['Hero', {
+        ...makeSpriteObj(),
+        animations: {
+          items: [{
+            name: 'Animation 1', sid: 10, isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 0,
+            frames: [{ width: 100, height: 100, originX: 0.5, originY: 0.5, imageSpriteId: 1 }],
+          }],
+          subfolders: [],
+        },
+      }]]),
+    });
+    // "aGVsbG8=" decodes to "hello" — not a PNG
+    const result = await server.callTool('replace_sprite_image', {
+      objectName: 'Hero',
+      animationName: 'Animation 1',
+      frameIndex: 0,
+      pngBase64: 'aGVsbG8=',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('valid PNG');
+  });
+});
