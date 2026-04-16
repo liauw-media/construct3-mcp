@@ -1,5 +1,6 @@
 /**
- * Object type tools: create_object, update_object_properties, delete_object.
+ * Object type tools: create_object, update_object_properties, delete_object,
+ * create_family, update_family, delete_family.
  */
 
 import { z } from 'zod';
@@ -317,6 +318,205 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
       } catch (error) {
         console.error('[delete_object] failed:', error);
         return toolError(`Error deleting object: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── create_family ────────────────────────────────────────
+
+  server.tool(
+    'create_family',
+    'Create a new family in the project. Families let you group object types and share instance variables and behaviors across them.',
+    {
+      name: z.string().max(200).describe('Family name (must be unique)'),
+      pluginId: z.string().max(100).describe('Plugin ID all members must share (e.g. "Sprite", "Text")'),
+      members: z.array(z.string().max(200)).optional().default([]).describe('Object type names to add as initial members'),
+      subfolder: z.string().max(500).optional().describe('Subfolder path in project (e.g. "UI")'),
+    },
+    async (args) => {
+      try {
+        validateName(args.name);
+        if (args.subfolder) validateSubfolder(args.subfolder);
+
+        // Check uniqueness
+        const existing = await reader.listFamilies();
+        if (existing.includes(args.name)) {
+          return toolError(`Family "${args.name}" already exists.`);
+        }
+
+        // Validate members exist
+        const warnings: string[] = [];
+        for (const memberName of args.members) {
+          try {
+            await reader.readObjectType(memberName);
+          } catch {
+            warnings.push(`Member "${memberName}" does not exist as an object type. It will be listed but C3 may warn.`);
+          }
+        }
+
+        const sid = await idGen.generateSid(reader);
+
+        const familyData: Record<string, unknown> = {
+          name: args.name,
+          'plugin-id': args.pluginId,
+          sid,
+          instanceVariables: [],
+          behaviorTypes: [],
+          effectTypes: [],
+          members: args.members,
+        };
+
+        await writer.writeEntityFile('families', args.name, familyData, args.subfolder);
+        await writer.addToProject('families', args.name, args.subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'family',
+          action: 'created',
+          generatedSid: sid,
+          warnings: warnings.length > 0 ? warnings : undefined,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[create_family] failed:', error);
+        return toolError(`Error creating family: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── update_family ────────────────────────────────────────
+
+  server.tool(
+    'update_family',
+    'Update a family: add/remove members, add/remove shared instance variables or behaviors',
+    {
+      name: z.string().max(200).describe('Family name to update'),
+      addMembers: z.array(z.string().max(200)).optional().describe('Object type names to add to the family'),
+      removeMembers: z.array(z.string().max(200)).optional().describe('Object type names to remove from the family'),
+      addVariables: z.array(z.object({
+        name: z.string().describe('Variable name'),
+        type: z.enum(['number', 'string', 'boolean']).describe('Variable type'),
+      })).optional().describe('Instance variables to add to all family members'),
+      removeVariables: z.array(z.string()).optional().describe('Instance variable names to remove'),
+    },
+    async (args) => {
+      try {
+        const hasUpdates = (args.addMembers?.length ?? 0) > 0 || (args.removeMembers?.length ?? 0) > 0 ||
+          (args.addVariables?.length ?? 0) > 0 || (args.removeVariables?.length ?? 0) > 0;
+        if (!hasUpdates) {
+          return toolError('No updates provided. Specify at least one of: addMembers, removeMembers, addVariables, removeVariables.');
+        }
+
+        let family: Record<string, unknown>;
+        try {
+          family = await reader.readFamily(args.name);
+        } catch {
+          return toolError(`Family "${args.name}" not found. Use list_families to see available families.`);
+        }
+
+        const warnings: string[] = [];
+
+        // Manage members
+        if (!Array.isArray(family.members)) family.members = [];
+        const members = family.members as string[];
+
+        if (args.addMembers) {
+          for (const m of args.addMembers) {
+            if (members.includes(m)) {
+              warnings.push(`Member "${m}" already in family, skipping`);
+            } else {
+              members.push(m);
+            }
+          }
+        }
+
+        if (args.removeMembers) {
+          for (const m of args.removeMembers) {
+            const idx = members.indexOf(m);
+            if (idx !== -1) {
+              members.splice(idx, 1);
+            } else {
+              warnings.push(`Member "${m}" not in family, skipping`);
+            }
+          }
+        }
+
+        // Manage instance variables
+        if (!Array.isArray(family.instanceVariables)) family.instanceVariables = [];
+        const vars = family.instanceVariables as Array<Record<string, unknown>>;
+
+        if (args.addVariables) {
+          for (const v of args.addVariables) {
+            if (vars.some(ev => ev.name === v.name)) {
+              warnings.push(`Variable "${v.name}" already exists, skipping`);
+              continue;
+            }
+            const sid = await idGen.generateSid(reader);
+            vars.push(createInstanceVariable(v.name, v.type, sid));
+          }
+        }
+
+        if (args.removeVariables) {
+          for (const varName of args.removeVariables) {
+            const idx = vars.findIndex(v => v.name === varName);
+            if (idx !== -1) {
+              vars.splice(idx, 1);
+            } else {
+              warnings.push(`Variable "${varName}" not found, skipping`);
+            }
+          }
+        }
+
+        const subfolder = writer.getSubfolderForEntity('families', args.name);
+        const backupPath = await writer.writeEntityFile('families', args.name, family, subfolder);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'family',
+          action: 'updated',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[update_family] failed:', error);
+        return toolError(`Error updating family: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── delete_family ────────────────────────────────────────
+
+  server.tool(
+    'delete_family',
+    'Delete a family from the project',
+    {
+      name: z.string().max(200).describe('Family name to delete'),
+    },
+    async (args) => {
+      try {
+        const existing = await reader.listFamilies();
+        if (!existing.includes(args.name)) {
+          return toolError(`Family "${args.name}" not found. Use list_families to see available families.`);
+        }
+
+        const subfolder = writer.getSubfolderForEntity('families', args.name);
+        const backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
+        await writer.removeFromProject('families', args.name);
+
+        const result: WriteResult = {
+          success: true,
+          entity: args.name,
+          category: 'family',
+          action: 'deleted',
+          backupFile: backupPath,
+        };
+        return toolResult(result);
+      } catch (error) {
+        console.error('[delete_family] failed:', error);
+        return toolError(`Error deleting family: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   );

@@ -347,3 +347,161 @@ describe('delete_object', () => {
     expect(result.isError).toBe(true);
   });
 });
+
+// ─── create_family ────────────────────────────────────────
+
+describe('create_family', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('create_family')).toBe(true);
+  });
+
+  it('creates a family with members', async () => {
+    const { server, writer } = setup({
+      objects: new Map([
+        ['btn_spin', { name: 'btn_spin', 'plugin-id': 'Sprite', sid: 1 }],
+        ['btn_menu', { name: 'btn_menu', 'plugin-id': 'Sprite', sid: 2 }],
+      ]),
+    });
+    const result = await server.callTool('create_family', {
+      name: 'btn_fam',
+      pluginId: 'Sprite',
+      members: ['btn_spin', 'btn_menu'],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.entity).toBe('btn_fam');
+    expect(data.category).toBe('family');
+    expect(data.generatedSid).toBeDefined();
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+    expect(writer.callsFor('addToProject')).toHaveLength(1);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.members).toEqual(['btn_spin', 'btn_menu']);
+    expect(written['plugin-id']).toBe('Sprite');
+  });
+
+  it('creates a family with no members', async () => {
+    const { server, writer } = setup();
+    const result = await server.callTool('create_family', {
+      name: 'EmptyFam',
+      pluginId: 'Text',
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.members).toEqual([]);
+  });
+
+  it('rejects duplicate family name', async () => {
+    const { server } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
+    });
+    const result = await server.callTool('create_family', {
+      name: 'btn_fam',
+      pluginId: 'Sprite',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('already exists');
+  });
+
+  it('warns on nonexistent member', async () => {
+    const { server } = setup();
+    const result = await server.callTool('create_family', {
+      name: 'TestFam',
+      pluginId: 'Sprite',
+      members: ['NonExistentObject'],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeDefined();
+    expect(data.warnings[0]).toContain('does not exist');
+  });
+});
+
+// ─── update_family ────────────────────────────────────────
+
+describe('update_family', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('update_family')).toBe(true);
+  });
+
+  it('adds members to a family', async () => {
+    const { server, writer } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: ['btn_spin'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+    });
+    const result = await server.callTool('update_family', {
+      name: 'btn_fam',
+      addMembers: ['btn_menu'],
+    });
+    expect(parseResult(result).success).toBe(true);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.members).toEqual(['btn_spin', 'btn_menu']);
+  });
+
+  it('removes members from a family', async () => {
+    const { server, writer } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: ['btn_spin', 'btn_menu'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+    });
+    await server.callTool('update_family', {
+      name: 'btn_fam',
+      removeMembers: ['btn_spin'],
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.members).toEqual(['btn_menu']);
+  });
+
+  it('adds instance variables', async () => {
+    const { server, writer } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+    });
+    await server.callTool('update_family', {
+      name: 'btn_fam',
+      addVariables: [{ name: 'score', type: 'number' }],
+    });
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.instanceVariables).toHaveLength(1);
+    expect(written.instanceVariables[0].name).toBe('score');
+  });
+
+  it('errors with no updates', async () => {
+    const { server } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+    });
+    const result = await server.callTool('update_family', { name: 'btn_fam' });
+    expect(result.isError).toBe(true);
+  });
+
+  it('errors on nonexistent family', async () => {
+    const { server } = setup();
+    const result = await server.callTool('update_family', {
+      name: 'Ghost',
+      addMembers: ['btn_spin'],
+    });
+    expect(result.isError).toBe(true);
+  });
+});
+
+// ─── delete_family ────────────────────────────────────────
+
+describe('delete_family', () => {
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('delete_family')).toBe(true);
+  });
+
+  it('deletes an existing family', async () => {
+    const { server, writer } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
+    });
+    const result = await server.callTool('delete_family', { name: 'btn_fam' });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
+  });
+
+  it('errors on nonexistent family', async () => {
+    const { server } = setup();
+    const result = await server.callTool('delete_family', { name: 'Ghost' });
+    expect(result.isError).toBe(true);
+  });
+});
