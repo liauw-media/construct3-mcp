@@ -18,7 +18,7 @@
  * FIXTURE DERIVATION (2026-04-16): scripts/derive-minimal-fixture.ts prunes
  * a known-good seed into a minimal, slot-IP-free fixture committed at
  * test/fixtures/c3-loadable-minimal/. That fixture was validated to open
- * cleanly in the Construct 3 editor via ClawForge. The third test below
+ * cleanly in the Construct 3 editor. The third test below
  * ("packs the C3-loadable minimal fixture cleanly") protects it from drift.
  *
  * Flow:
@@ -286,7 +286,7 @@ describe('M1 Structural Round-Trip Acceptance (VAL-02)', () => {
   // fixtures. This test protects against drift: if someone edits the fixture
   // in a way that breaks structural consistency, packing will fail here.
   //
-  // Full editor-load acceptance remains a manual step (or ClawForge-driven,
+  // Full editor-load acceptance remains a manual step (or driven by an
   // not in CI) until browser automation is wired into the test runner.
   it('packs the C3-loadable minimal fixture cleanly', async () => {
     const loadableDir = join(__dirname, '..', 'fixtures', 'c3-loadable-minimal');

@@ -3,8 +3,8 @@
     "construct3": {
       "command": "node",
       "args": [
-        "S:\\omnitronix\\construct3-mcp\\dist\\index.js",
-        "S:\\omnitronix\\omnitronix-bonnysfortune-frontend"
+        "/path/to/construct3-mcp/dist/index.js",
+        "/path/to/your-construct3-project"
       ]
     }
   }
