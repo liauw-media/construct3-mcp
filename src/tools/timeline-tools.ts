@@ -4,7 +4,7 @@
  *
  * Timeline JSON files live in projectDir/timelines/<name>.json.
  * The project.c3proj timelines container tracks their names.
- * JSON shape validated against sample-slot-a and sample-slot-b reference games.
+ * JSON shape validated against production slot-game projects.
  */
 
 import { z } from 'zod';

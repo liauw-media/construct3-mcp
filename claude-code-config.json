@@ -3,8 +3,8 @@
     "construct3": {
       "command": "node",
       "args": [
-        "S:\\mystudio\\construct3-mcp\\dist\\index.js",
-        "S:\\mystudio\\your-construct3-project"
+        "/path/to/construct3-mcp/dist/index.js",
+        "/path/to/your-construct3-project"
       ]
     }
   }

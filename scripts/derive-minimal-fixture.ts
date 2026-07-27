@@ -25,10 +25,15 @@ import { MockServer } from '../test/mocks/mock-server.js';
 import { registerRuntimeTools } from '../src/tools/runtime-tools.js';
 import { generatePlaceholderPng } from '../src/construct3/png-generator.js';
 
+// Third-party / proprietary addons stripped when deriving an IP-free fixture.
+// Extend this for whatever addons your own source project uses.
 const DROPPED_ADDON_IDS = new Set([
   'Gritsenko_Spine',
-  'MyStudio_PlatformConnect',
   'TegaGame_gates_of_olympus',
+  ...(process.env.C3_DROP_ADDON_IDS ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean),
 ]);
 
 interface FolderSlice {
@@ -49,7 +54,16 @@ function pruneFolder(folder: FolderSlice | undefined, dropped: Set<string>): voi
 }
 
 async function main() {
-  const src = '_test-sample-slot-a';
+  // Source project to derive the fixture from. Pass a path; there is no
+  // default, so this script never embeds a project name.
+  const src = process.argv[2];
+  if (!src) {
+    console.error(
+      'ERROR: pass the source Construct 3 project directory, e.g. ' +
+        'npx tsx scripts/derive-minimal-fixture.ts ./my-c3-project',
+    );
+    process.exit(1);
+  }
   const work = 'test-outputs/c3-derive-work';
   const outPath = 'test-outputs/c3-minimal-derived.c3p';
 
