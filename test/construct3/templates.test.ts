@@ -170,6 +170,17 @@ describe('Event Sheet Templates', () => {
     expect(ev.functionParameters![1].initialValue).toBe('');
   });
 
+  it('createFunctionEvent honours returnType/isAsync/copyPicked options', () => {
+    const ev = createFunctionEvent('GetName', 100, undefined, {
+      returnType: 'string',
+      isAsync: true,
+      copyPicked: true,
+    });
+    expect(ev.functionReturnType).toBe('string');
+    expect(ev.functionIsAsync).toBe(true);
+    expect(ev.functionCopyPicked).toBe(true);
+  });
+
   it('createIncludeEvent creates valid include', () => {
     const ev = createIncludeEvent('SharedSheet');
     expect(ev.eventType).toBe('include');

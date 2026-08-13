@@ -2,6 +2,26 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [1.8.2] - 2026-08-13
+
+### Three source-verified defects from a live-project mutation evaluation
+
+Found by evaluating v1.8.1 against a real project whose four largest layouts (11-46MB) exceed the reader's 10MB cap.
+
+#### Fixed
+
+- **UID high-water blindness (CRITICAL)** — `IdGenerator` scanned UIDs only from layouts `readAllLayouts()` could parse; layouts over the 10MB read cap were silently skipped, so `generateUid()` could mint a UID already in use (observed live: computed max 30042 vs. true max 30046 — the next `add_instance_to_layout` would have collided). The reader now records per-entity bulk-read failures (`getReadFailures`) and exposes `scanLayoutIdsRaw()`, a raw regex scan for `"uid"`/`"sid"` values that bypasses the size cap and JSON parsing. The generator recovers the high-water mark (and SIDs) from every unreadable layout; if even the raw scan fails, `generateUid()` hard-fails with the layout names instead of risking a duplicate.
+- **Script-action serialization (CRITICAL)** — script actions were emitted as `{ type: 'script', script: "<string>" }`, but C3 serializes them as `{ type, language: "javascript", script: [<lines>] }` (0-for-374 against a real project's script actions; the single-string form loads but the desktop editor does not render the block). `add_event_block` and `update_event_block` now emit the canonical shape; `script` input accepts a single string (split on newlines) or an array of lines. `ScriptAction` type updated to match.
+- **`validate_project` silently skipped oversized files** — files over the read cap surfaced as false *"missing or contains invalid JSON"* errors. They are now reported honestly as `unscanned-file` warnings ("UNSCANNED: File too large ... integrity checks did not cover this file"), listed in a new `unscannedFiles` array with a `summary.unscanned` count; genuine read failures keep their real reason in the error message.
+
+#### Added
+
+- `add_event_to_sheet` function events: `functionReturnType` (`none`/`number`/`string`/`any`), `functionIsAsync`, `functionCopyPicked` parameters — previously hardcoded to `none`/`false`/`false` with no knob, forcing hand edits for any value-returning function.
+
+#### Tests
+
+- 428 passing (up from 418): id-generator unreadable-layout recovery + hard-fail, integrity UNSCANNED reporting, canonical script-action shape, function-event options.
+
 ## [1.8.1] - 2026-04-16
 
 ### VAL-02 Remediation — Honest Acceptance Contract

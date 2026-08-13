@@ -15,6 +15,8 @@ import { resolveProjectPath } from './path-utils.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
+export type EntityCategory = 'objectTypes' | 'eventSheets' | 'layouts' | 'families';
+
 export class Construct3ProjectReader {
   private projectPath: string;
   private projectData: Construct3Project | null = null;
@@ -30,6 +32,10 @@ export class Construct3ProjectReader {
   private objectTypeCache: Map<string, ObjectType> | null = null;
   private layoutCache: Map<string, Layout> | null = null;
   private familyCache: Map<string, Record<string, unknown>> | null = null;
+
+  // Entities the bulk readers could not read/parse (e.g. over the size cap),
+  // keyed by category → name → failure reason. Rebuilt with each bulk read.
+  private readFailures: Map<EntityCategory, Map<string, string>> = new Map();
 
   constructor(projectPath: string) {
     this.projectPath = projectPath;
@@ -230,11 +236,13 @@ export class Construct3ProjectReader {
     if (this.eventSheetCache) return this.eventSheetCache;
     const names = await this.listEventSheets();
     const map = new Map<string, EventSheet>();
+    this.readFailures.delete('eventSheets');
     for (const name of names) {
       try {
         map.set(name, await this.readEventSheet(name));
-      } catch {
-        // Skip unreadable sheets
+      } catch (error) {
+        // Skip unreadable sheets, but record why so callers can report/recover
+        this.recordReadFailure('eventSheets', name, error);
       }
     }
     this.eventSheetCache = map;
@@ -248,11 +256,13 @@ export class Construct3ProjectReader {
     if (this.objectTypeCache) return this.objectTypeCache;
     const names = await this.listObjectTypes();
     const map = new Map<string, ObjectType>();
+    this.readFailures.delete('objectTypes');
     for (const name of names) {
       try {
         map.set(name, await this.readObjectType(name));
-      } catch {
-        // Skip unreadable objects
+      } catch (error) {
+        // Skip unreadable objects, but record why so callers can report/recover
+        this.recordReadFailure('objectTypes', name, error);
       }
     }
     this.objectTypeCache = map;
@@ -266,11 +276,13 @@ export class Construct3ProjectReader {
     if (this.layoutCache) return this.layoutCache;
     const names = await this.listLayouts();
     const map = new Map<string, Layout>();
+    this.readFailures.delete('layouts');
     for (const name of names) {
       try {
         map.set(name, await this.readLayout(name));
-      } catch {
-        // Skip unreadable layouts
+      } catch (error) {
+        // Skip unreadable layouts, but record why so callers can report/recover
+        this.recordReadFailure('layouts', name, error);
       }
     }
     this.layoutCache = map;
@@ -284,15 +296,61 @@ export class Construct3ProjectReader {
     if (this.familyCache) return this.familyCache;
     const names = await this.listFamilies();
     const map = new Map<string, Record<string, unknown>>();
+    this.readFailures.delete('families');
     for (const name of names) {
       try {
         map.set(name, await this.readFamily(name));
-      } catch {
-        // Skip unreadable families
+      } catch (error) {
+        // Skip unreadable families, but record why so callers can report/recover
+        this.recordReadFailure('families', name, error);
       }
     }
     this.familyCache = map;
     return map;
+  }
+
+  private recordReadFailure(category: EntityCategory, name: string, error: unknown): void {
+    let map = this.readFailures.get(category);
+    if (!map) {
+      map = new Map<string, string>();
+      this.readFailures.set(category, map);
+    }
+    map.set(name, error instanceof Error ? error.message : String(error));
+  }
+
+  /**
+   * Entities the last bulk read of a category could not read/parse
+   * (name → failure reason). Empty until the category's readAll* has run.
+   */
+  getReadFailures(category: EntityCategory): Map<string, string> {
+    return this.readFailures.get(category) ?? new Map();
+  }
+
+  /**
+   * Raw ID scan of a layout file that bypasses the size cap and JSON parsing.
+   * Used to recover the UID high-water mark (and SIDs) from layouts the
+   * normal reader refuses (over 10MB) or cannot parse. Regex-scans the raw
+   * text for "uid"/"sid" values — safe for high-water/collision purposes even
+   * if a value inside a string literal is picked up spuriously.
+   */
+  async scanLayoutIdsRaw(name: string): Promise<{ highestUid: number; sids: number[] }> {
+    const subPath = this.layoutPathMap.get(name);
+    const segments = subPath
+      ? ['layouts', subPath, `${name}.json`]
+      : ['layouts', `${name}.json`];
+    const layoutPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const content = await readFile(layoutPath, 'utf-8');
+
+    let highestUid = 0;
+    for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
+      const uid = Number(match[1]);
+      if (uid > highestUid) highestUid = uid;
+    }
+    const sids: number[] = [];
+    for (const match of content.matchAll(/"sid"\s*:\s*(\d+)/g)) {
+      sids.push(Number(match[1]));
+    }
+    return { highestUid, sids };
   }
 
   /**
@@ -304,6 +362,7 @@ export class Construct3ProjectReader {
     this.objectTypeCache = null;
     this.layoutCache = null;
     this.familyCache = null;
+    this.readFailures.clear();
   }
 
   /**

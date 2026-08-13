@@ -77,6 +77,33 @@ describe('validateProjectIntegrity', () => {
     expect(err).toBeDefined();
   });
 
+  it('reports oversized layouts as UNSCANNED warnings, not missing-file errors', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('HugeLayout', 'Failed to read layout "HugeLayout": File too large (45.6MB exceeds 10MB limit)');
+    const result = await validateProjectIntegrity(reader);
+
+    // No false "missing or invalid JSON" error for a file that merely exceeds the size cap
+    const falseError = result.errors.find(e => e.entity.includes('HugeLayout'));
+    expect(falseError).toBeUndefined();
+
+    const unscanned = result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'layouts/HugeLayout');
+    expect(unscanned).toBeDefined();
+    expect(unscanned!.message).toContain('UNSCANNED');
+    expect(result.unscannedFiles).toContain('layouts/HugeLayout');
+    expect(result.summary.unscanned).toBe(1);
+  });
+
+  it('reports a recorded non-size read failure as an error with the real reason', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('BrokenLayout', 'Failed to read layout "BrokenLayout": Unexpected token in JSON at position 12');
+    const result = await validateProjectIntegrity(reader);
+
+    const err = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/BrokenLayout');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('Unexpected token');
+    expect(result.summary.unscanned).toBe(0);
+  });
+
   it('detects missing layout file', async () => {
     const reader = validProject();
     reader.registerEntityName('layouts', 'GhostLayout');

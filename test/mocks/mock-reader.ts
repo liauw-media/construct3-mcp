@@ -34,6 +34,10 @@ export class MockReader {
   private registeredOnly: { objects: string[]; eventSheets: string[]; layouts: string[] } = {
     objects: [], eventSheets: [], layouts: [],
   };
+  // Simulated bulk-read failures: category → name → reason (for unscanned-file testing)
+  private readFailures: Map<string, Map<string, string>> = new Map();
+  // Raw text served by scanLayoutIdsRaw for unreadable layouts
+  private rawLayoutText: Map<string, string> = new Map();
 
   constructor(data: MockReaderData = {}) {
     this.objects = data.objects ?? new Map();
@@ -206,6 +210,25 @@ export class MockReader {
     return Array.from(this.objects.keys()).filter(n => n.toLowerCase().includes(lower));
   }
 
+  getReadFailures(category: string): Map<string, string> {
+    return this.readFailures.get(category) ?? new Map();
+  }
+
+  async scanLayoutIdsRaw(name: string): Promise<{ highestUid: number; sids: number[] }> {
+    const content = this.rawLayoutText.get(name);
+    if (content === undefined) throw new Error(`Layout "${name}" raw text not available`);
+    let highestUid = 0;
+    for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
+      const uid = Number(match[1]);
+      if (uid > highestUid) highestUid = uid;
+    }
+    const sids: number[] = [];
+    for (const match of content.matchAll(/"sid"\s*:\s*(\d+)/g)) {
+      sids.push(Number(match[1]));
+    }
+    return { highestUid, sids };
+  }
+
   invalidateCaches(): void {
     // no-op for mock
   }
@@ -233,5 +256,24 @@ export class MockReader {
    */
   registerEntityName(category: 'objects' | 'eventSheets' | 'layouts', name: string): void {
     this.registeredOnly[category].push(name);
+  }
+
+  /**
+   * Register a layout that is present on disk but unreadable by the bulk
+   * reader (e.g. over the 10MB cap). It appears in c3proj, is absent from
+   * readAllLayouts(), carries a read-failure reason, and (optionally) serves
+   * raw text to scanLayoutIdsRaw for high-water UID recovery.
+   */
+  registerUnreadableLayout(name: string, reason: string, rawText?: string): void {
+    this.registeredOnly.layouts.push(name);
+    let failures = this.readFailures.get('layouts');
+    if (!failures) {
+      failures = new Map<string, string>();
+      this.readFailures.set('layouts', failures);
+    }
+    failures.set(name, reason);
+    if (rawText !== undefined) {
+      this.rawLayoutText.set(name, rawText);
+    }
   }
 }

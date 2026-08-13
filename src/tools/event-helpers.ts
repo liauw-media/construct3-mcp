@@ -37,12 +37,23 @@ export const standardActionSchema = z.object({
   disabled: z.boolean().optional().describe('Disable this individual action'),
 });
 
-/** Script action schema */
+/** Script action schema — accepts a single string or an array of lines as input */
 export const scriptActionSchema = z.object({
   type: z.literal('script').describe('Script action type'),
-  script: z.string().describe('Inline JavaScript code'),
+  script: z.union([z.string(), z.array(z.string())])
+    .describe('Inline JavaScript code — a single string (split on newlines) or an array of lines'),
   disabled: z.boolean().optional().describe('Disable this individual script action'),
 });
+
+/**
+ * Normalize script input to C3's on-disk serialization: an array of lines.
+ * C3 stores script actions as { type: 'script', language: 'javascript',
+ * script: [lines] } — the single-string form loads but the desktop editor
+ * does not render the block.
+ */
+export function toScriptLines(script: string | string[]): string[] {
+  return Array.isArray(script) ? script : script.split(/\r?\n/);
+}
 
 /** Union of standard and script actions */
 export const actionSchema = z.union([standardActionSchema, scriptActionSchema]);
@@ -370,7 +381,8 @@ export async function buildBlockEvent(
     if ('type' in a && a.type === 'script') {
       const scriptAct: Action = {
         type: 'script' as const,
-        script: a.script,
+        language: 'javascript',
+        script: toScriptLines(a.script),
       };
       if (a.disabled) scriptAct.disabled = true;
       builtActions.push(scriptAct);
