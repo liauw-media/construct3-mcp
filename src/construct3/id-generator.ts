@@ -18,6 +18,10 @@ export class IdGenerator {
   private existingImageSpriteIds: Set<number> | null = null;
   private highestUid = 0;
   private initialized = false;
+  // Layouts that could not be scanned at all (parse AND raw scan failed).
+  // While non-empty, the UID high-water mark is untrustworthy and UID
+  // minting must hard-fail rather than risk a duplicate UID.
+  private unscannedLayouts: string[] = [];
 
   /**
    * Scan the project to collect all existing SIDs and find the highest UID.
@@ -74,6 +78,23 @@ export class IdGenerator {
       this.scanLayoutSids(layout);
     }
 
+    // Layouts the bulk reader skipped (e.g. over the file-size cap) still hold
+    // live UIDs and SIDs. Recover them with a raw text scan so the UID
+    // high-water mark stays correct; if even the raw scan fails, remember the
+    // layout so generateUid() can refuse instead of minting a duplicate.
+    this.unscannedLayouts = [];
+    for (const [name] of reader.getReadFailures('layouts')) {
+      try {
+        const scan = await reader.scanLayoutIdsRaw(name);
+        this.trackUid(scan.highestUid);
+        for (const sid of scan.sids) {
+          this.collectSid(sid);
+        }
+      } catch {
+        this.unscannedLayouts.push(name);
+      }
+    }
+
     // Scan all families
     const families = await reader.readAllFamilies();
     for (const [, family] of families) {
@@ -105,6 +126,12 @@ export class IdGenerator {
    */
   async generateUid(reader: Construct3ProjectReader): Promise<number> {
     await this.initialize(reader);
+    if (this.unscannedLayouts.length > 0) {
+      throw new Error(
+        `Cannot generate a safe UID: layout(s) could not be scanned for existing UIDs ` +
+        `(${this.unscannedLayouts.join(', ')}). Minting anyway could duplicate a UID already in use.`
+      );
+    }
     this.highestUid++;
     return this.highestUid;
   }
@@ -151,6 +178,7 @@ export class IdGenerator {
     this.existingImageSpriteIds = null;
     this.highestUid = 0;
     this.initialized = false;
+    this.unscannedLayouts = [];
   }
 
   private collectSid(sid: unknown): void {

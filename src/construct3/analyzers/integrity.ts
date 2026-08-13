@@ -28,10 +28,14 @@ export interface IntegrityResult {
     info: number;
     checksRun: number;
     entitiesScanned: number;
+    /** Files registered in c3proj that could not be scanned (e.g. over the reader's size cap) */
+    unscanned: number;
   };
   errors: IntegrityIssue[];
   warnings: IntegrityIssue[];
   info: IntegrityIssue[];
+  /** Entities NOT covered by any check below — results are partial wherever these are listed */
+  unscannedFiles: string[];
 }
 
 // ─── Constants ───────────────────────────────────────────────
@@ -62,10 +66,12 @@ export async function validateProjectIntegrity(
   const entitiesScanned =
     registeredObjects.length + registeredSheets.length + registeredLayouts.length;
 
+  const unscannedFiles: string[] = [];
+
   // Error checks
-  checkFileExistence(registeredObjects, objects, 'objectTypes', errors);
-  checkFileExistence(registeredSheets, eventSheets, 'eventSheets', errors);
-  checkFileExistence(registeredLayouts, layouts, 'layouts', errors);
+  checkFileExistence(registeredObjects, objects, 'objectTypes', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredSheets, eventSheets, 'eventSheets', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredLayouts, layouts, 'layouts', reader, errors, warnings, unscannedFiles);
   checkRequiredFieldsObjects(objects, errors);
   checkRequiredFieldsSheets(eventSheets, errors);
   checkRequiredFieldsLayouts(layouts, errors);
@@ -95,10 +101,12 @@ export async function validateProjectIntegrity(
       info: info.length,
       checksRun,
       entitiesScanned,
+      unscanned: unscannedFiles.length,
     },
     errors,
     warnings,
     info,
+    unscannedFiles,
   };
 }
 
@@ -123,11 +131,35 @@ function flattenContainer(container: { items: string[]; subfolders: Array<{ item
 function checkFileExistence(
   registered: string[],
   loaded: Map<string, unknown>,
-  category: string,
-  errors: IntegrityIssue[]
+  category: 'objectTypes' | 'eventSheets' | 'layouts',
+  reader: Construct3ProjectReader,
+  errors: IntegrityIssue[],
+  warnings: IntegrityIssue[],
+  unscannedFiles: string[]
 ): void {
+  const readFailures = reader.getReadFailures(category);
   for (const name of registered) {
-    if (!loaded.has(name)) {
+    if (loaded.has(name)) continue;
+    const failureReason = readFailures.get(name);
+    if (failureReason && /too large/i.test(failureReason)) {
+      // The file exists but exceeds the reader's size cap — it was NOT
+      // scanned, so every check below is blind to its contents. Report it
+      // honestly instead of claiming the file is missing or invalid.
+      unscannedFiles.push(`${category}/${name}`);
+      warnings.push({
+        check: 'unscanned-file',
+        entity: `${category}/${name}`,
+        message: `UNSCANNED: ${failureReason} — integrity checks (duplicate UIDs/SIDs, references) did not cover this file`,
+        suggestion: `Validate this file separately; results for this project are partial`,
+      });
+    } else if (failureReason) {
+      errors.push({
+        check: 'file-existence',
+        entity: `${category}/${name}`,
+        message: `Registered in c3proj but could not be read: ${failureReason}`,
+        suggestion: `Check that ${category}/${name}.json exists and is valid JSON`,
+      });
+    } else {
       errors.push({
         check: 'file-existence',
         entity: `${category}/${name}`,
