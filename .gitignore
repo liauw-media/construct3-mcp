@@ -55,3 +55,18 @@ tmp/
 # OS
 Thumbs.db
 .DS_Store
+
+# Local scratch — real C3 projects used for manual testing, their exports,
+# and anything produced from them. Real projects are large and are not ours
+# to publish, so keep them and their output out of the tree entirely.
+_test-*/
+_test-*.c3p
+test-outputs/
+test/fixtures/c3-minimal-base/
+
+# Scratch scripts, probe output and screenshots from manual runs
+scripts/*-smoke.ts
+test-*.cjs
+*-output.txt
+*-output[0-9]*.txt
+*-screenshot.png
