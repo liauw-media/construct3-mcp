@@ -1,9 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerEventTools } from '../../src/tools/event-tools.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+
+// The project index is a module singleton built from whichever reader first
+// asked for it; MockWriter never invalidates it, so reset it per test.
+beforeEach(() => resetProjectIndex());
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -307,6 +312,18 @@ describe('delete_event_sheet', () => {
     const result = await server.callTool('delete_event_sheet', { name: 'NonExistent' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not found');
+  });
+
+  it('deregisters the sheet from c3proj before deleting its file', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Extra', { name: 'Extra', events: [], sid: 1 }]]),
+    });
+    const result = await server.callTool('delete_event_sheet', { name: 'Extra' });
+    expect(parseResult(result).success).toBe(true);
+
+    const order = writer.calls.map(c => c.method);
+    expect(order.indexOf('removeFromProject')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
   });
 });
 

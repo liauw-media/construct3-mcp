@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { C3Event, EventSheet, FunctionBlockEvent, WriteResult } from '../construct3/types.js';
-import { validateName, validateSubfolder, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError, orphanedFileError, boundedRecord } from './shared.js';
 import {
   conditionSchema,
   actionSchema,
@@ -364,9 +364,20 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
         }
 
+        // Capture the subfolder first: removeFromProject reloads project.c3proj,
+        // after which the name is no longer resolvable.
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
-        const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
+        // Deregister before deleting the file. A failure in the second step
+        // then leaves an orphaned file (info-level) instead of a dangling
+        // registration (a file-existence error).
         await writer.removeFromProject('eventSheets', args.name);
+        let backupPath: string;
+        try {
+          backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
+        } catch (error) {
+          console.error('[delete_event_sheet] file delete failed after deregistration:', error);
+          return orphanedFileError('eventSheets', args.name, subfolder, error);
+        }
         resetProjectIndex();
 
         const result: WriteResult = {
