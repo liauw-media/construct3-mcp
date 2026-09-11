@@ -96,5 +96,7 @@ describe('delete_layout (real project on disk)', () => {
     expect(await idGen.generateUid(reader)).toBe(1);
     const integrity = await validateProjectIntegrity(reader);
     expect(integrity.errors.find(e => e.entity === 'layouts/Level 2')).toBeUndefined();
+    // The orphan is surfaced where the error message promised it would be
+    expect(integrity.info.find(i => i.check === 'orphaned-file' && i.entity.includes('Level 2'))).toBeDefined();
   });
 });

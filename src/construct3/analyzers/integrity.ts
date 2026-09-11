@@ -141,7 +141,7 @@ function flattenContainer(container: { items: string[]; subfolders: Array<{ item
  * errors; tool output should not echo the project's absolute path.
  */
 function withoutFsPath(message: string): string {
-  return message.replace(/, (?:stat|lstat|open|read|access|scandir) '[^']*'$/, '');
+  return message.replace(/, (?:stat|lstat|open|read|access|scandir) '.*'$/, '');
 }
 
 // ─── Check 1: File Existence ─────────────────────────────────

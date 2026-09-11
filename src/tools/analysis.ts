@@ -172,7 +172,7 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
   // Tool: Project integrity validation
   server.tool(
     'validate_project',
-    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files.',
+    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files. The result carries `complete` (false when a registered file over the 10MB read cap was skipped, so checks did not cover it) alongside `valid`.',
     {},
     async () => {
       try {

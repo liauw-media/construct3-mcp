@@ -248,7 +248,7 @@ Delete an object type from the project.
 - Checks for references in event sheets, layouts, and families
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
-- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info), never a registration that points at nothing; the error names the file to clean up
+- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info when it sits at the category root or one subfolder deep), never a registration that points at nothing; the error names the file to clean up
 
 ### `create_event_sheet`
 
@@ -337,7 +337,7 @@ Delete an event sheet from the project.
 - Checks for references: sheets that include this one, layouts bound to it
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
-- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info), never a registration that points at nothing; the error names the file to clean up
+- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info when it sits at the category root or one subfolder deep), never a registration that points at nothing; the error names the file to clean up
 
 ### `delete_event_from_sheet`
 
@@ -449,7 +449,7 @@ Delete a layout from the project.
 - Checks for bound event sheets and placed objects
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
-- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info), never a registration that points at nothing; the error names the file to clean up
+- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info when it sits at the category root or one subfolder deep), never a registration that points at nothing; the error names the file to clean up
 
 ### `update_layout`
 
