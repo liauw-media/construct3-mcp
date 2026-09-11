@@ -4,6 +4,7 @@
  */
 
 import type { Construct3Project, EventSheet, ObjectType, Layout } from '../../src/construct3/types.js';
+import type { ReadFailure } from '../../src/construct3/project-reader.js';
 
 export interface MockReaderData {
   objects?: Map<string, Record<string, unknown>>;
@@ -34,8 +35,8 @@ export class MockReader {
   private registeredOnly: { objects: string[]; eventSheets: string[]; layouts: string[] } = {
     objects: [], eventSheets: [], layouts: [],
   };
-  // Simulated bulk-read failures: category → name → reason (for unscanned-file testing)
-  private readFailures: Map<string, Map<string, string>> = new Map();
+  // Simulated bulk-read failures: category → name → typed failure (for unscanned-file testing)
+  private readFailures: Map<string, Map<string, ReadFailure>> = new Map();
   // Raw text served by scanLayoutIdsRaw for unreadable layouts
   private rawLayoutText: Map<string, string> = new Map();
 
@@ -210,7 +211,7 @@ export class MockReader {
     return Array.from(this.objects.keys()).filter(n => n.toLowerCase().includes(lower));
   }
 
-  getReadFailures(category: string): Map<string, string> {
+  getReadFailures(category: string): Map<string, ReadFailure> {
     return this.readFailures.get(category) ?? new Map();
   }
 
@@ -261,17 +262,17 @@ export class MockReader {
   /**
    * Register a layout that is present on disk but unreadable by the bulk
    * reader (e.g. over the 10MB cap). It appears in c3proj, is absent from
-   * readAllLayouts(), carries a read-failure reason, and (optionally) serves
+   * readAllLayouts(), carries a typed read failure, and (optionally) serves
    * raw text to scanLayoutIdsRaw for high-water UID recovery.
    */
-  registerUnreadableLayout(name: string, reason: string, rawText?: string): void {
+  registerUnreadableLayout(name: string, failure: ReadFailure, rawText?: string): void {
     this.registeredOnly.layouts.push(name);
     let failures = this.readFailures.get('layouts');
     if (!failures) {
-      failures = new Map<string, string>();
+      failures = new Map<string, ReadFailure>();
       this.readFailures.set('layouts', failures);
     }
-    failures.set(name, reason);
+    failures.set(name, failure);
     if (rawText !== undefined) {
       this.rawLayoutText.set(name, rawText);
     }

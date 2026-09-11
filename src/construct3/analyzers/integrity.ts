@@ -21,7 +21,13 @@ export interface IntegrityIssue {
 }
 
 export interface IntegrityResult {
+  /** No error-level issues were found in the files that were scanned */
   valid: boolean;
+  /**
+   * Every registered file was scanned. False when unscannedFiles is
+   * non-empty; `valid` then only vouches for the files that were checked.
+   */
+  complete: boolean;
   summary: {
     errors: number;
     warnings: number;
@@ -95,6 +101,7 @@ export async function validateProjectIntegrity(
 
   return {
     valid: errors.length === 0,
+    complete: unscannedFiles.length === 0,
     summary: {
       errors: errors.length,
       warnings: warnings.length,
@@ -140,8 +147,8 @@ function checkFileExistence(
   const readFailures = reader.getReadFailures(category);
   for (const name of registered) {
     if (loaded.has(name)) continue;
-    const failureReason = readFailures.get(name);
-    if (failureReason && /too large/i.test(failureReason)) {
+    const failure = readFailures.get(name);
+    if (failure?.code === 'E_FILE_TOO_LARGE') {
       // The file exists but exceeds the reader's size cap — it was NOT
       // scanned, so every check below is blind to its contents. Report it
       // honestly instead of claiming the file is missing or invalid.
@@ -149,14 +156,23 @@ function checkFileExistence(
       warnings.push({
         check: 'unscanned-file',
         entity: `${category}/${name}`,
-        message: `UNSCANNED: ${failureReason} — integrity checks (duplicate UIDs/SIDs, references) did not cover this file`,
+        message: `UNSCANNED: ${failure.message} — integrity checks (duplicate UIDs/SIDs, references) did not cover this file`,
         suggestion: `Validate this file separately; results for this project are partial`,
       });
-    } else if (failureReason) {
+    } else if (failure?.code === 'E_FILE_NOT_FOUND') {
+      // Registered but absent on disk. Say so plainly rather than echoing the
+      // raw stat message, which carries the absolute project path.
       errors.push({
         check: 'file-existence',
         entity: `${category}/${name}`,
-        message: `Registered in c3proj but could not be read: ${failureReason}`,
+        message: `Registered in c3proj but no file exists at ${category}/${name}.json`,
+        suggestion: `Create the file or remove "${name}" from project.c3proj`,
+      });
+    } else if (failure) {
+      errors.push({
+        check: 'file-existence',
+        entity: `${category}/${name}`,
+        message: `Registered in c3proj but could not be read: ${failure.message}`,
         suggestion: `Check that ${category}/${name}.json exists and is valid JSON`,
       });
     } else {

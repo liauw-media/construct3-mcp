@@ -9,9 +9,13 @@
 
 import { describe, it, expect } from 'vitest';
 import { IdGenerator } from '../../src/construct3/id-generator.js';
+import type { ReadFailure } from '../../src/construct3/project-reader.js';
 import { MockReader } from '../mocks/mock-reader.js';
 
-const TOO_LARGE = 'Failed to read layout "Big": File too large (45.6MB exceeds 10MB limit)';
+const TOO_LARGE: ReadFailure = {
+  code: 'E_FILE_TOO_LARGE',
+  message: 'Failed to read layout "Big": File too large (45.6MB exceeds 10MB limit)',
+};
 
 function readerWithSmallLayout() {
   return new MockReader({

@@ -17,6 +17,51 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 export type EntityCategory = 'objectTypes' | 'eventSheets' | 'layouts' | 'families';
 
+// ─── Read-failure typing ─────────────────────────────────────
+
+/**
+ * Why a bulk read skipped an entity file. Consumers branch on these codes,
+ * never on message text.
+ */
+export type ReadFailureCode =
+  | 'E_FILE_TOO_LARGE'   // exists but exceeds MAX_FILE_SIZE; contents were NOT scanned
+  | 'E_FILE_NOT_FOUND'   // ENOENT on stat/read; the file provably holds no data
+  | 'E_INVALID_JSON'     // read fine, JSON.parse threw
+  | 'E_READ_ERROR';      // anything else (EACCES, EISDIR, ...)
+
+export interface ReadFailure {
+  code: ReadFailureCode;
+  message: string;
+}
+
+/**
+ * Thrown by the per-entity readers. Carries a stable code so callers never
+ * have to parse the message to learn what went wrong.
+ */
+export class ProjectReadError extends Error {
+  readonly code: ReadFailureCode;
+
+  constructor(code: ReadFailureCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'ProjectReadError';
+    this.code = code;
+  }
+}
+
+/** True for a Node fs error with code ENOENT (libuv reports this on Windows too). */
+export function isFileNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+/** Classify a raw error from stat/readFile/JSON.parse into a ReadFailureCode. */
+export function classifyReadError(error: unknown): ReadFailureCode {
+  if (error instanceof ProjectReadError) return error.code;
+  if (isFileNotFoundError(error)) return 'E_FILE_NOT_FOUND';
+  if (error instanceof SyntaxError) return 'E_INVALID_JSON';
+  return 'E_READ_ERROR';
+}
+
 export class Construct3ProjectReader {
   private projectPath: string;
   private projectData: Construct3Project | null = null;
@@ -34,8 +79,8 @@ export class Construct3ProjectReader {
   private familyCache: Map<string, Record<string, unknown>> | null = null;
 
   // Entities the bulk readers could not read/parse (e.g. over the size cap),
-  // keyed by category → name → failure reason. Rebuilt with each bulk read.
-  private readFailures: Map<EntityCategory, Map<string, string>> = new Map();
+  // keyed by category → name → typed failure. Rebuilt with each bulk read.
+  private readFailures: Map<EntityCategory, Map<string, ReadFailure>> = new Map();
 
   constructor(projectPath: string) {
     this.projectPath = projectPath;
@@ -47,7 +92,10 @@ export class Construct3ProjectReader {
   private async readProjectFile(filePath: string): Promise<string> {
     const stats = await stat(filePath);
     if (stats.size > MAX_FILE_SIZE) {
-      throw new Error(`File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit)`);
+      throw new ProjectReadError(
+        'E_FILE_TOO_LARGE',
+        `File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit)`
+      );
     }
     return readFile(filePath, 'utf-8');
   }
@@ -135,8 +183,10 @@ export class Construct3ProjectReader {
       return JSON.parse(content) as EventSheet;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read event sheet "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read event sheet "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -155,8 +205,10 @@ export class Construct3ProjectReader {
       return JSON.parse(content) as ObjectType;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read object type "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read object type "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -175,8 +227,10 @@ export class Construct3ProjectReader {
       return JSON.parse(content) as Layout;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read layout "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read layout "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -195,8 +249,10 @@ export class Construct3ProjectReader {
       return JSON.parse(content) as Record<string, unknown>;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read family "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read family "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -312,17 +368,21 @@ export class Construct3ProjectReader {
   private recordReadFailure(category: EntityCategory, name: string, error: unknown): void {
     let map = this.readFailures.get(category);
     if (!map) {
-      map = new Map<string, string>();
+      map = new Map<string, ReadFailure>();
       this.readFailures.set(category, map);
     }
-    map.set(name, error instanceof Error ? error.message : String(error));
+    map.set(name, {
+      code: classifyReadError(error),
+      message: error instanceof Error ? error.message : String(error),
+    });
   }
 
   /**
    * Entities the last bulk read of a category could not read/parse
-   * (name → failure reason). Empty until the category's readAll* has run.
+   * (name → typed failure with a stable code and the original message).
+   * Empty until the category's readAll* has run.
    */
-  getReadFailures(category: EntityCategory): Map<string, string> {
+  getReadFailures(category: EntityCategory): Map<string, ReadFailure> {
     return this.readFailures.get(category) ?? new Map();
   }
 
