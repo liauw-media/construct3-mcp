@@ -959,6 +959,72 @@ describe('update_event_block', () => {
     const hasUnconditionalWarning = data.warnings?.some((w: string) => w.includes('unconditionally')) ?? false;
     expect(hasUnconditionalWarning).toBe(false);
   });
+
+  // ─── Script actions ──────────────────────────────────────
+
+  function sheetWithEmptyBlock() {
+    return {
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [],
+          },
+        ],
+      }]]),
+    };
+  }
+
+  it('appends a script action in the canonical C3 shape (language tag + line array, no SID)', async () => {
+    const { server, writer } = setup(sheetWithEmptyBlock());
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: 'const a = 1;\r\nrun(a);' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    const action = written.events[0].actions[0];
+    expect(action).toEqual({ type: 'script', language: 'javascript', script: ['const a = 1;', 'run(a);'] });
+    expect('sid' in action).toBe(false);
+  });
+
+  it('passes a script given as an array of lines through unchanged and honours disabled', async () => {
+    const { server, writer } = setup(sheetWithEmptyBlock());
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: ['if (x) {', '  y();', '', '}'], disabled: true }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.events[0].actions[0]).toEqual({
+      type: 'script', language: 'javascript', script: ['if (x) {', '  y();', '', '}'], disabled: true,
+    });
+  });
+
+  it('skips objectClass validation for script actions but still validates standard ones', async () => {
+    const { server } = setup(sheetWithEmptyBlock());
+
+    const scriptOnly = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: 'x();' }],
+    });
+    expect(parseResult(scriptOnly).success).toBe(true);
+
+    const withGhost = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: 'x();' }, { id: 'set-position', objectClass: 'Ghost' }],
+    });
+    expect(withGhost.isError).toBe(true);
+    expect(withGhost.content[0].text).toContain('Object class validation failed');
+  });
 });
 
 describe('remove_event_from_sheet', () => {

@@ -2,25 +2,34 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
-## [1.8.2] - 2026-08-13
+## [1.8.2] - 2026-09-10
 
 ### Three source-verified defects from a live-project mutation evaluation
 
-Found by evaluating v1.8.1 against a real project whose four largest layouts (11-46MB) exceed the reader's 10MB cap.
+Found by evaluating v1.8.1 against a real project whose four largest layouts (11-46MB) exceed the reader's 10MB cap. Revised in review: a registered file that is missing no longer blocks UID minting, read failures are typed, the delete tools deregister before deleting, and the raw scan is covered against the real reader.
 
 #### Fixed
 
-- **UID high-water blindness (CRITICAL)** — `IdGenerator` scanned UIDs only from layouts `readAllLayouts()` could parse; layouts over the 10MB read cap were silently skipped, so `generateUid()` could mint a UID already in use (observed live: computed max 30042 vs. true max 30046 — the next `add_instance_to_layout` would have collided). The reader now records per-entity bulk-read failures (`getReadFailures`) and exposes `scanLayoutIdsRaw()`, a raw regex scan for `"uid"`/`"sid"` values that bypasses the size cap and JSON parsing. The generator recovers the high-water mark (and SIDs) from every unreadable layout; if even the raw scan fails, `generateUid()` hard-fails with the layout names instead of risking a duplicate.
-- **Script-action serialization (CRITICAL)** — script actions were emitted as `{ type: 'script', script: "<string>" }`, but C3 serializes them as `{ type, language: "javascript", script: [<lines>] }` (0-for-374 against a real project's script actions; the single-string form loads but the desktop editor does not render the block). `add_event_block` and `update_event_block` now emit the canonical shape; `script` input accepts a single string (split on newlines) or an array of lines. `ScriptAction` type updated to match.
-- **`validate_project` silently skipped oversized files** — files over the read cap surfaced as false *"missing or contains invalid JSON"* errors. They are now reported honestly as `unscanned-file` warnings ("UNSCANNED: File too large ... integrity checks did not cover this file"), listed in a new `unscannedFiles` array with a `summary.unscanned` count; genuine read failures keep their real reason in the error message.
+- **UID high-water blindness (CRITICAL)** — `IdGenerator` scanned UIDs only from layouts `readAllLayouts()` could parse; layouts over the 10MB read cap were silently skipped, so `generateUid()` could mint a UID already in use (observed live: computed max 30042 vs. true max 30046 — the next `add_instance_to_layout` would have collided). The reader now records typed per-entity bulk-read failures (`getReadFailures()` → `{ code, message }`) and exposes `scanEntityIdsRaw(category, name)`, a raw regex scan for `"uid"`/`"sid"` values that bypasses the size cap and JSON parsing. The generator recovers the high-water mark (and SIDs) from every unreadable layout *and object type* (`singleglobal-inst` UIDs). A registered file that does not exist on disk is skipped (it holds no IDs) rather than treated as unscannable; if a file exists but even the raw scan fails, `generateUid()` hard-fails naming the `category/name` instead of risking a duplicate.
+- **Script-action serialization (CRITICAL)** — script actions were emitted as `{ type: 'script', script: "<string>" }`, but C3 serializes them as `{ type, language: "javascript", script: [<lines>] }` (0-for-374 against a real project's script actions; the single-string form loads but the desktop editor does not render the block). `add_event_block` and `update_event_block` now emit the canonical shape; `script` input accepts a single string (split on newlines) or an array of lines. `ScriptAction` and `ScriptEvent` types updated to match.
+- **`validate_project` silently skipped oversized files** — files over the read cap surfaced as false *"missing or contains invalid JSON"* errors. They are now reported honestly as `unscanned-file` warnings ("UNSCANNED: File too large ... integrity checks did not cover this file"), listed in a new `unscannedFiles` array with a `summary.unscanned` count, and the result carries `complete: false`; genuine read failures keep their real reason in the error message. Classification is by the failure's typed code, never by message text.
+- **Delete tools left a dangling registration on partial failure** — `delete_layout`, `delete_object`, `delete_event_sheet` and `delete_family` deleted the file *then* deregistered it from c3proj; a failure between the two steps left a registered name with no file, which `validate_project` reported as an error and which (before the fix above) blocked every `generateUid()`. They now deregister first, so the worst case is an orphaned file (reported as info); if the file delete fails after deregistration, the tool error names the orphaned file. `addToProject`/`removeFromProject` invalidate the project index and ID generator themselves, so a failure after deregistration cannot leave either stale.
 
 #### Added
 
 - `add_event_to_sheet` function events: `functionReturnType` (`none`/`number`/`string`/`any`), `functionIsAsync`, `functionCopyPicked` parameters — previously hardcoded to `none`/`false`/`false` with no knob, forcing hand edits for any value-returning function.
+- `validate_project` result: `complete: boolean` — `false` when any registered file was skipped as unscanned; `valid` is unchanged and only vouches for the files that were scanned.
+- `docs/API.md`: `add_event_to_sheet` documents the three function parameters; new `validate_project` section; script-action shape and delete ordering corrected.
+
+#### Changed
+
+- Reader read failures are typed: `getReadFailures()` returns `{ code, message }` with `E_FILE_TOO_LARGE` / `E_FILE_NOT_FOUND` / `E_INVALID_JSON` / `E_READ_ERROR`; the per-entity readers throw `ProjectReadError` carrying the same code (message text unchanged; the original error is kept as `cause`). The parsed readers and the raw scan resolve paths through one helper.
+- `validate_project`: a registered file that does not exist is reported as "no file exists at `<category>/<name>.json`" instead of echoing the raw `stat` message, which carried the absolute project path.
+- `ScriptEvent` type now declares `language` and `script: string[]`, matching `ScriptAction`.
 
 #### Tests
 
-- 428 passing (up from 418): id-generator unreadable-layout recovery + hard-fail, integrity UNSCANNED reporting, canonical script-action shape, function-event options.
+- 460 passing (up from 418): id-generator recovery, hard-fail and missing-file handling on mocks and on real files (10MB cap bypass, subfolder resolution, ENOENT, EISDIR, invalid JSON, objectTypes); integrity classification by typed code, UNSCANNED reporting and `complete`; delete ordering on mocks and on a real project copy including the failure path; canonical script-action shape on mocks and on disk; function-event options.
 
 ## [1.8.1] - 2026-04-16
 

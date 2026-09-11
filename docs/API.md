@@ -175,6 +175,22 @@ Heuristic performance audit with categorized issues (info/warning/critical).
 | `scope` | string | No | Event sheet or layout name to scope analysis |
 | `detail` | string | No | Detail level |
 
+### `validate_project`
+
+Run integrity checks: file existence, required fields, duplicate SIDs/UIDs, broken references, missing addons, orphaned files. No parameters.
+
+**Result:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `valid` | boolean | No error-level issues were found in the files that were scanned |
+| `complete` | boolean | Every registered file was scanned. `false` when `unscannedFiles` is non-empty; `valid` then only vouches for the files that were checked |
+| `summary` | object | `{ errors, warnings, info, checksRun, entitiesScanned, unscanned }` |
+| `errors` / `warnings` / `info` | `IntegrityIssue[]` | `{ check, entity, message, suggestion? }` |
+| `unscannedFiles` | string[] | `category/name` entries the reader could not scan (over the 10MB read cap); each is also an `unscanned-file` warning |
+
+A registered file that does not exist on disk is a `file-existence` error; a file that exists but exceeds the read cap is an `unscanned-file` warning, not an error.
+
 ---
 
 ## Mutation Tools
@@ -232,7 +248,7 @@ Delete an object type from the project.
 - Checks for references in event sheets, layouts, and families
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
-- Backs up the JSON file and removes from c3proj
+- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info), never a registration that points at nothing; the error names the file to clean up
 
 ### `create_event_sheet`
 
@@ -255,6 +271,9 @@ Add a structural event to an existing event sheet.
 | `title` | string | For groups | Group title |
 | `functionName` | string | For functions | Function name |
 | `functionParams` | array | For functions | `[{ name, type }]` |
+| `functionReturnType` | enum | For functions | `"none"` \| `"number"` \| `"string"` \| `"any"` (default: none) |
+| `functionIsAsync` | boolean | For functions | Mark the function async (default: false) |
+| `functionCopyPicked` | boolean | For functions | Copy picked instances into the function (default: false) |
 | `variableName` | string | For variables | Variable name |
 | `variableType` | enum | For variables | `"number"` \| `"string"` \| `"boolean"` |
 | `initialValue` | string | For variables | Initial value |
@@ -270,7 +289,7 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
 | `conditions` | array | No* | Conditions. Each: `{ id, objectClass, "behavior-type"?, parameters?, isInverted?, isOr? }`. *Required (min 1) unless `isElse` is true. |
-| `actions` | array | No | Actions (default: `[]`). Standard: `{ id, objectClass, "behavior-type"?, parameters?, callFunction?, disabled? }`. Script: `{ type: "script", script }` |
+| `actions` | array | No | Actions (default: `[]`). Standard: `{ id, objectClass, "behavior-type"?, parameters?, callFunction?, disabled? }`. Script: `{ type: "script", script, disabled? }` where `script` is a string (split on newlines) or an array of lines; serialized as `{ type, language: "javascript", script: [lines] }`, the shape the C3 editor renders |
 | `groupPath` | string | No | Insert inside group by title path (e.g., `"Movement > Collision"`) |
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 | `disabled` | boolean | No | Create the block disabled (default: false) |
@@ -318,7 +337,7 @@ Delete an event sheet from the project.
 - Checks for references: sheets that include this one, layouts bound to it
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
-- Backs up the JSON file and removes from c3proj
+- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info), never a registration that points at nothing; the error names the file to clean up
 
 ### `delete_event_from_sheet`
 
@@ -352,7 +371,7 @@ Update an existing block event — modify action parameters, add/remove actions 
 | `disabled` | boolean | No | Enable or disable the entire block |
 | `updateActions` | array | No | `[{ index, parameters?, disabled? }]` — update actions by index (merge semantics) |
 | `updateConditions` | array | No | `[{ index, parameters?, isInverted? }]` — update conditions by index |
-| `addActions` | array | No | Append new actions (standard or script) |
+| `addActions` | array | No | Append new actions (standard or script; script actions take the same shape as in `add_event_block`) |
 | `addConditions` | array | No | Append new conditions |
 | `removeActionIndices` | number[] | No | Remove actions by 0-based index |
 | `removeConditionIndices` | number[] | No | Remove conditions by 0-based index |
@@ -367,7 +386,7 @@ At least one update parameter must be provided.
 
 **Notes:**
 - Only works on `block` or `function-block` events (not groups, variables, etc.)
-- New actions/conditions get fresh SIDs via the ID generator
+- New standard actions/conditions get fresh SIDs via the ID generator (script actions carry no SID, matching C3)
 - `objectClass` is validated on new conditions/actions
 - Duplicate removal indices are automatically deduplicated
 - Warns when all conditions are removed (block becomes unconditional)
@@ -430,7 +449,7 @@ Delete a layout from the project.
 - Checks for bound event sheets and placed objects
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
-- Backs up the JSON file and removes from c3proj
+- Removes the name from c3proj first, then backs up and deletes the JSON file. A failure between the two steps leaves an orphaned file (reported by `validate_project` as info), never a registration that points at nothing; the error names the file to clean up
 
 ### `update_layout`
 
@@ -611,4 +630,4 @@ interface ReferenceCheckResult {
 
 ---
 
-**Last Updated**: 2026-02-21
+**Last Updated**: 2026-09-10
