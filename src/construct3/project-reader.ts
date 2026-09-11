@@ -62,6 +62,25 @@ export function classifyReadError(error: unknown): ReadFailureCode {
   return 'E_READ_ERROR';
 }
 
+/**
+ * Regex-scan raw JSON text for "uid"/"sid" values without parsing it.
+ * Over-approximation (a value inside a string literal) is harmless for
+ * high-water and collision purposes. Exported so the test mock shares this
+ * exact implementation instead of re-implementing it.
+ */
+export function scanIdsInText(content: string): { highestUid: number; sids: number[] } {
+  let highestUid = 0;
+  for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
+    const uid = Number(match[1]);
+    if (uid > highestUid) highestUid = uid;
+  }
+  const sids: number[] = [];
+  for (const match of content.matchAll(/"sid"\s*:\s*(\d+)/g)) {
+    sids.push(Number(match[1]));
+  }
+  return { highestUid, sids };
+}
+
 export class Construct3ProjectReader {
   private projectPath: string;
   private projectData: Construct3Project | null = null;
@@ -169,15 +188,33 @@ export class Construct3ProjectReader {
     return dirname(this.projectPath);
   }
 
+  private pathMapFor(category: EntityCategory): Map<string, string> {
+    switch (category) {
+      case 'objectTypes': return this.objectPathMap;
+      case 'eventSheets': return this.eventSheetPathMap;
+      case 'layouts': return this.layoutPathMap;
+      case 'families': return this.familyPathMap;
+    }
+  }
+
+  /**
+   * Resolve <projectDir>/<category>/[subfolder/]<name>.json through the
+   * c3proj path maps. The parsed readers and the raw scan share this, so
+   * they cannot disagree about where an entity lives.
+   */
+  private resolveEntityPath(category: EntityCategory, name: string): string {
+    const subPath = this.pathMapFor(category).get(name);
+    const segments = subPath
+      ? [category, subPath, `${name}.json`]
+      : [category, `${name}.json`];
+    return resolveProjectPath(this.getProjectDir(), ...segments);
+  }
+
   /**
    * Read an event sheet file
    */
   async readEventSheet(name: string): Promise<EventSheet> {
-    const subPath = this.eventSheetPathMap.get(name);
-    const segments = subPath
-      ? ['eventSheets', subPath, `${name}.json`]
-      : ['eventSheets', `${name}.json`];
-    const eventSheetPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const eventSheetPath = this.resolveEntityPath('eventSheets', name);
     try {
       const content = await this.readProjectFile(eventSheetPath);
       return JSON.parse(content) as EventSheet;
@@ -195,11 +232,7 @@ export class Construct3ProjectReader {
    * Read an object type file
    */
   async readObjectType(name: string): Promise<ObjectType> {
-    const subPath = this.objectPathMap.get(name);
-    const segments = subPath
-      ? ['objectTypes', subPath, `${name}.json`]
-      : ['objectTypes', `${name}.json`];
-    const objectPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const objectPath = this.resolveEntityPath('objectTypes', name);
     try {
       const content = await this.readProjectFile(objectPath);
       return JSON.parse(content) as ObjectType;
@@ -217,11 +250,7 @@ export class Construct3ProjectReader {
    * Read a layout file
    */
   async readLayout(name: string): Promise<Layout> {
-    const subPath = this.layoutPathMap.get(name);
-    const segments = subPath
-      ? ['layouts', subPath, `${name}.json`]
-      : ['layouts', `${name}.json`];
-    const layoutPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const layoutPath = this.resolveEntityPath('layouts', name);
     try {
       const content = await this.readProjectFile(layoutPath);
       return JSON.parse(content) as Layout;
@@ -239,11 +268,7 @@ export class Construct3ProjectReader {
    * Read a family file
    */
   async readFamily(name: string): Promise<Record<string, unknown>> {
-    const subPath = this.familyPathMap.get(name);
-    const segments = subPath
-      ? ['families', subPath, `${name}.json`]
-      : ['families', `${name}.json`];
-    const familyPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const familyPath = this.resolveEntityPath('families', name);
     try {
       const content = await this.readProjectFile(familyPath);
       return JSON.parse(content) as Record<string, unknown>;
@@ -387,30 +412,17 @@ export class Construct3ProjectReader {
   }
 
   /**
-   * Raw ID scan of a layout file that bypasses the size cap and JSON parsing.
-   * Used to recover the UID high-water mark (and SIDs) from layouts the
-   * normal reader refuses (over 10MB) or cannot parse. Regex-scans the raw
-   * text for "uid"/"sid" values — safe for high-water/collision purposes even
-   * if a value inside a string literal is picked up spuriously.
+   * Raw ID scan of an entity file that bypasses the size cap and JSON parsing.
+   * Used to recover the UID high-water mark (and SIDs) from files the normal
+   * reader refuses (over 10MB) or cannot parse: layout instances and
+   * objectTypes' singleglobal-inst carry UIDs. Recovers uid/sid only;
+   * imageSpriteIds are not recovered (random 7-digit, collision-negligible).
+   * fs errors propagate unwrapped so callers can test `.code` (ENOENT means
+   * there is nothing to recover).
    */
-  async scanLayoutIdsRaw(name: string): Promise<{ highestUid: number; sids: number[] }> {
-    const subPath = this.layoutPathMap.get(name);
-    const segments = subPath
-      ? ['layouts', subPath, `${name}.json`]
-      : ['layouts', `${name}.json`];
-    const layoutPath = resolveProjectPath(this.getProjectDir(), ...segments);
-    const content = await readFile(layoutPath, 'utf-8');
-
-    let highestUid = 0;
-    for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
-      const uid = Number(match[1]);
-      if (uid > highestUid) highestUid = uid;
-    }
-    const sids: number[] = [];
-    for (const match of content.matchAll(/"sid"\s*:\s*(\d+)/g)) {
-      sids.push(Number(match[1]));
-    }
-    return { highestUid, sids };
+  async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
+    const content = await readFile(this.resolveEntityPath(category, name), 'utf-8');
+    return scanIdsInText(content);
   }
 
   /**
