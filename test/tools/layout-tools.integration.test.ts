@@ -89,9 +89,11 @@ describe('delete_layout (real project on disk)', () => {
 
     // Nothing downstream still believes the layout is registered: the index
     // was built inside the handler before deregistration and must have been
-    // invalidated; UID minting and validate_project see a consistent project.
+    // invalidated (this is the assertion that pins invalidateAll on
+    // removeFromProject); the handler's own generator and validate_project
+    // see a consistent project.
     expect((await getProjectIndex(reader)).allLayouts).not.toContain('Level 2');
-    expect(await new IdGenerator().generateUid(reader)).toBe(1);
+    expect(await idGen.generateUid(reader)).toBe(1);
     const integrity = await validateProjectIntegrity(reader);
     expect(integrity.errors.find(e => e.entity === 'layouts/Level 2')).toBeUndefined();
   });

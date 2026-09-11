@@ -24,8 +24,11 @@ export interface IntegrityResult {
   /** No error-level issues were found in the files that were scanned */
   valid: boolean;
   /**
-   * Every registered file was scanned. False when unscannedFiles is
-   * non-empty; `valid` then only vouches for the files that were checked.
+   * Every registered object type, event sheet and layout file was read.
+   * False when any of them was skipped for exceeding the reader's size cap
+   * (listed in unscannedFiles); `valid` then only vouches for the files that
+   * were checked. Files that exist but cannot be read for another reason are
+   * errors, not unscanned entries. Families are not covered by this check.
    */
   complete: boolean;
   summary: {
@@ -133,6 +136,14 @@ function flattenContainer(container: { items: string[]; subfolders: Array<{ item
   return result;
 }
 
+/**
+ * Drop the trailing ", <syscall> '<absolute path>'" Node appends to fs
+ * errors; tool output should not echo the project's absolute path.
+ */
+function withoutFsPath(message: string): string {
+  return message.replace(/, (?:stat|lstat|open|read|access|scandir) '[^']*'$/, '');
+}
+
 // ─── Check 1: File Existence ─────────────────────────────────
 
 function checkFileExistence(
@@ -160,20 +171,22 @@ function checkFileExistence(
         suggestion: `Validate this file separately; results for this project are partial`,
       });
     } else if (failure?.code === 'E_FILE_NOT_FOUND') {
-      // Registered but absent on disk. Say so plainly rather than echoing the
-      // raw stat message, which carries the absolute project path.
+      // Registered but absent on disk. Say so plainly, with the path the
+      // reader actually looked at (subfolder included), rather than echoing
+      // the raw stat message, which carries the absolute project path.
+      const relPath = reader.getEntityRelativePath(category, name);
       errors.push({
         check: 'file-existence',
         entity: `${category}/${name}`,
-        message: `Registered in c3proj but no file exists at ${category}/${name}.json`,
-        suggestion: `Create the file or remove "${name}" from project.c3proj`,
+        message: `Registered in c3proj but no file exists at ${relPath}`,
+        suggestion: `Create ${relPath} or remove "${name}" from project.c3proj`,
       });
     } else if (failure) {
       errors.push({
         check: 'file-existence',
         entity: `${category}/${name}`,
-        message: `Registered in c3proj but could not be read: ${failure.message}`,
-        suggestion: `Check that ${category}/${name}.json exists and is valid JSON`,
+        message: `Registered in c3proj but could not be read: ${withoutFsPath(failure.message)}`,
+        suggestion: `Check that ${reader.getEntityRelativePath(category, name)} exists and is valid JSON`,
       });
     } else {
       errors.push({

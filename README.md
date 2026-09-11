@@ -98,6 +98,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `find_orphaned_objects` | Find objects not referenced in any event sheet or layout |
 | `get_asset_usage` | Track sound, image, font, and video asset usage |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
+| `validate_project` | Integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files; `complete` says whether every file was scanned |
 
 ### Mutation Tools (Safe Write Operations)
 

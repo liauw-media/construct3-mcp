@@ -278,4 +278,15 @@ describe('validateProjectIntegrity — real files', () => {
     expect(result.complete).toBe(true);
     expect(result.summary.unscanned).toBe(0);
   });
+
+  it('names the registered subfolder path for a missing file', async () => {
+    await registerInProject(tmpDir, 'layouts', 'Deep', 'Levels');
+    const reader = await openReader(tmpDir);
+
+    const result = await validateProjectIntegrity(reader);
+    const err = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/Deep');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('no file exists at layouts/Levels/Deep.json');
+    expect(err!.message).not.toContain(tmpDir);
+  });
 });

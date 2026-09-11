@@ -378,7 +378,6 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           console.error('[delete_event_sheet] file delete failed after deregistration:', error);
           return orphanedFileError('eventSheets', args.name, subfolder, error);
         }
-        resetProjectIndex();
 
         const result: WriteResult = {
           success: true,

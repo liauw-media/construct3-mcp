@@ -184,7 +184,7 @@ Run integrity checks: file existence, required fields, duplicate SIDs/UIDs, brok
 | Field | Type | Description |
 |-------|------|-------------|
 | `valid` | boolean | No error-level issues were found in the files that were scanned |
-| `complete` | boolean | Every registered file was scanned. `false` when `unscannedFiles` is non-empty; `valid` then only vouches for the files that were checked |
+| `complete` | boolean | Every registered object type, event sheet and layout file was read. `false` when any was skipped for exceeding the 10MB read cap (listed in `unscannedFiles`); `valid` then only vouches for the files that were checked. Families are not covered |
 | `summary` | object | `{ errors, warnings, info, checksRun, entitiesScanned, unscanned }` |
 | `errors` / `warnings` / `info` | `IntegrityIssue[]` | `{ check, entity, message, suggestion? }` |
 | `unscannedFiles` | string[] | `category/name` entries the reader could not scan (over the 10MB read cap); each is also an `unscanned-file` warning |

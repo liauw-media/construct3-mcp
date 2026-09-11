@@ -211,6 +211,16 @@ export class Construct3ProjectReader {
   }
 
   /**
+   * The project-relative path this reader resolves for an entity
+   * (`<category>/[subfolder/]<name>.json`), for messages that must not
+   * carry the absolute project path.
+   */
+  getEntityRelativePath(category: EntityCategory, name: string): string {
+    const subPath = this.pathMapFor(category).get(name);
+    return `${category}/${subPath ? subPath + '/' : ''}${name}.json`;
+  }
+
+  /**
    * Read an event sheet file
    */
   async readEventSheet(name: string): Promise<EventSheet> {

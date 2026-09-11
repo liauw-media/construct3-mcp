@@ -10,6 +10,7 @@ import { join } from 'path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { Construct3ProjectWriter } from '../../src/construct3/project-writer.js';
 import { IdGenerator } from '../../src/construct3/id-generator.js';
+import { getProjectIndex, resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 
@@ -155,6 +156,15 @@ describe('Construct3ProjectWriter (integration)', () => {
     const written = await readFile(join(tmpDir, 'objectTypes', 'NewSprite.json'), 'utf-8');
     const parsed = JSON.parse(written);
     expect(parsed.name).toBe('NewSprite');
+  });
+
+  it('addToProject invalidates the project index so it lists the new name', async () => {
+    resetProjectIndex();
+    expect((await getProjectIndex(reader)).allLayouts).not.toContain('Level 2');
+
+    // A registration change must not leave the module-level index stale
+    await writer.addToProject('layouts', 'Level 2');
+    expect((await getProjectIndex(reader)).allLayouts).toContain('Level 2');
   });
 
   it('writeEntityFile rejects oversized data', async () => {

@@ -167,6 +167,34 @@ describe('validateProjectIntegrity', () => {
     expect(err!.message).not.toContain('secret');
   });
 
+  it('classifies an unreadable object type the same way as a layout', async () => {
+    const reader = validProject();
+    reader.registerUnreadableEntity('objectTypes', 'BigGlobal', {
+      code: 'E_FILE_TOO_LARGE',
+      message: 'Failed to read object type "BigGlobal": File too large (12.0MB exceeds 10MB limit)',
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    expect(result.errors.find(e => e.entity === 'objectTypes/BigGlobal')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'objectTypes/BigGlobal')).toBeDefined();
+    expect(result.unscannedFiles).toContain('objectTypes/BigGlobal');
+    expect(result.complete).toBe(false);
+  });
+
+  it('strips the absolute path from a generic read failure message', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('Locked', {
+      code: 'E_READ_ERROR',
+      message: "Failed to read layout \"Locked\": EACCES: permission denied, open 'C:\\secret\\project\\layouts\\Locked.json'",
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    const err = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/Locked');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('EACCES: permission denied');
+    expect(err!.message).not.toContain('secret');
+  });
+
   it('detects missing layout file', async () => {
     const reader = validProject();
     reader.registerEntityName('layouts', 'GhostLayout');

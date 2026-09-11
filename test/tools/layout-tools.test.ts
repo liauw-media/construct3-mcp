@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
@@ -478,6 +478,22 @@ describe('delete_layout', () => {
     expect(order).toContain('removeFromProject');
     expect(order).toContain('deleteEntityFile');
     expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
+  });
+
+  it('names the orphaned file when the file delete fails after deregistration', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([
+        ['Layout 1', { name: 'Layout 1', layers: [], sid: 1 }],
+        ['Level 2', { name: 'Level 2', layers: [], sid: 2 }],
+      ]),
+      metadata: { firstLayout: 'Layout 1' },
+    });
+    vi.spyOn(writer, 'deleteEntityFile').mockRejectedValueOnce(new Error('boom'));
+    const result = await server.callTool('delete_layout', { name: 'Level 2' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('layouts/Level 2.json');
+    expect(result.content[0].text).toContain('boom');
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
   });
 });
 

@@ -77,9 +77,14 @@ export function orphanedFileError(
 ) {
   const relPath = `${category}/${subfolder ? subfolder + '/' : ''}${name}.json`;
   const reason = error instanceof Error ? error.message : String(error);
+  // validate_project's orphaned-file scan covers objectTypes, eventSheets and
+  // layouts; it does not scan families, so do not promise a report there.
+  const visibility = category === 'families'
+    ? 'The file is now orphaned'
+    : 'The file is now orphaned (validate_project reports it as info)';
   return toolError(
     `Removed "${name}" from project.c3proj but could not delete ${relPath}: ${reason}. ` +
-    `The file is now orphaned (validate_project reports it as info); delete it manually.`
+    `${visibility}; delete it manually. A ${relPath}.bak backup may have been written next to it.`
   );
 }
 

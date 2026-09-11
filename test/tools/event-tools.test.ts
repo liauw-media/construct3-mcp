@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
@@ -324,6 +324,18 @@ describe('delete_event_sheet', () => {
     const order = writer.calls.map(c => c.method);
     expect(order.indexOf('removeFromProject')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
+  });
+
+  it('names the orphaned file when the file delete fails after deregistration', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Extra', { name: 'Extra', events: [], sid: 1 }]]),
+    });
+    vi.spyOn(writer, 'deleteEntityFile').mockRejectedValueOnce(new Error('boom'));
+    const result = await server.callTool('delete_event_sheet', { name: 'Extra' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('eventSheets/Extra.json');
+    expect(result.content[0].text).toContain('boom');
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
   });
 });
 

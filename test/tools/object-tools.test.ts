@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
@@ -363,6 +363,19 @@ describe('delete_object', () => {
     expect(order.indexOf('removeFromProject')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
   });
+
+  it('names the orphaned file when the file delete fails after deregistration', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 1 }]]),
+    });
+    vi.spyOn(writer, 'deleteEntityFile').mockRejectedValueOnce(new Error('boom'));
+    const result = await server.callTool('delete_object', { name: 'Hero' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('objectTypes/Hero.json');
+    expect(result.content[0].text).toContain('boom');
+    expect(result.content[0].text).toContain('validate_project');
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
+  });
 });
 
 // ─── create_family ────────────────────────────────────────
@@ -517,6 +530,18 @@ describe('delete_family', () => {
     // Deregister first, then delete the file
     const order = writer.calls.map(c => c.method);
     expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
+  });
+
+  it('names the orphaned file when the file delete fails, without promising a validate_project report', async () => {
+    const { server, writer } = setup({
+      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
+    });
+    vi.spyOn(writer, 'deleteEntityFile').mockRejectedValueOnce(new Error('boom'));
+    const result = await server.callTool('delete_family', { name: 'btn_fam' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('families/btn_fam.json');
+    // validate_project does not scan families for orphans, so the message must not claim it does
+    expect(result.content[0].text).not.toContain('validate_project');
   });
 
   it('errors on nonexistent family', async () => {

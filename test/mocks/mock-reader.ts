@@ -217,6 +217,10 @@ export class MockReader {
     return this.readFailures.get(category) ?? new Map();
   }
 
+  getEntityRelativePath(category: string, name: string): string {
+    return `${category}/${name}.json`;
+  }
+
   async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
     const key = `${category}/${name}`;
     const forced = this.rawScanErrors.get(key);
