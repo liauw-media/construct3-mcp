@@ -3,7 +3,7 @@
  * Scans existing project IDs on first use, then generates unique new ones.
  */
 
-import type { Construct3ProjectReader } from './project-reader.js';
+import { isFileNotFoundError, type Construct3ProjectReader } from './project-reader.js';
 import type { AnimationsContainer, C3Event, Layout, RootFileFolders } from './types.js';
 
 const SID_MIN = 100_000_000_000_000; // 15-digit minimum
@@ -18,6 +18,11 @@ export class IdGenerator {
   private existingImageSpriteIds: Set<number> | null = null;
   private highestUid = 0;
   private initialized = false;
+  // UID-bearing files ("category/name") that exist but could not be scanned
+  // at all (parse AND raw scan failed). While non-empty, the UID high-water
+  // mark is untrustworthy and UID minting must hard-fail rather than risk a
+  // duplicate UID.
+  private unscannedEntities: string[] = [];
 
   /**
    * Scan the project to collect all existing SIDs and find the highest UID.
@@ -74,6 +79,31 @@ export class IdGenerator {
       this.scanLayoutSids(layout);
     }
 
+    // Files the bulk readers skipped (over the size cap, unparsable, ...) still
+    // hold live UIDs: layout instances and objectTypes' singleglobal-inst.
+    // Recover them with a raw text scan so the UID high-water mark stays
+    // correct; if even the raw scan fails for a file that exists, remember it
+    // so generateUid() can refuse instead of minting a duplicate.
+    this.unscannedEntities = [];
+    for (const category of ['objectTypes', 'layouts'] as const) {
+      for (const [name, failure] of reader.getReadFailures(category)) {
+        // A registered file that does not exist provably holds no UIDs or
+        // SIDs: nothing to recover, nothing to distrust.
+        if (failure.code === 'E_FILE_NOT_FOUND') continue;
+        try {
+          const scan = await reader.scanEntityIdsRaw(category, name);
+          this.trackUid(scan.highestUid);
+          for (const sid of scan.sids) {
+            this.collectSid(sid);
+          }
+        } catch (error) {
+          // Vanished between the bulk read and this scan: same as above.
+          if (isFileNotFoundError(error)) continue;
+          this.unscannedEntities.push(`${category}/${name}`);
+        }
+      }
+    }
+
     // Scan all families
     const families = await reader.readAllFamilies();
     for (const [, family] of families) {
@@ -105,6 +135,12 @@ export class IdGenerator {
    */
   async generateUid(reader: Construct3ProjectReader): Promise<number> {
     await this.initialize(reader);
+    if (this.unscannedEntities.length > 0) {
+      throw new Error(
+        `Cannot generate a safe UID: project file(s) could not be scanned for existing UIDs ` +
+        `(${this.unscannedEntities.join(', ')}). Minting anyway could duplicate a UID already in use.`
+      );
+    }
     this.highestUid++;
     return this.highestUid;
   }
@@ -151,6 +187,7 @@ export class IdGenerator {
     this.existingImageSpriteIds = null;
     this.highestUid = 0;
     this.initialized = false;
+    this.unscannedEntities = [];
   }
 
   private collectSid(sid: unknown): void {

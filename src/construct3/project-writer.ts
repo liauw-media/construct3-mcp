@@ -230,6 +230,9 @@ export class Construct3ProjectWriter {
       await this.atomicWrite(projectPath, json);
       await this.verifyWrittenFile(projectPath, 'project.c3proj');
       await this.reader.reloadProject();
+      // A registration change stales the project index and the ID scan too,
+      // not only the reader's entity caches.
+      this.invalidateAll();
     });
   }
 
@@ -261,6 +264,11 @@ export class Construct3ProjectWriter {
       await this.atomicWrite(projectPath, json);
       await this.verifyWrittenFile(projectPath, 'project.c3proj');
       await this.reader.reloadProject();
+      // A registration change stales the project index and the ID scan too,
+      // not only the reader's entity caches. This matters when a delete_*
+      // handler fails after deregistering: deleteEntityFile (which normally
+      // invalidates) never runs, and nothing else must keep listing the name.
+      this.invalidateAll();
     });
   }
 

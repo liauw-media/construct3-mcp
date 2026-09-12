@@ -21,17 +21,30 @@ export interface IntegrityIssue {
 }
 
 export interface IntegrityResult {
+  /** No error-level issues were found in the files that were scanned */
   valid: boolean;
+  /**
+   * Every registered object type, event sheet and layout file was read.
+   * False when any of them was skipped for exceeding the reader's size cap
+   * (listed in unscannedFiles); `valid` then only vouches for the files that
+   * were checked. Files that exist but cannot be read for another reason are
+   * errors, not unscanned entries. Families are not covered by this check.
+   */
+  complete: boolean;
   summary: {
     errors: number;
     warnings: number;
     info: number;
     checksRun: number;
     entitiesScanned: number;
+    /** Files registered in c3proj that could not be scanned (e.g. over the reader's size cap) */
+    unscanned: number;
   };
   errors: IntegrityIssue[];
   warnings: IntegrityIssue[];
   info: IntegrityIssue[];
+  /** Entities NOT covered by any check below — results are partial wherever these are listed */
+  unscannedFiles: string[];
 }
 
 // ─── Constants ───────────────────────────────────────────────
@@ -62,10 +75,12 @@ export async function validateProjectIntegrity(
   const entitiesScanned =
     registeredObjects.length + registeredSheets.length + registeredLayouts.length;
 
+  const unscannedFiles: string[] = [];
+
   // Error checks
-  checkFileExistence(registeredObjects, objects, 'objectTypes', errors);
-  checkFileExistence(registeredSheets, eventSheets, 'eventSheets', errors);
-  checkFileExistence(registeredLayouts, layouts, 'layouts', errors);
+  checkFileExistence(registeredObjects, objects, 'objectTypes', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredSheets, eventSheets, 'eventSheets', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredLayouts, layouts, 'layouts', reader, errors, warnings, unscannedFiles);
   checkRequiredFieldsObjects(objects, errors);
   checkRequiredFieldsSheets(eventSheets, errors);
   checkRequiredFieldsLayouts(layouts, errors);
@@ -89,16 +104,19 @@ export async function validateProjectIntegrity(
 
   return {
     valid: errors.length === 0,
+    complete: unscannedFiles.length === 0,
     summary: {
       errors: errors.length,
       warnings: warnings.length,
       info: info.length,
       checksRun,
       entitiesScanned,
+      unscanned: unscannedFiles.length,
     },
     errors,
     warnings,
     info,
+    unscannedFiles,
   };
 }
 
@@ -118,16 +136,59 @@ function flattenContainer(container: { items: string[]; subfolders: Array<{ item
   return result;
 }
 
+/**
+ * Drop the trailing ", <syscall> '<absolute path>'" Node appends to fs
+ * errors; tool output should not echo the project's absolute path.
+ */
+function withoutFsPath(message: string): string {
+  return message.replace(/, (?:stat|lstat|open|read|access|scandir) '.*'$/, '');
+}
+
 // ─── Check 1: File Existence ─────────────────────────────────
 
 function checkFileExistence(
   registered: string[],
   loaded: Map<string, unknown>,
-  category: string,
-  errors: IntegrityIssue[]
+  category: 'objectTypes' | 'eventSheets' | 'layouts',
+  reader: Construct3ProjectReader,
+  errors: IntegrityIssue[],
+  warnings: IntegrityIssue[],
+  unscannedFiles: string[]
 ): void {
+  const readFailures = reader.getReadFailures(category);
   for (const name of registered) {
-    if (!loaded.has(name)) {
+    if (loaded.has(name)) continue;
+    const failure = readFailures.get(name);
+    if (failure?.code === 'E_FILE_TOO_LARGE') {
+      // The file exists but exceeds the reader's size cap — it was NOT
+      // scanned, so every check below is blind to its contents. Report it
+      // honestly instead of claiming the file is missing or invalid.
+      unscannedFiles.push(`${category}/${name}`);
+      warnings.push({
+        check: 'unscanned-file',
+        entity: `${category}/${name}`,
+        message: `UNSCANNED: ${failure.message} — integrity checks (duplicate UIDs/SIDs, references) did not cover this file`,
+        suggestion: `Validate this file separately; results for this project are partial`,
+      });
+    } else if (failure?.code === 'E_FILE_NOT_FOUND') {
+      // Registered but absent on disk. Say so plainly, with the path the
+      // reader actually looked at (subfolder included), rather than echoing
+      // the raw stat message, which carries the absolute project path.
+      const relPath = reader.getEntityRelativePath(category, name);
+      errors.push({
+        check: 'file-existence',
+        entity: `${category}/${name}`,
+        message: `Registered in c3proj but no file exists at ${relPath}`,
+        suggestion: `Create ${relPath} or remove "${name}" from project.c3proj`,
+      });
+    } else if (failure) {
+      errors.push({
+        check: 'file-existence',
+        entity: `${category}/${name}`,
+        message: `Registered in c3proj but could not be read: ${withoutFsPath(failure.message)}`,
+        suggestion: `Check that ${reader.getEntityRelativePath(category, name)} exists and is valid JSON`,
+      });
+    } else {
       errors.push({
         check: 'file-existence',
         entity: `${category}/${name}`,

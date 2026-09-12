@@ -51,6 +51,7 @@ describe('validateProjectIntegrity', () => {
     const reader = validProject();
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
+    expect(result.complete).toBe(true);
     expect(result.summary.errors).toBe(0);
     expect(result.summary.checksRun).toBe(13);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
@@ -75,6 +76,123 @@ describe('validateProjectIntegrity', () => {
     expect(result.valid).toBe(false);
     const err = result.errors.find(e => e.check === 'file-existence' && e.entity.includes('GhostSheet'));
     expect(err).toBeDefined();
+  });
+
+  it('reports oversized layouts as UNSCANNED warnings, not missing-file errors', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('HugeLayout', {
+      code: 'E_FILE_TOO_LARGE',
+      message: 'Failed to read layout "HugeLayout": File too large (45.6MB exceeds 10MB limit)',
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    // No false "missing or invalid JSON" error for a file that merely exceeds the size cap
+    const falseError = result.errors.find(e => e.entity.includes('HugeLayout'));
+    expect(falseError).toBeUndefined();
+
+    const unscanned = result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'layouts/HugeLayout');
+    expect(unscanned).toBeDefined();
+    expect(unscanned!.message).toContain('UNSCANNED');
+    expect(result.unscannedFiles).toContain('layouts/HugeLayout');
+    expect(result.summary.unscanned).toBe(1);
+  });
+
+  it('reports a recorded non-size read failure as an error with the real reason', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('BrokenLayout', {
+      code: 'E_INVALID_JSON',
+      message: 'Failed to read layout "BrokenLayout": Unexpected token in JSON at position 12',
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    const err = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/BrokenLayout');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('Unexpected token');
+    expect(result.summary.unscanned).toBe(0);
+    expect(result.complete).toBe(true);
+  });
+
+  it('classifies unscanned files by failure code, not by message text', async () => {
+    const reader = validProject();
+    // A size-cap record whose message never says "too large" must still be
+    // UNSCANNED, and a generic read error that happens to say "too large"
+    // must still be an error. Rewording the reader's prose cannot flip either.
+    reader.registerUnreadableLayout('Opaque', {
+      code: 'E_FILE_TOO_LARGE',
+      message: 'Failed to read layout "Opaque": (reason withheld)',
+    });
+    reader.registerUnreadableLayout('Denied', {
+      code: 'E_READ_ERROR',
+      message: 'Failed to read layout "Denied": EACCES, too large a permission problem',
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    expect(result.errors.find(e => e.entity === 'layouts/Opaque')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'layouts/Opaque')).toBeDefined();
+    expect(result.unscannedFiles).toEqual(['layouts/Opaque']);
+
+    const denied = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/Denied');
+    expect(denied).toBeDefined();
+    expect(denied!.message).toContain('could not be read');
+    expect(result.summary.unscanned).toBe(1);
+  });
+
+  it('reports complete: false while valid stays true when files were unscanned', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('HugeLayout', {
+      code: 'E_FILE_TOO_LARGE',
+      message: 'Failed to read layout "HugeLayout": File too large (45.6MB exceeds 10MB limit)',
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    // valid only vouches for the files that were scanned; complete says whether that was all of them
+    expect(result.valid).toBe(true);
+    expect(result.complete).toBe(false);
+    expect(result.summary.errors).toBe(0);
+  });
+
+  it('reports a missing file without leaking its absolute path', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('GhostLayout', {
+      code: 'E_FILE_NOT_FOUND',
+      message: "Failed to read layout \"GhostLayout\": ENOENT: no such file or directory, stat 'C:\\secret\\project\\layouts\\GhostLayout.json'",
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    expect(result.valid).toBe(false);
+    expect(result.complete).toBe(true);
+    const err = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/GhostLayout');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('no file exists at layouts/GhostLayout.json');
+    expect(err!.message).not.toContain('secret');
+  });
+
+  it('classifies an unreadable object type the same way as a layout', async () => {
+    const reader = validProject();
+    reader.registerUnreadableEntity('objectTypes', 'BigGlobal', {
+      code: 'E_FILE_TOO_LARGE',
+      message: 'Failed to read object type "BigGlobal": File too large (12.0MB exceeds 10MB limit)',
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    expect(result.errors.find(e => e.entity === 'objectTypes/BigGlobal')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'objectTypes/BigGlobal')).toBeDefined();
+    expect(result.unscannedFiles).toContain('objectTypes/BigGlobal');
+    expect(result.complete).toBe(false);
+  });
+
+  it('strips the absolute path from a generic read failure message', async () => {
+    const reader = validProject();
+    reader.registerUnreadableLayout('Locked', {
+      code: 'E_READ_ERROR',
+      message: "Failed to read layout \"Locked\": EACCES: permission denied, open 'C:\\secret\\project\\layouts\\Locked.json'",
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    const err = result.errors.find(e => e.check === 'file-existence' && e.entity === 'layouts/Locked');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('EACCES: permission denied');
+    expect(err!.message).not.toContain('secret');
   });
 
   it('detects missing layout file', async () => {

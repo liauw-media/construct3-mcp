@@ -1,9 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerLayoutTools } from '../../src/tools/layout-tools.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+
+// The project index is a module singleton built from whichever reader first
+// asked for it; MockWriter never invalidates it, so reset it per test.
+beforeEach(() => resetProjectIndex());
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -454,6 +459,41 @@ describe('delete_layout', () => {
     const result = await server.callTool('delete_layout', { name: 'Layout 1' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('startup layout');
+  });
+
+  it('deregisters the layout from c3proj before deleting its file', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([
+        ['Layout 1', { name: 'Layout 1', layers: [], sid: 1 }],
+        ['Level 2', { name: 'Level 2', layers: [], sid: 2 }],
+      ]),
+      metadata: { firstLayout: 'Layout 1' },
+    });
+    const result = await server.callTool('delete_layout', { name: 'Level 2' });
+    expect(parseResult(result).success).toBe(true);
+
+    // A failure between the two steps must leave an orphaned file, never a
+    // registration that points at nothing.
+    const order = writer.calls.map(c => c.method);
+    expect(order).toContain('removeFromProject');
+    expect(order).toContain('deleteEntityFile');
+    expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
+  });
+
+  it('names the orphaned file when the file delete fails after deregistration', async () => {
+    const { server, writer } = setup({
+      layouts: new Map([
+        ['Layout 1', { name: 'Layout 1', layers: [], sid: 1 }],
+        ['Level 2', { name: 'Level 2', layers: [], sid: 2 }],
+      ]),
+      metadata: { firstLayout: 'Layout 1' },
+    });
+    vi.spyOn(writer, 'deleteEntityFile').mockRejectedValueOnce(new Error('boom'));
+    const result = await server.callTool('delete_layout', { name: 'Level 2' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('layouts/Level 2.json');
+    expect(result.content[0].text).toContain('boom');
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
   });
 });
 

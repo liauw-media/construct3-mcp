@@ -265,10 +265,11 @@ export interface FunctionCallAction {
   [key: string]: unknown;
 }
 
-/** Script action */
+/** Script action — C3 serializes these with a language tag and the script as an array of lines */
 export interface ScriptAction {
   type: 'script';
-  script: string;
+  language: string;
+  script: string[];
   disabled?: boolean;
   [key: string]: unknown;
 }
@@ -344,10 +345,11 @@ export interface CommentEvent {
   [key: string]: unknown;
 }
 
-/** Script block event — inline JavaScript */
+/** Script block event — inline JavaScript. Same on-disk shape as ScriptAction: a language tag and the script as an array of lines */
 export interface ScriptEvent {
   eventType: 'script';
-  script: string;
+  language: string;
+  script: string[];
   [key: string]: unknown;
 }
 

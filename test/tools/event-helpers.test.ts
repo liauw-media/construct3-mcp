@@ -203,7 +203,7 @@ describe('buildBlockEvent', () => {
     expect(block.isElse).toBe(true);
   });
 
-  it('builds script actions', async () => {
+  it('builds script actions in C3 canonical shape (language tag + line array)', async () => {
     const reader = new MockReader();
     const idGen = new MockIdGenerator();
     const counter = { count: 0, warnings: [] };
@@ -221,7 +221,51 @@ describe('buildBlockEvent', () => {
     );
 
     expect(block.actions).toHaveLength(1);
-    expect((block.actions[0] as any).type).toBe('script');
+    const scriptAct = block.actions[0] as any;
+    expect(scriptAct.type).toBe('script');
+    expect(scriptAct.language).toBe('javascript');
+    expect(scriptAct.script).toEqual(['console.log("hi")']);
+  });
+
+  it('splits multi-line script strings into lines', async () => {
+    const reader = new MockReader();
+    const idGen = new MockIdGenerator();
+    const counter = { count: 0, warnings: [] };
+
+    const block = await buildBlockEvent(
+      reader as any,
+      idGen as any,
+      {
+        conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+        actions: [{ type: 'script' as const, script: 'const a = 1;\r\nif (a) {\n  doIt();\n}' }],
+        children: [],
+      },
+      1,
+      counter,
+    );
+
+    expect((block.actions[0] as any).script).toEqual(['const a = 1;', 'if (a) {', '  doIt();', '}']);
+  });
+
+  it('passes script line arrays through unchanged', async () => {
+    const reader = new MockReader();
+    const idGen = new MockIdGenerator();
+    const counter = { count: 0, warnings: [] };
+
+    const lines = ['if (x) {', '  y();', '}'];
+    const block = await buildBlockEvent(
+      reader as any,
+      idGen as any,
+      {
+        conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+        actions: [{ type: 'script' as const, script: lines }],
+        children: [],
+      },
+      1,
+      counter,
+    );
+
+    expect((block.actions[0] as any).script).toEqual(lines);
   });
 
   it('rejects nesting beyond MAX_NESTING_DEPTH', async () => {

@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { C3Event, EventSheet, FunctionBlockEvent, WriteResult } from '../construct3/types.js';
-import { validateName, validateSubfolder, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError, orphanedFileError, boundedRecord } from './shared.js';
 import {
   conditionSchema,
   actionSchema,
@@ -17,6 +17,7 @@ import {
   findEventBySid,
   countDescendants,
   summarizeEvents,
+  toScriptLines,
 } from './event-helpers.js';
 import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
@@ -102,6 +103,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         name: z.string().describe('Parameter name'),
         type: z.enum(['number', 'string', 'boolean']).describe('Parameter type'),
       })).optional().describe('For functions: parameter definitions'),
+      functionReturnType: z.enum(['none', 'number', 'string', 'any']).optional()
+        .describe('For functions: return type (default: none)'),
+      functionIsAsync: z.boolean().optional().describe('For functions: mark as async (default: false)'),
+      functionCopyPicked: z.boolean().optional().describe('For functions: copy picked instances into the function (default: false)'),
       variableName: z.string().max(200).optional().describe('For variables: variable name'),
       variableType: z.enum(['number', 'string', 'boolean']).optional().describe('For variables: variable type'),
       initialValue: z.string().max(500).optional().default('').describe('For variables: initial value'),
@@ -140,7 +145,11 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
                   }))
                 )
               : undefined;
-            event = createFunctionEvent(args.functionName, sid, paramsWithSids);
+            event = createFunctionEvent(args.functionName, sid, paramsWithSids, {
+              returnType: args.functionReturnType,
+              isAsync: args.functionIsAsync,
+              copyPicked: args.functionCopyPicked,
+            });
             break;
           }
           case 'variable': {
@@ -355,10 +364,20 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
         }
 
+        // Capture the subfolder first: removeFromProject reloads project.c3proj,
+        // after which the name is no longer resolvable.
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
-        const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
+        // Deregister before deleting the file. A failure in the second step
+        // then leaves an orphaned file (info-level) instead of a dangling
+        // registration (a file-existence error).
         await writer.removeFromProject('eventSheets', args.name);
-        resetProjectIndex();
+        let backupPath: string;
+        try {
+          backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
+        } catch (error) {
+          console.error('[delete_event_sheet] file delete failed after deregistration:', error);
+          return orphanedFileError('eventSheets', args.name, subfolder, error);
+        }
 
         const result: WriteResult = {
           success: true,
@@ -979,7 +998,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             if ('type' in a && a.type === 'script') {
               const scriptAct: Record<string, unknown> = {
                 type: 'script',
-                script: a.script,
+                language: 'javascript',
+                script: toScriptLines(a.script),
               };
               if (a.disabled) scriptAct.disabled = true;
               actions.push(scriptAct);

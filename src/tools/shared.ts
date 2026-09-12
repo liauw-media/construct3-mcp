@@ -64,6 +64,32 @@ export function toolError(message: string) {
 }
 
 /**
+ * Error for a delete_* handler whose file delete failed AFTER the entity was
+ * already deregistered from project.c3proj. The file is now orphaned, and the
+ * handler cannot retry it (the name is no longer registered), so tell the
+ * caller exactly which file to clean up.
+ */
+export function orphanedFileError(
+  category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
+  name: string,
+  subfolder: string | undefined,
+  error: unknown,
+) {
+  const relPath = `${category}/${subfolder ? subfolder + '/' : ''}${name}.json`;
+  const reason = error instanceof Error ? error.message : String(error);
+  // validate_project's orphaned-file scan covers objectTypes, eventSheets and
+  // layouts at the category root or one subfolder deep; it does not scan
+  // families or deeper subfolders, so do not promise a report there.
+  const visibility = category === 'families'
+    ? 'The file is now orphaned'
+    : 'The file is now orphaned (validate_project reports it as info when it sits at the category root or one subfolder deep)';
+  return toolError(
+    `Removed "${name}" from project.c3proj but could not delete ${relPath}: ${reason}. ` +
+    `${visibility}; delete it manually. A ${relPath}.bak backup may have been written next to it.`
+  );
+}
+
+/**
  * Build a "not found" toolError response with name suggestions.
  * Replaces the copy-pasted 3-line suggestion block in all mutation tools.
  *

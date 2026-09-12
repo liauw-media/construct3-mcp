@@ -4,6 +4,7 @@
  */
 
 import type { Construct3Project, EventSheet, ObjectType, Layout } from '../../src/construct3/types.js';
+import { scanIdsInText, type EntityCategory, type ReadFailure } from '../../src/construct3/project-reader.js';
 
 export interface MockReaderData {
   objects?: Map<string, Record<string, unknown>>;
@@ -34,6 +35,12 @@ export class MockReader {
   private registeredOnly: { objects: string[]; eventSheets: string[]; layouts: string[] } = {
     objects: [], eventSheets: [], layouts: [],
   };
+  // Simulated bulk-read failures: category → name → typed failure (for unscanned-file testing)
+  private readFailures: Map<string, Map<string, ReadFailure>> = new Map();
+  // Raw text served by scanEntityIdsRaw for unreadable entities, keyed "category/name"
+  private rawEntityText: Map<string, string> = new Map();
+  // Forced raw-scan failures, keyed "category/name" (e.g. an ENOENT-coded fs error)
+  private rawScanErrors: Map<string, Error> = new Map();
 
   constructor(data: MockReaderData = {}) {
     this.objects = data.objects ?? new Map();
@@ -206,6 +213,24 @@ export class MockReader {
     return Array.from(this.objects.keys()).filter(n => n.toLowerCase().includes(lower));
   }
 
+  getReadFailures(category: string): Map<string, ReadFailure> {
+    return this.readFailures.get(category) ?? new Map();
+  }
+
+  getEntityRelativePath(category: string, name: string): string {
+    return `${category}/${name}.json`;
+  }
+
+  async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
+    const key = `${category}/${name}`;
+    const forced = this.rawScanErrors.get(key);
+    if (forced) throw forced;
+    const content = this.rawEntityText.get(key);
+    if (content === undefined) throw new Error(`${key}: raw text not available`);
+    // The mock only fakes the I/O; the scan itself is the production one.
+    return scanIdsInText(content);
+  }
+
   invalidateCaches(): void {
     // no-op for mock
   }
@@ -233,5 +258,38 @@ export class MockReader {
    */
   registerEntityName(category: 'objects' | 'eventSheets' | 'layouts', name: string): void {
     this.registeredOnly[category].push(name);
+  }
+
+  /**
+   * Register an entity that is present in c3proj but unreadable by the bulk
+   * reader (e.g. over the 10MB cap). It is absent from readAll*(), carries a
+   * typed read failure, and (optionally) serves raw text to scanEntityIdsRaw
+   * for high-water UID recovery.
+   */
+  registerUnreadableEntity(
+    category: 'objectTypes' | 'layouts',
+    name: string,
+    failure: ReadFailure,
+    rawText?: string
+  ): void {
+    this.registeredOnly[category === 'objectTypes' ? 'objects' : 'layouts'].push(name);
+    let failures = this.readFailures.get(category);
+    if (!failures) {
+      failures = new Map<string, ReadFailure>();
+      this.readFailures.set(category, failures);
+    }
+    failures.set(name, failure);
+    if (rawText !== undefined) {
+      this.rawEntityText.set(`${category}/${name}`, rawText);
+    }
+  }
+
+  registerUnreadableLayout(name: string, failure: ReadFailure, rawText?: string): void {
+    this.registerUnreadableEntity('layouts', name, failure, rawText);
+  }
+
+  /** Make the raw scan of this entity throw `error` (e.g. an ENOENT-coded fs error). */
+  failRawScanWith(category: EntityCategory, name: string, error: Error): void {
+    this.rawScanErrors.set(`${category}/${name}`, error);
   }
 }

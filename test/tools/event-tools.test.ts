@@ -1,9 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerEventTools } from '../../src/tools/event-tools.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+
+// The project index is a module singleton built from whichever reader first
+// asked for it; MockWriter never invalidates it, so reset it per test.
+beforeEach(() => resetProjectIndex());
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -307,6 +312,30 @@ describe('delete_event_sheet', () => {
     const result = await server.callTool('delete_event_sheet', { name: 'NonExistent' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not found');
+  });
+
+  it('deregisters the sheet from c3proj before deleting its file', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Extra', { name: 'Extra', events: [], sid: 1 }]]),
+    });
+    const result = await server.callTool('delete_event_sheet', { name: 'Extra' });
+    expect(parseResult(result).success).toBe(true);
+
+    const order = writer.calls.map(c => c.method);
+    expect(order.indexOf('removeFromProject')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('removeFromProject')).toBeLessThan(order.indexOf('deleteEntityFile'));
+  });
+
+  it('names the orphaned file when the file delete fails after deregistration', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Extra', { name: 'Extra', events: [], sid: 1 }]]),
+    });
+    vi.spyOn(writer, 'deleteEntityFile').mockRejectedValueOnce(new Error('boom'));
+    const result = await server.callTool('delete_event_sheet', { name: 'Extra' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('eventSheets/Extra.json');
+    expect(result.content[0].text).toContain('boom');
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
   });
 });
 
@@ -941,6 +970,72 @@ describe('update_event_block', () => {
     // Should NOT warn about unconditional — we added a replacement condition
     const hasUnconditionalWarning = data.warnings?.some((w: string) => w.includes('unconditionally')) ?? false;
     expect(hasUnconditionalWarning).toBe(false);
+  });
+
+  // ─── Script actions ──────────────────────────────────────
+
+  function sheetWithEmptyBlock() {
+    return {
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 1,
+        events: [
+          {
+            eventType: 'block', sid: 100,
+            conditions: [{ id: 'x', objectClass: 'System', sid: 10 }],
+            actions: [],
+          },
+        ],
+      }]]),
+    };
+  }
+
+  it('appends a script action in the canonical C3 shape (language tag + line array, no SID)', async () => {
+    const { server, writer } = setup(sheetWithEmptyBlock());
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: 'const a = 1;\r\nrun(a);' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    const action = written.events[0].actions[0];
+    expect(action).toEqual({ type: 'script', language: 'javascript', script: ['const a = 1;', 'run(a);'] });
+    expect('sid' in action).toBe(false);
+  });
+
+  it('passes a script given as an array of lines through unchanged and honours disabled', async () => {
+    const { server, writer } = setup(sheetWithEmptyBlock());
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: ['if (x) {', '  y();', '', '}'], disabled: true }],
+    });
+    expect(parseResult(result).success).toBe(true);
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.events[0].actions[0]).toEqual({
+      type: 'script', language: 'javascript', script: ['if (x) {', '  y();', '', '}'], disabled: true,
+    });
+  });
+
+  it('skips objectClass validation for script actions but still validates standard ones', async () => {
+    const { server } = setup(sheetWithEmptyBlock());
+
+    const scriptOnly = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: 'x();' }],
+    });
+    expect(parseResult(scriptOnly).success).toBe(true);
+
+    const withGhost = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addActions: [{ type: 'script', script: 'x();' }, { id: 'set-position', objectClass: 'Ghost' }],
+    });
+    expect(withGhost.isError).toBe(true);
+    expect(withGhost.content[0].text).toContain('Object class validation failed');
   });
 });
 

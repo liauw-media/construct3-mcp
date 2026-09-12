@@ -8,7 +8,7 @@ import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Instance, Layout } from '../construct3/types.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
-import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError, orphanedFileError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   GLOBAL_PLUGINS,
@@ -302,9 +302,20 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           warnings.push(`Object deleted but still referenced in: ${[...eventSheetRefs, ...layoutRefs].join(', ')}. References were NOT cleaned up.`);
         }
 
+        // Capture the subfolder first: removeFromProject reloads project.c3proj,
+        // after which the name is no longer resolvable.
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
-        const backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
+        // Deregister before deleting the file. A failure in the second step
+        // then leaves an orphaned file (info-level) instead of a dangling
+        // registration (a file-existence error).
         await writer.removeFromProject('objectTypes', args.name);
+        let backupPath: string;
+        try {
+          backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
+        } catch (error) {
+          console.error('[delete_object] file delete failed after deregistration:', error);
+          return orphanedFileError('objectTypes', args.name, subfolder, error);
+        }
 
         const result: WriteResult = {
           success: true,
@@ -502,9 +513,20 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           return toolError(`Family "${args.name}" not found. Use list_families to see available families.`);
         }
 
+        // Capture the subfolder first: removeFromProject reloads project.c3proj,
+        // after which the name is no longer resolvable.
         const subfolder = writer.getSubfolderForEntity('families', args.name);
-        const backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
+        // Deregister before deleting the file. A failure in the second step
+        // then leaves an orphaned file (info-level) instead of a dangling
+        // registration (a file-existence error).
         await writer.removeFromProject('families', args.name);
+        let backupPath: string;
+        try {
+          backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
+        } catch (error) {
+          console.error('[delete_family] file delete failed after deregistration:', error);
+          return orphanedFileError('families', args.name, subfolder, error);
+        }
 
         const result: WriteResult = {
           success: true,

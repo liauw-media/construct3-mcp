@@ -15,6 +15,72 @@ import { resolveProjectPath } from './path-utils.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
+export type EntityCategory = 'objectTypes' | 'eventSheets' | 'layouts' | 'families';
+
+// ─── Read-failure typing ─────────────────────────────────────
+
+/**
+ * Why a bulk read skipped an entity file. Consumers branch on these codes,
+ * never on message text.
+ */
+export type ReadFailureCode =
+  | 'E_FILE_TOO_LARGE'   // exists but exceeds MAX_FILE_SIZE; contents were NOT scanned
+  | 'E_FILE_NOT_FOUND'   // ENOENT on stat/read; the file provably holds no data
+  | 'E_INVALID_JSON'     // read fine, JSON.parse threw
+  | 'E_READ_ERROR';      // anything else (EACCES, EISDIR, ...)
+
+export interface ReadFailure {
+  code: ReadFailureCode;
+  message: string;
+}
+
+/**
+ * Thrown by the per-entity readers. Carries a stable code so callers never
+ * have to parse the message to learn what went wrong.
+ */
+export class ProjectReadError extends Error {
+  readonly code: ReadFailureCode;
+
+  constructor(code: ReadFailureCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'ProjectReadError';
+    this.code = code;
+  }
+}
+
+/** True for a Node fs error with code ENOENT (libuv reports this on Windows too). */
+export function isFileNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+/** Classify a raw error from stat/readFile/JSON.parse into a ReadFailureCode. */
+export function classifyReadError(error: unknown): ReadFailureCode {
+  if (error instanceof ProjectReadError) return error.code;
+  if (isFileNotFoundError(error)) return 'E_FILE_NOT_FOUND';
+  if (error instanceof SyntaxError) return 'E_INVALID_JSON';
+  return 'E_READ_ERROR';
+}
+
+/**
+ * Regex-scan raw JSON text for "uid"/"sid" values without parsing it.
+ * Over-approximation (a value inside a string literal) is harmless for
+ * high-water and collision purposes. Exported so the test mock shares this
+ * exact implementation instead of re-implementing it.
+ */
+export function scanIdsInText(content: string): { highestUid: number; sids: number[] } {
+  let highestUid = 0;
+  for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
+    const uid = Number(match[1]);
+    if (uid > highestUid) highestUid = uid;
+  }
+  const sids: number[] = [];
+  for (const match of content.matchAll(/"sid"\s*:\s*(\d+)/g)) {
+    sids.push(Number(match[1]));
+  }
+  return { highestUid, sids };
+}
+
 export class Construct3ProjectReader {
   private projectPath: string;
   private projectData: Construct3Project | null = null;
@@ -31,6 +97,10 @@ export class Construct3ProjectReader {
   private layoutCache: Map<string, Layout> | null = null;
   private familyCache: Map<string, Record<string, unknown>> | null = null;
 
+  // Entities the bulk readers could not read/parse (e.g. over the size cap),
+  // keyed by category → name → typed failure. Rebuilt with each bulk read.
+  private readFailures: Map<EntityCategory, Map<string, ReadFailure>> = new Map();
+
   constructor(projectPath: string) {
     this.projectPath = projectPath;
   }
@@ -41,7 +111,10 @@ export class Construct3ProjectReader {
   private async readProjectFile(filePath: string): Promise<string> {
     const stats = await stat(filePath);
     if (stats.size > MAX_FILE_SIZE) {
-      throw new Error(`File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit)`);
+      throw new ProjectReadError(
+        'E_FILE_TOO_LARGE',
+        `File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit)`
+      );
     }
     return readFile(filePath, 'utf-8');
   }
@@ -115,22 +188,52 @@ export class Construct3ProjectReader {
     return dirname(this.projectPath);
   }
 
+  private pathMapFor(category: EntityCategory): Map<string, string> {
+    switch (category) {
+      case 'objectTypes': return this.objectPathMap;
+      case 'eventSheets': return this.eventSheetPathMap;
+      case 'layouts': return this.layoutPathMap;
+      case 'families': return this.familyPathMap;
+    }
+  }
+
+  /**
+   * Resolve <projectDir>/<category>/[subfolder/]<name>.json through the
+   * c3proj path maps. The parsed readers and the raw scan share this, so
+   * they cannot disagree about where an entity lives.
+   */
+  private resolveEntityPath(category: EntityCategory, name: string): string {
+    const subPath = this.pathMapFor(category).get(name);
+    const segments = subPath
+      ? [category, subPath, `${name}.json`]
+      : [category, `${name}.json`];
+    return resolveProjectPath(this.getProjectDir(), ...segments);
+  }
+
+  /**
+   * The project-relative path this reader resolves for an entity
+   * (`<category>/[subfolder/]<name>.json`), for messages that must not
+   * carry the absolute project path.
+   */
+  getEntityRelativePath(category: EntityCategory, name: string): string {
+    const subPath = this.pathMapFor(category).get(name);
+    return `${category}/${subPath ? subPath + '/' : ''}${name}.json`;
+  }
+
   /**
    * Read an event sheet file
    */
   async readEventSheet(name: string): Promise<EventSheet> {
-    const subPath = this.eventSheetPathMap.get(name);
-    const segments = subPath
-      ? ['eventSheets', subPath, `${name}.json`]
-      : ['eventSheets', `${name}.json`];
-    const eventSheetPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const eventSheetPath = this.resolveEntityPath('eventSheets', name);
     try {
       const content = await this.readProjectFile(eventSheetPath);
       return JSON.parse(content) as EventSheet;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read event sheet "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read event sheet "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -139,18 +242,16 @@ export class Construct3ProjectReader {
    * Read an object type file
    */
   async readObjectType(name: string): Promise<ObjectType> {
-    const subPath = this.objectPathMap.get(name);
-    const segments = subPath
-      ? ['objectTypes', subPath, `${name}.json`]
-      : ['objectTypes', `${name}.json`];
-    const objectPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const objectPath = this.resolveEntityPath('objectTypes', name);
     try {
       const content = await this.readProjectFile(objectPath);
       return JSON.parse(content) as ObjectType;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read object type "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read object type "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -159,18 +260,16 @@ export class Construct3ProjectReader {
    * Read a layout file
    */
   async readLayout(name: string): Promise<Layout> {
-    const subPath = this.layoutPathMap.get(name);
-    const segments = subPath
-      ? ['layouts', subPath, `${name}.json`]
-      : ['layouts', `${name}.json`];
-    const layoutPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const layoutPath = this.resolveEntityPath('layouts', name);
     try {
       const content = await this.readProjectFile(layoutPath);
       return JSON.parse(content) as Layout;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read layout "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read layout "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -179,18 +278,16 @@ export class Construct3ProjectReader {
    * Read a family file
    */
   async readFamily(name: string): Promise<Record<string, unknown>> {
-    const subPath = this.familyPathMap.get(name);
-    const segments = subPath
-      ? ['families', subPath, `${name}.json`]
-      : ['families', `${name}.json`];
-    const familyPath = resolveProjectPath(this.getProjectDir(), ...segments);
+    const familyPath = this.resolveEntityPath('families', name);
     try {
       const content = await this.readProjectFile(familyPath);
       return JSON.parse(content) as Record<string, unknown>;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
-      throw new Error(
-        `Failed to read family "${name}": ${error instanceof Error ? error.message : String(error)}`
+      throw new ProjectReadError(
+        classifyReadError(error),
+        `Failed to read family "${name}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
@@ -230,11 +327,13 @@ export class Construct3ProjectReader {
     if (this.eventSheetCache) return this.eventSheetCache;
     const names = await this.listEventSheets();
     const map = new Map<string, EventSheet>();
+    this.readFailures.delete('eventSheets');
     for (const name of names) {
       try {
         map.set(name, await this.readEventSheet(name));
-      } catch {
-        // Skip unreadable sheets
+      } catch (error) {
+        // Skip unreadable sheets, but record why so callers can report/recover
+        this.recordReadFailure('eventSheets', name, error);
       }
     }
     this.eventSheetCache = map;
@@ -248,11 +347,13 @@ export class Construct3ProjectReader {
     if (this.objectTypeCache) return this.objectTypeCache;
     const names = await this.listObjectTypes();
     const map = new Map<string, ObjectType>();
+    this.readFailures.delete('objectTypes');
     for (const name of names) {
       try {
         map.set(name, await this.readObjectType(name));
-      } catch {
-        // Skip unreadable objects
+      } catch (error) {
+        // Skip unreadable objects, but record why so callers can report/recover
+        this.recordReadFailure('objectTypes', name, error);
       }
     }
     this.objectTypeCache = map;
@@ -266,11 +367,13 @@ export class Construct3ProjectReader {
     if (this.layoutCache) return this.layoutCache;
     const names = await this.listLayouts();
     const map = new Map<string, Layout>();
+    this.readFailures.delete('layouts');
     for (const name of names) {
       try {
         map.set(name, await this.readLayout(name));
-      } catch {
-        // Skip unreadable layouts
+      } catch (error) {
+        // Skip unreadable layouts, but record why so callers can report/recover
+        this.recordReadFailure('layouts', name, error);
       }
     }
     this.layoutCache = map;
@@ -284,15 +387,52 @@ export class Construct3ProjectReader {
     if (this.familyCache) return this.familyCache;
     const names = await this.listFamilies();
     const map = new Map<string, Record<string, unknown>>();
+    this.readFailures.delete('families');
     for (const name of names) {
       try {
         map.set(name, await this.readFamily(name));
-      } catch {
-        // Skip unreadable families
+      } catch (error) {
+        // Skip unreadable families, but record why so callers can report/recover
+        this.recordReadFailure('families', name, error);
       }
     }
     this.familyCache = map;
     return map;
+  }
+
+  private recordReadFailure(category: EntityCategory, name: string, error: unknown): void {
+    let map = this.readFailures.get(category);
+    if (!map) {
+      map = new Map<string, ReadFailure>();
+      this.readFailures.set(category, map);
+    }
+    map.set(name, {
+      code: classifyReadError(error),
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  /**
+   * Entities the last bulk read of a category could not read/parse
+   * (name → typed failure with a stable code and the original message).
+   * Empty until the category's readAll* has run.
+   */
+  getReadFailures(category: EntityCategory): Map<string, ReadFailure> {
+    return this.readFailures.get(category) ?? new Map();
+  }
+
+  /**
+   * Raw ID scan of an entity file that bypasses the size cap and JSON parsing.
+   * Used to recover the UID high-water mark (and SIDs) from files the normal
+   * reader refuses (over 10MB) or cannot parse: layout instances and
+   * objectTypes' singleglobal-inst carry UIDs. Recovers uid/sid only;
+   * imageSpriteIds are not recovered (random 7-digit, collision-negligible).
+   * fs errors propagate unwrapped so callers can test `.code` (ENOENT means
+   * there is nothing to recover).
+   */
+  async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
+    const content = await readFile(this.resolveEntityPath(category, name), 'utf-8');
+    return scanIdsInText(content);
   }
 
   /**
@@ -304,6 +444,7 @@ export class Construct3ProjectReader {
     this.objectTypeCache = null;
     this.layoutCache = null;
     this.familyCache = null;
+    this.readFailures.clear();
   }
 
   /**

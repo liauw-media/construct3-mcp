@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, Layout, Layer } from '../construct3/types.js';
-import { validateName, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
+import { validateName, toolResult, toolError, notFoundError, orphanedFileError, boundedRecord } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   DEFAULT_INSTANCE_PROPERTIES,
@@ -304,9 +304,20 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           });
         }
 
+        // Capture the subfolder first: removeFromProject reloads project.c3proj,
+        // after which the name is no longer resolvable.
         const subfolder = writer.getSubfolderForEntity('layouts', args.name);
-        const backupPath = await writer.deleteEntityFile('layouts', args.name, subfolder);
+        // Deregister before deleting the file. A failure in the second step
+        // then leaves an orphaned file (info-level) instead of a dangling
+        // registration (a file-existence error).
         await writer.removeFromProject('layouts', args.name);
+        let backupPath: string;
+        try {
+          backupPath = await writer.deleteEntityFile('layouts', args.name, subfolder);
+        } catch (error) {
+          console.error('[delete_layout] file delete failed after deregistration:', error);
+          return orphanedFileError('layouts', args.name, subfolder, error);
+        }
 
         const result: WriteResult = {
           success: true,
