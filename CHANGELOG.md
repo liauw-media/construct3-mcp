@@ -14,11 +14,13 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 - `update_event_block` and `update_event_block_action` normalize the legacy `"behavior-type"` key on the conditions/actions they edit and report it in `warnings`; `update_event_block` validates all additions before changing anything (#16).
 - Runtime tools that change the open project report `success: true`; README and `docs/API.md` now document every registered tool and the real source tree (#21).
+- `list_timelines` returns the editor's transitions separately in `transitions`; the timeline tools refuse to read, change or delete transitions. `create_timeline` rejects unsafe `subfolder` paths and `"transitions"`, and writes new folders in the editor's key order (#22).
 
 ### Fixed
 
 - Behavior conditions/actions are written with the `behaviorType` key that Construct 3 reads, instead of `behavior-type`, which made the editor refuse to open the project. `"behavior-type"` is still accepted as a deprecated input alias (#16).
 - Writes keep each file's line endings, trailing newline and BOM instead of rewriting CRLF files with LF (whole-file diffs on Windows checkouts); new files follow the style of `project.c3proj` (#21).
+- Timeline tools find timelines in any `project.c3proj` subfolder, and `update_timeline` writes back to the same file. `delete_timeline` backs up exactly the file it deletes and leaves `project.c3proj` unchanged when that file is missing (#22).
 
 ## [1.8.1] - 2026-04-16
 

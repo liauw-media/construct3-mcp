@@ -183,6 +183,16 @@ describe('Construct3ProjectWriter (integration)', () => {
     expect(project.objectTypes.items).toContain('Enemy');
   });
 
+  it('addToProject creates subfolders in the editor key order', async () => {
+    await writer.addToProject('objectTypes', 'Sprite2', 'Folder1/Folder2');
+
+    const project = JSON.parse(await readFile(join(tmpDir, 'project.c3proj'), 'utf-8'));
+    const folder1 = project.objectTypes.subfolders.find((s: { name?: string }) => s.name === 'Folder1');
+    expect(Object.keys(folder1)).toEqual(['items', 'subfolders', 'name']);
+    expect(Object.keys(folder1.subfolders[0])).toEqual(['items', 'subfolders', 'name']);
+    expect(folder1.subfolders[0].items).toEqual(['Sprite2']);
+  });
+
   it('removeFromProject removes name from c3proj container', async () => {
     await writer.removeFromProject('objectTypes', 'Sprite');
 

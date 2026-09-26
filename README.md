@@ -83,7 +83,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `list_eventsheets` | List all event sheets |
 | `list_layouts` | List all layouts |
 | `list_families` | List all object families |
-| `list_timelines` | List all timelines (root and subfolders) |
+| `list_timelines` | List all timelines (root and subfolders); transitions are listed separately |
 | `list_addons` | List addons in `usedAddons`, optionally filtered by type |
 | `get_object_details` | Get detailed info about a specific object |
 | `get_eventsheet_details` | Get detailed info about an event sheet |
@@ -167,7 +167,7 @@ node dist/index.js /path/to/your/project.c3proj
 |------|-------------|
 | `create_timeline` | Create a timeline (duration, loop, ping-pong, repeat count, start-on-layout) |
 | `update_timeline` | Update timeline settings or enable/disable it |
-| `delete_timeline` | Delete a timeline |
+| `delete_timeline` | Delete a timeline (backs up exactly the file it deletes; errors and leaves `project.c3proj` unchanged when the file is missing) |
 
 **Project and addons**
 

@@ -126,11 +126,11 @@ Comprehensive project overview including metadata, statistics, addon counts, and
 
 ### `list_timelines`
 
-List all timeline names (root and subfolders) with a count. No parameters.
+List all timeline names (root and subfolders) with a count, in project-bar order. No parameters. Transitions (the easing curves in the editor's Transitions folder, which `project.c3proj` keeps as the `timelines` subfolder without a `name`) are returned separately in `transitions`.
 
 ### `get_timeline_details`
 
-Full timeline JSON, including tracks and settings. Looks in `timelines/` and then `timelines/transitions/`.
+Full timeline JSON, including tracks and settings. The file is located from the timeline's folder in `project.c3proj`: `timelines/<name>.json` at the root, `timelines/<folder>/.../<name>.json` in a subfolder. Transitions (stored in `timelines/transitions/`) are refused: the timeline tools never read, change or delete them.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -211,7 +211,7 @@ Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `e
 - **Info:** JSON files not registered in `project.c3proj`, leftover `.bak` files, orphaned objects
 
 **Known false positives.** Projects that open fine in Construct 3 can still get these reports; the first one makes `valid` false:
-- Construct 3 itself writes an empty subfolder without a `name` into `timelines`, which is reported as a `subfolder-structure` error.
+- Construct 3 itself writes a subfolder without a `name` into `timelines` (its Transitions folder, see [`list_timelines`](#list_timelines)), which is reported as a `subfolder-structure` error.
 - Built-in function actions use `"objectClass": "Functions"`, which is reported as a `broken-object-reference` warning.
 - The editor's `*.uistate.json` files, and lowercase file names written by older releases (e.g. `objectTypes/text.json` for `Text`), are reported as `orphaned-file` info with the suggestion to delete them. Do not delete them.
 
@@ -831,7 +831,7 @@ Replace a frame's image with real PNG data. The PNG is written to the frame's fi
 
 ### `create_timeline`
 
-Create a timeline in `timelines/` and register it in `project.c3proj`.
+Create a timeline in `timelines/` (or `timelines/<subfolder>/`) and register it in `project.c3proj`, in the same project-bar folder. The name must not be used by another timeline or by a transition.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -842,11 +842,11 @@ Create a timeline in `timelines/` and register it in `project.c3proj`.
 | `repeatCount` | number | No | Repeat count when not looping (default: 1) |
 | `startOnLayout` | string | No | Layout to auto-start on (default: `""` = none) |
 | `ignoreSystemTimescale` | boolean | No | Ignore the system timescale (default: true) |
-| `subfolder` | string | No | Subfolder within `timelines/` (e.g. `"transitions"`) |
+| `subfolder` | string | No | Project-bar folder within `timelines/`, `/`-separated (e.g. `"UI"` or `"UI/Menus"`). Not `"transitions"`: Construct 3 keeps transitions there |
 
 ### `update_timeline`
 
-Update the settings of an existing timeline.
+Update the settings of an existing timeline, in whichever `project.c3proj` folder it is. The file is backed up to `<file>.bak` and rewritten at the same path. Transitions are refused.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -863,7 +863,7 @@ At least one setting must be provided.
 
 ### `delete_timeline`
 
-Delete a timeline file (backed up first) and remove it from `project.c3proj`.
+Delete a timeline: back up exactly the file that is deleted to `<file>.bak`, delete it, and remove the timeline from its folder in `project.c3proj`. When the file is missing or cannot be deleted, the tool returns an error and `project.c3proj` is not changed. Transitions are refused.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

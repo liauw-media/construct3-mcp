@@ -41,6 +41,15 @@ const PROPERTIES_KEY_MAP: Record<keyof ProjectProperties, true> = {
 };
 const ALLOWED_PROPERTIES = new Set(Object.keys(PROPERTIES_KEY_MAP));
 
+/**
+ * A new, empty project-bar folder for a project.c3proj container. The key
+ * order (items, subfolders, name) is the one the Construct 3 editor writes,
+ * so its next save of the project does not reorder the folder.
+ */
+export function newProjectFolder(name: string): Subfolder {
+  return { items: [], subfolders: [], name };
+}
+
 export class Construct3ProjectWriter {
   private projectLock: Promise<void> = Promise.resolve();
 
@@ -497,7 +506,7 @@ export class Construct3ProjectWriter {
     for (const part of parts) {
       let found = current.subfolders.find(sf => sf.name === part);
       if (!found) {
-        found = { items: [], subfolders: [], name: part };
+        found = newProjectFolder(part);
         current.subfolders.push(found);
       }
       current = found;
