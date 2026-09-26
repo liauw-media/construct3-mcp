@@ -8,6 +8,7 @@ import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, Addon } from '../construct3/types.js';
 import { toolResult, toolError } from './shared.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from '../construct3/templates.js';
+import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
 
 export function registerProjectTools({ server, reader, writer }: MutationToolDeps) {
   server.tool(
@@ -94,12 +95,12 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
             category: 'addon',
             action: 'already_registered',
             warnings: [`Addon "${args.id}" (${args.type}) is already registered in usedAddons.`],
-          });
+          }, { projectWritten: false });
         }
 
         const projectPath = reader.getProjectPath();
         const content = await readFile(projectPath, 'utf-8');
-        const project = JSON.parse(content);
+        const project = parseJsonText(content);
 
         const newAddon: Addon = {
           type: args.type,
@@ -111,7 +112,7 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
         project.usedAddons.push(newAddon);
 
         const tmpPath = projectPath + '.tmp';
-        await writeFile(tmpPath, JSON.stringify(project, null, '\t'), 'utf-8');
+        await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
         try {
           await rename(tmpPath, projectPath);
         } catch (e: unknown) {
@@ -165,7 +166,7 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
 
         const projectPath = reader.getProjectPath();
         const content = await readFile(projectPath, 'utf-8');
-        const project = JSON.parse(content);
+        const project = parseJsonText(content);
 
         const projIdx = (project.usedAddons as Addon[]).findIndex(a => a.type === args.type && a.id === args.id);
         if (projIdx !== -1) {
@@ -173,7 +174,7 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
         }
 
         const tmpPath = projectPath + '.tmp';
-        await writeFile(tmpPath, JSON.stringify(project, null, '\t'), 'utf-8');
+        await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
         try {
           await rename(tmpPath, projectPath);
         } catch (e: unknown) {

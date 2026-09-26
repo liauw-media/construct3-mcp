@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { validateName, validateSubfolder, toolResult, toolError, boundedRecord } from '../../src/tools/shared.js';
+import {
+  validateName, validateSubfolder, toolResult, toolError, boundedRecord,
+  EDITOR_RELOAD_NOTE, reportsProjectWrite,
+} from '../../src/tools/shared.js';
 
 describe('validateName', () => {
   it('accepts valid names', () => {
@@ -65,10 +68,54 @@ describe('validateSubfolder', () => {
 
 describe('toolResult', () => {
   it('wraps data as MCP text content', () => {
-    const result = toolResult({ success: true });
+    const result = toolResult({ count: 1 });
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
-    expect(JSON.parse(result.content[0].text)).toEqual({ success: true });
+    expect(JSON.parse(result.content[0].text)).toEqual({ count: 1 });
+  });
+
+  it('adds the editor reload note to a reported write', () => {
+    const result = toolResult({ success: true, entity: 'Hero' });
+    expect(result.content).toHaveLength(1);
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      success: true,
+      entity: 'Hero',
+      editorNote: EDITOR_RELOAD_NOTE,
+    });
+  });
+
+  it('follows an explicit projectWritten over the success field', () => {
+    expect(JSON.parse(toolResult({ success: true }, { projectWritten: false }).content[0].text))
+      .toEqual({ success: true });
+    expect(JSON.parse(toolResult({ packed: true }, { projectWritten: true }).content[0].text))
+      .toEqual({ packed: true, editorNote: EDITOR_RELOAD_NOTE });
+  });
+
+  it('never adds the note to a non-object payload', () => {
+    expect(JSON.parse(toolResult(['a'], { projectWritten: true }).content[0].text)).toEqual(['a']);
+  });
+});
+
+describe('reportsProjectWrite', () => {
+  it('is true for success: true', () => {
+    expect(reportsProjectWrite({ success: true, action: 'updated' })).toBe(true);
+  });
+
+  it.each([
+    ['blocked', { success: false, action: 'delete_blocked' }],
+    ['dry run', { success: true, dryRun: true, action: 'would_delete' }],
+    ['read-only payload', { addons: [], count: 0 }],
+    ['array', [{ success: true }]],
+    ['null', null],
+    ['string', 'success'],
+  ])('is false for %s', (_label, data) => {
+    expect(reportsProjectWrite(data)).toBe(false);
+  });
+
+  it('an explicit projectWritten wins over the payload', () => {
+    expect(reportsProjectWrite({ success: true, action: 'already_registered' }, { projectWritten: false })).toBe(false);
+    expect(reportsProjectWrite({ success: true }, { projectWritten: false })).toBe(false);
+    expect(reportsProjectWrite({ packed: true }, { projectWritten: true })).toBe(true);
   });
 });
 

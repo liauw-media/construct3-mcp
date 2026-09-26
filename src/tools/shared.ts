@@ -48,10 +48,55 @@ export function validateSubfolder(subfolder: string): void {
   }
 }
 
-/** Format a successful tool result as MCP content. */
-export function toolResult(data: unknown) {
+/**
+ * Added as `editorNote` to every response that reports a completed change to
+ * the project on disk. The Construct 3 editor keeps an open project in memory,
+ * so saving from a session opened before these edits can overwrite them. Its
+ * only documented in-editor reload (Project Bar → Scripts folder, F9) re-reads
+ * script files, not event sheets, layouts or project.c3proj — hence "close and
+ * reopen". (Rule from komabear/c3-skill, MIT.)
+ *
+ * Known gap: errors carry no note, also when a multi-step tool failed after an
+ * earlier step had already written (e.g. create_object after auto-registering
+ * an addon).
+ */
+export const EDITOR_RELOAD_NOTE =
+  'If this project is open in Construct 3, close and reopen it there before saving, or the editor can overwrite these changes.';
+
+/** Options for toolResult. */
+export interface ToolResultOptions {
+  /**
+   * Whether this call wrote to the project on disk. When omitted, a
+   * WriteResult-style payload decides: `success: true` and not a dry run.
+   * Pass it for payloads whose `success` does not imply a write (no-ops,
+   * runtime tools whose write depends on an argument).
+   */
+  projectWritten?: boolean;
+}
+
+/**
+ * True when a tool result reports a completed write to the project: the
+ * explicit `projectWritten` option when given, otherwise the WriteResult
+ * convention (`success: true`, not `dryRun: true`).
+ */
+export function reportsProjectWrite(data: unknown, options: ToolResultOptions = {}): boolean {
+  if (options.projectWritten !== undefined) return options.projectWritten;
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+  const payload = data as Record<string, unknown>;
+  return payload.success === true && payload.dryRun !== true;
+}
+
+/**
+ * Format a successful tool result as MCP content.
+ * Results that report a project write get the editor reload note.
+ */
+export function toolResult(data: unknown, options: ToolResultOptions = {}) {
+  const isObject = typeof data === 'object' && data !== null && !Array.isArray(data);
+  const payload = isObject && reportsProjectWrite(data, options)
+    ? { ...(data as Record<string, unknown>), editorNote: EDITOR_RELOAD_NOTE }
+    : data;
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
   };
 }
 

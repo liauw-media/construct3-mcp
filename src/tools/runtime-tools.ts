@@ -19,6 +19,7 @@ import { join, dirname, relative } from 'node:path';
 import { existsSync } from 'node:fs';
 import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
+import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
 
 const BRIDGE_FILENAME = 'c3-runtime-bridge.js';
 
@@ -95,27 +96,30 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
         // Register in project.c3proj (rootFileFolders.script.items)
         const c3projPath = reader.getProjectPath();
         const c3projRaw = await readFile(c3projPath, 'utf-8');
-        const c3proj = JSON.parse(c3projRaw);
+        const c3proj = parseJsonText(c3projRaw);
 
         if (!findBridgeInScripts(c3proj)) {
           addBridgeToScripts(c3proj);
-          await writeFile(c3projPath, JSON.stringify(c3proj, null, '\t'), 'utf-8');
+          await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
           await reader.loadProject();
 
           return toolResult({
+            success: true,
             injected: true,
             path: bridgePath,
             registered: true,
             message: 'Runtime bridge injected and registered in project.c3proj. The bridge will activate when the game starts via runOnStartup().',
-          });
+          }, { projectWritten: true });
         }
 
+        // The bridge script inside the project folder was still rewritten
         return toolResult({
+          success: true,
           injected: true,
           path: bridgePath,
           registered: false,
           message: 'Runtime bridge script updated (was already registered in project.c3proj).',
-        });
+        }, { projectWritten: true });
       } catch (error) {
         console.error('[inject_runtime_bridge] failed:', error);
         return toolError(`Failed to inject runtime bridge: ${error instanceof Error ? error.message : String(error)}`);
@@ -145,16 +149,17 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
         // Remove from project.c3proj
         const c3projPath = reader.getProjectPath();
         const c3projRaw = await readFile(c3projPath, 'utf-8');
-        const c3proj = JSON.parse(c3projRaw);
+        const c3proj = parseJsonText(c3projRaw);
 
         removeBridgeFromScripts(c3proj);
-        await writeFile(c3projPath, JSON.stringify(c3proj, null, '\t'), 'utf-8');
+        await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
         await reader.loadProject();
 
         return toolResult({
+          success: true,
           removed: true,
           message: 'Runtime bridge removed from project.',
-        });
+        }, { projectWritten: true });
       } catch (error) {
         console.error('[remove_runtime_bridge] failed:', error);
         return toolError(`Failed to remove runtime bridge: ${error instanceof Error ? error.message : String(error)}`);
@@ -331,11 +336,11 @@ print(json.dumps({
           // Register in c3proj if needed
           const c3projPath = reader.getProjectPath();
           const c3projRaw = await readFile(c3projPath, 'utf-8');
-          const c3proj = JSON.parse(c3projRaw);
+          const c3proj = parseJsonText(c3projRaw);
 
           if (!findBridgeInScripts(c3proj)) {
             addBridgeToScripts(c3proj);
-            await writeFile(c3projPath, JSON.stringify(c3proj, null, '\t'), 'utf-8');
+            await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
             await reader.loadProject();
           }
 
@@ -343,6 +348,7 @@ print(json.dumps({
         }
 
         return toolResult({
+          success: true,
           projectName: metadata.name,
           projectDir,
           runtime: projectData.runtime ?? 'c3',
@@ -355,7 +361,7 @@ print(json.dumps({
             'Access via: globalThis.__c3bridge.submit("ping", {})',
             'Or use Playwright or any CDP-capable tool to automate the entire flow',
           ],
-        });
+        }, { projectWritten: injectBridge });
       } catch (error) {
         console.error('[export_for_preview] failed:', error);
         return toolError(`Failed to prepare for preview: ${error instanceof Error ? error.message : String(error)}`);
@@ -393,20 +399,22 @@ print(json.dumps({
           if (c3projFiles.length > 0) {
             const c3projPath = join(targetDir, c3projFiles[0]);
             const raw = await rf(c3projPath, 'utf-8');
-            const c3proj = JSON.parse(raw);
+            const c3proj = parseJsonText(raw);
             if (!findBridgeInScripts(c3proj)) {
               addBridgeToScripts(c3proj);
-              await wf(c3projPath, JSON.stringify(c3proj, null, '\t'), 'utf-8');
+              await wf(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
             }
           }
         }
 
+        // Only the new copy was written, not the open project
         return toolResult({
+          success: true,
           cloned: true,
           source: sourceDir,
           target: targetDir,
           bridgeIncluded: includeBridge,
-        });
+        }, { projectWritten: false });
       } catch (error) {
         console.error('[clone_project] failed:', error);
         return toolError(`Failed to clone project: ${error instanceof Error ? error.message : String(error)}`);
@@ -438,10 +446,10 @@ print(json.dumps({
 
           const c3projPath = reader.getProjectPath();
           const c3projRaw = await readFile(c3projPath, 'utf-8');
-          const c3proj = JSON.parse(c3projRaw);
+          const c3proj = parseJsonText(c3projRaw);
           if (!findBridgeInScripts(c3proj)) {
             addBridgeToScripts(c3proj);
-            await writeFile(c3projPath, JSON.stringify(c3proj, null, '\t'), 'utf-8');
+            await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
             await reader.loadProject();
           }
         }
@@ -455,14 +463,16 @@ print(json.dumps({
 
         const outputStat = await stat(outputPath);
 
+        // The .c3p goes outside the project; only bridge injection writes to it
         return toolResult({
+          success: true,
           packed: true,
           outputPath,
           fileCount: files.length,
           sizeBytes: outputStat.size,
           sizeMB: (outputStat.size / 1024 / 1024).toFixed(2),
           bridgeInjected: injectBridge,
-        });
+        }, { projectWritten: injectBridge });
       } catch (error) {
         console.error('[pack_project] failed:', error);
         return toolError(`Failed to pack project: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,6 +1,8 @@
 /**
  * Safe write operations for Construct 3 projects.
  * Safety model: backup → validate → write → verify → invalidate caches.
+ * Files keep their on-disk text style (line endings, trailing newline, BOM);
+ * see json-format.ts.
  */
 
 import { readFile, writeFile, copyFile, unlink, mkdir, stat, rename } from 'fs/promises';
@@ -12,6 +14,7 @@ import type { Addon, Subfolder, ProjectProperties } from './types.js';
 import { resetProjectIndex } from './analyzers/index-builder.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from './templates.js';
 import { generatePlaceholderPng, getImageFileName } from './png-generator.js';
+import { applyJsonTextStyle, jsonTextStyleOf, parseJsonText, resolveJsonTextStyle } from './json-format.js';
 
 /** Maximum entity file size we'll write (5MB — well above any real C3 entity) */
 const MAX_WRITE_SIZE = 5 * 1024 * 1024;
@@ -131,15 +134,33 @@ export class Construct3ProjectWriter {
   }
 
   /**
-   * Post-write verification — read the file back and verify it parses.
+   * Post-write verification — read the file back, check it holds exactly the
+   * text we wrote, and verify it parses. Different content that still parses
+   * means another write to the same file landed in between (e.g. two tool
+   * calls in parallel), which is reported as such rather than as corruption.
    */
-  private async verifyWrittenFile(filePath: string, entityName: string): Promise<void> {
+  private async verifyWrittenFile(filePath: string, entityName: string, expected: string): Promise<void> {
+    let content: string;
     try {
-      const content = await readFile(filePath, 'utf-8');
-      JSON.parse(content);
+      content = await readFile(filePath, 'utf-8');
+      parseJsonText(content);
     } catch (e) {
       throw new Error(`Post-write verification failed for "${entityName}": file may be corrupted. A .bak backup exists. Error: ${e instanceof Error ? e.message : String(e)}`);
     }
+    if (content !== expected) {
+      throw new Error(`Post-write verification failed for "${entityName}": the file was changed by another write during this one (concurrent writes to the same file?). It holds valid JSON, but not this call's changes. Re-read it and retry.`);
+    }
+  }
+
+  /**
+   * Validate, write and verify project.c3proj, keeping the text style of
+   * `original` (the content it was read from). Caller holds the project lock.
+   */
+  private async writeProjectFile(projectPath: string, project: unknown, original: string): Promise<void> {
+    const json = this.validateJsonData(project, 'project.c3proj');
+    const text = applyJsonTextStyle(json, jsonTextStyleOf(original));
+    await this.atomicWrite(projectPath, text);
+    await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
   }
 
   /**
@@ -162,11 +183,15 @@ export class Construct3ProjectWriter {
     // Ensure directory exists
     await mkdir(dirname(filePath), { recursive: true });
 
+    // Keep the existing file's text style; a new file follows the project's
+    const style = await resolveJsonTextStyle(filePath, this.reader.getProjectPath(), dirname(filePath));
+    const text = applyJsonTextStyle(json, style);
+
     const backupPath = await this.createBackup(filePath);
-    await this.atomicWrite(filePath, json);
+    await this.atomicWrite(filePath, text);
 
     // Post-write verification
-    await this.verifyWrittenFile(filePath, name);
+    await this.verifyWrittenFile(filePath, name, text);
 
     this.invalidateAll();
     return backupPath;
@@ -212,7 +237,7 @@ export class Construct3ProjectWriter {
       await this.createBackup(projectPath);
 
       const content = await readFile(projectPath, 'utf-8');
-      const project = JSON.parse(content);
+      const project = parseJsonText(content);
       const container = project[category];
 
       if (subfolder) {
@@ -226,9 +251,7 @@ export class Construct3ProjectWriter {
         }
       }
 
-      const json = this.validateJsonData(project, 'project.c3proj');
-      await this.atomicWrite(projectPath, json);
-      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.writeProjectFile(projectPath, project, content);
       await this.reader.reloadProject();
     });
   }
@@ -245,7 +268,7 @@ export class Construct3ProjectWriter {
       await this.createBackup(projectPath);
 
       const content = await readFile(projectPath, 'utf-8');
-      const project = JSON.parse(content);
+      const project = parseJsonText(content);
       const container = project[category];
 
       // Remove from root items
@@ -257,9 +280,7 @@ export class Construct3ProjectWriter {
         this.removeFromSubfolders(container.subfolders, name);
       }
 
-      const json = this.validateJsonData(project, 'project.c3proj');
-      await this.atomicWrite(projectPath, json);
-      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.writeProjectFile(projectPath, project, content);
       await this.reader.reloadProject();
     });
   }
@@ -285,7 +306,7 @@ export class Construct3ProjectWriter {
       const backupPath = await this.createBackup(projectPath);
 
       const content = await readFile(projectPath, 'utf-8');
-      const project = JSON.parse(content);
+      const project = parseJsonText(content);
 
       // Apply updates to top-level and properties
       for (const [key, value] of Object.entries(updates)) {
@@ -296,9 +317,7 @@ export class Construct3ProjectWriter {
         }
       }
 
-      const json = this.validateJsonData(project, 'project.c3proj');
-      await this.atomicWrite(projectPath, json);
-      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.writeProjectFile(projectPath, project, content);
       await this.reader.reloadProject();
 
       return backupPath;
@@ -364,7 +383,7 @@ export class Construct3ProjectWriter {
       await this.createBackup(projectPath);
 
       const content = await readFile(projectPath, 'utf-8');
-      const project = JSON.parse(content);
+      const project = parseJsonText(content);
 
       const newAddon: Addon = {
         type,
@@ -375,9 +394,7 @@ export class Construct3ProjectWriter {
       };
       project.usedAddons.push(newAddon);
 
-      const json = this.validateJsonData(project, 'project.c3proj');
-      await this.atomicWrite(projectPath, json);
-      await this.verifyWrittenFile(projectPath, 'project.c3proj');
+      await this.writeProjectFile(projectPath, project, content);
       await this.reader.reloadProject();
 
       return `Auto-registered ${type} "${id}" in usedAddons (was not previously in the project).`;

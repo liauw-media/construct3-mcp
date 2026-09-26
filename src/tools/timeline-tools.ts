@@ -14,6 +14,7 @@ import type { MutationToolDeps } from './shared.js';
 import type { WriteResult } from '../construct3/types.js';
 import { validateName, toolResult, toolError } from './shared.js';
 import { resolveProjectPath } from '../construct3/path-utils.js';
+import { jsonTextStyleOf, parseJsonText, resolveJsonTextStyle, serializeJson } from '../construct3/json-format.js';
 
 // ─── Timeline Type ─────────────────────────────────────────
 
@@ -119,13 +120,14 @@ function timelineFilePath(projectDir: string, name: string, subfolder?: string):
 
 async function readTimelineFile(filePath: string): Promise<Timeline> {
   const content = await readFile(filePath, 'utf-8');
-  return JSON.parse(content) as Timeline;
+  return parseJsonText(content) as Timeline;
 }
 
-async function atomicWriteTimeline(filePath: string, data: Timeline): Promise<void> {
-  const json = JSON.stringify(data, null, '\t');
-  const tmpPath = filePath + '.tmp';
+async function atomicWriteTimeline(filePath: string, data: Timeline, projectPath: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
+  // Keep the existing file's text style; a new file follows the project's
+  const json = serializeJson(data, await resolveJsonTextStyle(filePath, projectPath, dirname(filePath)));
+  const tmpPath = filePath + '.tmp';
   await writeFile(tmpPath, json, 'utf-8');
   try {
     await rename(tmpPath, filePath);
@@ -159,7 +161,7 @@ async function addTimelineToProject(
   subfolder?: string,
 ): Promise<void> {
   const content = await readFile(projectPath, 'utf-8');
-  const project = JSON.parse(content);
+  const project = parseJsonText(content);
 
   if (!project.timelines) project.timelines = { items: [], subfolders: [] };
   const container = project.timelines;
@@ -182,7 +184,7 @@ async function addTimelineToProject(
   }
 
   const tmpPath = projectPath + '.tmp';
-  await writeFile(tmpPath, JSON.stringify(project, null, '\t'), 'utf-8');
+  await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
   try {
     await rename(tmpPath, projectPath);
   } catch (e: unknown) {
@@ -199,7 +201,7 @@ async function addTimelineToProject(
 /** Remove a timeline name from project.c3proj timelines container. */
 async function removeTimelineFromProject(projectPath: string, name: string): Promise<void> {
   const content = await readFile(projectPath, 'utf-8');
-  const project = JSON.parse(content);
+  const project = parseJsonText(content);
 
   if (!project.timelines) return;
   const container = project.timelines;
@@ -222,7 +224,7 @@ async function removeTimelineFromProject(projectPath: string, name: string): Pro
   }
 
   const tmpPath = projectPath + '.tmp';
-  await writeFile(tmpPath, JSON.stringify(project, null, '\t'), 'utf-8');
+  await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
   try {
     await rename(tmpPath, projectPath);
   } catch (e: unknown) {
@@ -343,7 +345,7 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
 
         const filePath = timelineFilePath(reader.getProjectDir(), args.name, args.subfolder);
         const backupPath = await backupTimeline(filePath);
-        await atomicWriteTimeline(filePath, data);
+        await atomicWriteTimeline(filePath, data, reader.getProjectPath());
 
         // Register in project.c3proj (under lock via withProjectLock is internal to writer;
         // we use writer.addToProject which handles the lock — but timelines isn't a standard category.
@@ -422,7 +424,7 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
         if (args.enabled !== undefined) data.enabled = args.enabled;
 
         const backupPath = await backupTimeline(filePath);
-        await atomicWriteTimeline(filePath, data);
+        await atomicWriteTimeline(filePath, data, reader.getProjectPath());
 
         const result: WriteResult = {
           success: true,

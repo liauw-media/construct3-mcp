@@ -6,10 +6,12 @@
  * 2. The destination file is valid JSON after a successful write.
  * 3. The original file is NOT corrupted when atomicWrite throws mid-way
  *    (simulated by making the destination unwritable after backup).
+ * 4. Read-back verification tells a concurrent write (valid JSON, other
+ *    content) apart from a corrupted file.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, readFile, readdir, rm, stat } from 'fs/promises';
+import { mkdtemp, cp, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
@@ -71,5 +73,31 @@ describe('Construct3ProjectWriter — atomic writes', () => {
     const content = await readFile(join(tmpDir, 'project.c3proj'), 'utf-8');
     const project = JSON.parse(content);
     expect(project.properties.description).toBe('atomic test');
+  });
+
+  /** Let `content` land on disk right after the writer's own atomic write. */
+  function interleaveWrite(content: string): void {
+    const target = writer as unknown as { atomicWrite(p: string, c: string): Promise<void> };
+    const original = target.atomicWrite.bind(writer);
+    target.atomicWrite = async (p: string, c: string) => {
+      await original(p, c);
+      await writeFile(p, content, 'utf-8');
+    };
+  }
+
+  it('reports another write landing in between as a concurrent change, not corruption', async () => {
+    interleaveWrite(JSON.stringify({ name: 'MainSheet', events: [] }, null, '\t'));
+
+    const write = writer.writeEntityFile('eventSheets', 'MainSheet', { name: 'MainSheet', events: [{ eventType: 'comment', text: 'mine' }] });
+
+    await expect(write).rejects.toThrow(/changed by another write/);
+    await expect(write).rejects.not.toThrow(/corrupted/);
+  });
+
+  it('reports unparsable read-back content as possible corruption', async () => {
+    interleaveWrite('{ "name": "MainSheet", ');
+
+    await expect(writer.writeEntityFile('eventSheets', 'MainSheet', { name: 'MainSheet', events: [] }))
+      .rejects.toThrow(/may be corrupted/);
   });
 });

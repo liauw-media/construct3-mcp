@@ -2,7 +2,7 @@
 
 > A Model Context Protocol (MCP) server that enables AI assistants (Claude, Cursor, Antigravity, and any MCP-compatible tool) to safely read, analyze, and modify Construct 3 game engine projects.
 
-> **v1.8.0 (M1 release)** — Full primitive surface complete. See the [Roadmap](#roadmap) and [CHANGELOG](CHANGELOG.md) for details.
+> **v1.8.1** — Full M1 primitive surface. See the [Roadmap](#roadmap) and [CHANGELOG](CHANGELOG.md) for details.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
@@ -72,6 +72,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `construct3://objects/{name}` | Specific object type details |
 | `construct3://eventsheets/{name}` | Specific event sheet details |
 | `construct3://layouts/{name}` | Specific layout details |
+| `construct3://docs/index` | Index of documentation categories and popular topics |
 | `construct3://docs/manual/{topic}` | Official Construct 3 documentation |
 
 ### Query Tools (Read-Only)
@@ -82,9 +83,12 @@ node dist/index.js /path/to/your/project.c3proj
 | `list_eventsheets` | List all event sheets |
 | `list_layouts` | List all layouts |
 | `list_families` | List all object families |
+| `list_timelines` | List all timelines (root and subfolders) |
+| `list_addons` | List addons in `usedAddons`, optionally filtered by type |
 | `get_object_details` | Get detailed info about a specific object |
 | `get_eventsheet_details` | Get detailed info about an event sheet |
 | `get_layout_details` | Get detailed info about a layout |
+| `get_timeline_details` | Get a timeline's full JSON (tracks and settings) |
 | `search_objects` | Search objects by name pattern |
 | `get_project_summary` | Get comprehensive project summary |
 
@@ -98,28 +102,80 @@ node dist/index.js /path/to/your/project.c3proj
 | `find_orphaned_objects` | Find objects not referenced in any event sheet or layout |
 | `get_asset_usage` | Track sound, image, font, and video asset usage |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, orphaned and backup files. `valid` can be false on projects that load fine (known false positives in [API.md](docs/API.md#validate_project)) |
+| `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 
 ### Mutation Tools (Safe Write Operations)
+
+**Objects and families**
 
 | Tool | Description |
 |------|-------------|
 | `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.) |
-| `update_object_properties` | Add/remove instance variables and behaviors on an object |
+| `update_object_properties` | Add/remove instance variables and behaviors, change global status |
 | `delete_object` | Delete an object (with reference checking and optional force) |
+| `create_family` | Create a family for one plugin type with optional initial members |
+| `update_family` | Add/remove family members and shared instance variables |
+| `delete_family` | Delete a family |
+
+**Event sheets**
+
+| Tool | Description |
+|------|-------------|
 | `create_event_sheet` | Create a new event sheet with optional includes |
 | `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet |
 | `add_event_block` | Add a block event with conditions + actions (gameplay logic) |
-| `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
-| `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
 | `update_event_block` | Update an existing block: modify/add/remove actions and conditions |
+| `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index) |
+| `update_event_variable` | Rename a variable or change its type, initial value, static or constant flag |
+| `move_events_between_sheets` | Copy or move top-level events between sheets by SID (optionally into a group) |
+| `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
+| `remove_event_from_sheet` | Remove an include from a sheet by included sheet name |
+| `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
 | `fix_legacy_behavior_keys` | Rename legacy `"behavior-type"` keys (written by older versions) to `"behaviorType"` in all event sheets, checking each name against the object's behaviors (dry-run by default) |
+
+**Layouts, layers and instances**
+
+| Tool | Description |
+|------|-------------|
 | `create_layout` | Create a new layout with configurable layers |
-| `add_instance_to_layout` | Place an object instance on a layout layer with full property control |
-| `delete_layout` | Delete a layout (blocks startup layout, checks references) |
 | `update_layout` | Update layout event sheet binding and dimensions |
-| `update_project_metadata` | Update project name, version, author, or description |
+| `delete_layout` | Delete a layout (blocks startup layout, checks references) |
+| `add_layer` | Add a layer (position, visibility, transparency, parallax, blend mode) |
+| `update_layer` | Rename a layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation |
+| `delete_layer` | Delete a layer (never the last one; blocked while it holds instances unless forced) |
+| `add_instance_to_layout` | Place an object instance on a layout layer with full property control |
+| `update_instance` | Update a placed instance by UID (position, size, angle, color, visibility, tags, instance variables) |
+| `delete_instance_from_layout` | Remove a placed instance by UID (layers and non-world instances) |
+
+**Sprite animations**
+
+| Tool | Description |
+|------|-------------|
 | `add_animation_to_sprite` | Add a new animation to a Sprite object |
-| `update_animation_properties` | Update animation speed, looping, ping-pong on a Sprite |
+| `update_animation_properties` | Update animation speed, looping, ping-pong, repeat count |
+| `rename_animation` | Rename an animation |
+| `delete_animation` | Delete an animation (never the last one) |
+| `add_frame_to_animation` | Add a blank frame (placeholder PNG) at an index |
+| `update_frame` | Update a frame's duration, size or origin |
+| `delete_frame_from_animation` | Delete a frame by index (never the last one) |
+| `replace_sprite_image` | Replace a frame's image with base64 PNG data |
+
+**Timelines**
+
+| Tool | Description |
+|------|-------------|
+| `create_timeline` | Create a timeline (duration, loop, ping-pong, repeat count, start-on-layout) |
+| `update_timeline` | Update timeline settings or enable/disable it |
+| `delete_timeline` | Delete a timeline |
+
+**Project and addons**
+
+| Tool | Description |
+|------|-------------|
+| `update_project_metadata` | Update project name, version, author, or description |
+| `register_addon` | Add a plugin, behavior or effect to `usedAddons` |
+| `unregister_addon` | Remove an addon from `usedAddons` (built-ins need `force`) |
 
 ### Runtime Tools (Live Game Control)
 
@@ -131,6 +187,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `generate_bridge_eval_script` | Generate a curl/python script to execute a bridge command via browser remote debugging |
 | `export_for_preview` | Pre-flight checks (worker mode, bridge injection) for preview testing |
 | `clone_project` | Deep-copy the project with optional bridge injection |
+| `pack_project` | Pack the project folder into a `.c3p` file that Construct 3 can open (optionally injects the bridge first) |
 
 The runtime bridge enables external tools (Playwright, browser console, curl) to control a running C3 game. Once injected and the game is previewed, you can:
 
@@ -154,14 +211,22 @@ globalThis.__c3bridge.submit("getObjectState", { objectName: "Player" });
 
 ## Safety Model
 
-All mutation tools follow a strict safety protocol:
+Mutation tools follow a strict safety protocol (exceptions below):
 
 1. **Validation** — Names checked for reserved words, path traversal, format. Plugin/behavior IDs validated against `usedAddons`.
-2. **Backup** — Every file is backed up to `<filename>.bak` before modification.
+2. **Backup** — JSON files are backed up to `<filename>.bak` before modification.
 3. **ID Generation** — SIDs (15-digit random), UIDs (sequential), and imageSpriteIds (7-digit) are collision-checked against the entire project.
-4. **Write** — JSON is pre-validated (round-trip test, size limit) before writing.
-5. **Verify** — Files are read back and re-parsed after writing to confirm integrity.
+4. **Write** — JSON is pre-validated (round-trip test, size limit), then written to a temp file and renamed into place. Files keep their text style (see below).
+5. **Verify** — Files are read back, compared with what was written, and re-parsed to confirm integrity.
 6. **Cache Invalidation** — All reader caches and indexes are cleared so subsequent reads see fresh data.
+
+Steps 2, 4 and 5 apply in full to writes that go through the project writer: objects, families, event sheets, layouts, animations, project metadata and addon auto-registration. The other write paths do less:
+- `register_addon` and `unregister_addon` replace `project.c3proj` through a temp file, with no `.bak` backup and no read-back check.
+- The timeline tools back up the timeline file and `project.c3proj` and write through a temp file, but do not read the result back.
+- The runtime tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) write `project.c3proj` and the bridge script in place, with no backup or read-back check.
+- PNG images are written without a backup.
+
+**Close and reopen the project in Construct 3 before saving there.** The editor keeps an open project in memory, so saving from a session that was opened before these edits can overwrite them. Its Project Bar reload (F9) re-reads script files only, not event sheets, layouts or `project.c3proj`. Every response that reports a completed write carries this reminder as `editorNote`. Error responses do not, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
 Additional safeguards:
 - **Reference checking** — `delete_object`, `delete_event_sheet`, and `delete_layout` scan for references before deleting.
@@ -170,6 +235,7 @@ Additional safeguards:
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
 - **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs with correct naming conventions. Batch writes roll back on failure.
 - **Layout instance sync** — When behaviors or variables are added to an object type, all layout instances of that object are automatically updated with the required `behaviors` and `instanceVariables` dicts so C3 can load the project correctly.
+- **Text style preserved** — JSON is written the way Construct 3 saves it (tab indent). A file that already exists keeps its own line endings (e.g. CRLF from a git `core.autocrlf` checkout), exact trailing whitespace and BOM. A new file follows `project.c3proj`, then the first JSON file with line breaks in its target folder, then Construct 3's own style (LF, no trailing newline, no BOM). For files in Construct 3's tab layout, diffs show only the lines that changed; files indented another way (e.g. with spaces) are re-indented with tabs in full.
 
 ## Documentation
 
@@ -310,34 +376,40 @@ construct3-mcp/
 │   │   ├── project-writer.ts       # Safe write operations with backup
 │   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
 │   │   ├── templates.ts            # Object, event sheet, layout templates
+│   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
+│   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/
 │   │       ├── index-builder.ts    # Cross-reference index
-│   │       ├── eventsheet-flow.ts  # Event sheet flow analysis
-│   │       ├── function-map.ts     # Function mapping
-│   │       ├── object-deps.ts      # Object dependency analysis
-│   │       ├── orphan-finder.ts    # Orphaned object detection
+│   │       ├── event-flow.ts       # Event sheet flow and function map
+│   │       ├── object-deps.ts      # Object dependencies and orphaned objects
 │   │       ├── asset-usage.ts      # Asset usage tracking
-│   │       └── performance.ts      # Performance heuristics
+│   │       ├── performance.ts      # Performance heuristics
+│   │       ├── integrity.ts        # Project integrity checks (validate_project)
+│   │       └── group-settings.ts   # Event group settings (get_group_settings)
 │   ├── resources/
-│   │   ├── project.ts              # MCP resources
-│   │   └── docs.ts                 # Construct 3 documentation access
+│   │   ├── project.ts              # 6 project resources
+│   │   └── docs.ts                 # 2 Construct 3 documentation resources
 │   ├── runtime/
-│   │   └── bridge.ts               # Injectable C3 runtime bridge script generator
+│   │   ├── bridge.ts               # Injectable C3 runtime bridge script generator
+│   │   └── zip-writer.ts           # Zero-dep ZIP writer for .c3p packing
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
-│   │   ├── analysis.ts             # 6 analysis tools
-│   │   ├── shared.ts               # Shared validation, error helpers
-│   │   ├── event-tools.ts          # Event sheet mutation tools
+│   │   ├── analysis.ts             # 8 analysis tools
+│   │   ├── mutations.ts            # Registers the domain tool modules below
+│   │   ├── shared.ts               # Shared validation, result/error helpers, editor reload note
+│   │   ├── object-tools.ts         # Object and family tools (6)
+│   │   ├── event-tools.ts          # Event sheet tools (10)
 │   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators
-│   │   ├── layout-tools.ts         # Layout mutation tools
-│   │   ├── object-tools.ts         # Object mutation tools
-│   │   ├── animation-tools.ts      # Animation mutation tools
-│   │   ├── project-tools.ts        # Project metadata tools
-│   │   └── runtime-tools.ts        # 6 runtime control tools
+│   │   ├── layout-tools.ts         # Layout, layer and instance tools (9)
+│   │   ├── animation-tools.ts      # Sprite animation and frame tools (8)
+│   │   ├── timeline-tools.ts       # Timeline tools (5)
+│   │   ├── project-tools.ts        # Project metadata and addon tools (4)
+│   │   └── runtime-tools.ts        # 7 runtime control tools
 │   └── prompts/
 │       └── workflows.ts            # 6 workflow prompts
+├── test/                           # Vitest suites, mocks and fixtures
 ├── dist/                           # Compiled JavaScript (generated)
 ├── package.json
 ├── tsconfig.json
@@ -356,6 +428,9 @@ npm run build
 
 # Watch mode (auto-rebuild on changes)
 npm run dev
+
+# Run the test suite (vitest)
+npm test
 
 # Start the server
 npm start
@@ -429,16 +504,26 @@ We welcome contributions! Here's how to get started:
 - [x] Export-for-preview pre-flight checks (worker mode, bridge registration)
 - [x] Bridge eval script generation (curl/python for browser CDP)
 
+### M1 Primitive Surface ✅ (v1.8)
+- [x] Layers, instance updates and instance removal
+- [x] Families (create, update members and variables, delete)
+- [x] Animation frames (add, update, delete, replace image) and animation rename/delete
+- [x] Timelines (create, update, delete, list, details)
+- [x] Addon registry tools (`list_addons`, `register_addon`, `unregister_addon`)
+- [x] Project integrity validation and event group settings
+- [x] `.c3p` packing (`pack_project`) and an end-to-end acceptance test
+
 ### Phase 7: Advanced Features
-- [ ] Support for .c3p (zipped) projects
+- [ ] Opening .c3p (zipped) projects directly
 - [ ] Rename with reference updates (dry-run preview)
 - [ ] Bulk operations
 - [ ] Plugin development assistance
 
 ## Known Limitations
 
-- **Folder Format Only**: Works with .c3proj folder projects, not .c3p ZIP files
-- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned for Phase 5)
+- **Folder Format Only**: Works with .c3proj folder projects; `pack_project` can write a .c3p, but .c3p files cannot be opened
+- **Editor Holds the Project in Memory**: Close and reopen the project in Construct 3 after MCP edits and before saving there, or the editor can overwrite them
+- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned, see Phase 7)
 - **Runtime Bridge Requires Browser Automation**: The runtime tools inject a bridge script but need an external tool (Playwright, curl, or any CDP-capable tool) to drive the browser and interact with the running game
 - **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs)
 

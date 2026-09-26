@@ -8,14 +8,17 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 - `fix_legacy_behavior_keys` tool: renames legacy `"behavior-type"` keys to `"behaviorType"` in all event sheets, checking each value against the object's behaviors first (dry-run by default) (#16).
 - `validate_project` check `legacy-behavior-key`: error when a condition/action names its behavior only under the legacy key, warning for leftover keys (#16).
+- Every response that reports a completed project write carries an `editorNote`: the Construct 3 editor keeps the open project in memory, so close and reopen it there before saving, or it overwrites the change (#21).
 
 ### Changed
 
 - `update_event_block` and `update_event_block_action` normalize the legacy `"behavior-type"` key on the conditions/actions they edit and report it in `warnings`; `update_event_block` validates all additions before changing anything (#16).
+- Runtime tools that change the open project report `success: true`; README and `docs/API.md` now document every registered tool and the real source tree (#21).
 
 ### Fixed
 
 - Behavior conditions/actions are written with the `behaviorType` key that Construct 3 reads, instead of `behavior-type`, which made the editor refuse to open the project. `"behavior-type"` is still accepted as a deprecated input alias (#16).
+- Writes keep each file's line endings, trailing newline and BOM instead of rewriting CRLF files with LF (whole-file diffs on Windows checkouts); new files follow the style of `project.c3proj` (#21).
 
 ## [1.8.1] - 2026-04-16
 

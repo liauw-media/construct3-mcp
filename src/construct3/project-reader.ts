@@ -12,6 +12,7 @@ import type {
   Subfolder,
 } from './types.js';
 import { resolveProjectPath } from './path-utils.js';
+import { parseJsonText, stripBom } from './json-format.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -37,13 +38,14 @@ export class Construct3ProjectReader {
 
   /**
    * Read a file safely within project bounds, with size check.
+   * A leading BOM is dropped so the text can go straight to JSON.parse.
    */
   private async readProjectFile(filePath: string): Promise<string> {
     const stats = await stat(filePath);
     if (stats.size > MAX_FILE_SIZE) {
       throw new Error(`File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB exceeds 10MB limit)`);
     }
-    return readFile(filePath, 'utf-8');
+    return stripBom(await readFile(filePath, 'utf-8'));
   }
 
   /**
@@ -88,7 +90,7 @@ export class Construct3ProjectReader {
   async loadProject(): Promise<Construct3Project> {
     try {
       const projectFile = await readFile(this.projectPath, 'utf-8');
-      this.projectData = JSON.parse(projectFile) as Construct3Project;
+      this.projectData = parseJsonText(projectFile) as Construct3Project;
       this.buildPathMaps();
       return this.projectData;
     } catch (error) {
@@ -390,7 +392,7 @@ export class Construct3ProjectReader {
         return false;
       }
       const content = await readFile(projectPath, 'utf-8');
-      const data = JSON.parse(content);
+      const data = parseJsonText(content);
       return (
         typeof data === 'object' &&
         data !== null &&

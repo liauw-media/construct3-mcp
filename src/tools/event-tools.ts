@@ -1145,7 +1145,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sheets,
           ...(unreadableSheets.length > 0 ? { unreadableSheets } : {}),
           message: parts.join(' '),
-        });
+          // A run with nothing to rename writes no sheet: no editor reload note
+        }, { projectWritten: writtenSheets.length > 0 });
       } catch (error) {
         console.error('[fix_legacy_behavior_keys] failed:', error);
         const partial = writtenSheets.length > 0

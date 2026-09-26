@@ -8,6 +8,7 @@ Complete reference for all resources, tools, and prompts provided by the Constru
 - [Query Tools](#query-tools)
 - [Analysis Tools](#analysis-tools)
 - [Mutation Tools](#mutation-tools)
+- [Runtime Tools](#runtime-tools)
 - [Prompts](#prompts)
 - [Error Handling](#error-handling)
 - [Type Definitions](#type-definitions)
@@ -54,6 +55,10 @@ Full JSON for a specific event sheet.
 ### `construct3://layouts/{name}`
 
 Full JSON for a specific layout.
+
+### `construct3://docs/index`
+
+Index of documentation: the manual URL, topic categories (interface, project, plugins, behaviors, effects, scripting, publishing) and popular plugin topics.
 
 ### `construct3://docs/manual/{topic}`
 
@@ -119,11 +124,31 @@ Search objects by name pattern (case-insensitive substring match).
 
 Comprehensive project overview including metadata, statistics, addon counts, and entity lists. No parameters.
 
+### `list_timelines`
+
+List all timeline names (root and subfolders) with a count. No parameters.
+
+### `get_timeline_details`
+
+Full timeline JSON, including tracks and settings. Looks in `timelines/` and then `timelines/transitions/`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Timeline name |
+
+### `list_addons`
+
+List the addons registered in the project's `usedAddons`, with a count.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `type` | `"plugin"` \| `"behavior"` \| `"effect"` \| `"all"` | No | Filter by addon type (default: all) |
+
 ---
 
 ## Analysis Tools
 
-All analysis tools support an optional `detail` parameter: `"summary"`, `"normal"` (default), or `"full"`.
+The analysis tools with a `detail` parameter accept `"summary"` (under ~2K tokens), `"standard"` (default), or `"full"`.
 
 ### `get_eventsheet_flow`
 
@@ -175,11 +200,40 @@ Heuristic performance audit with categorized issues (info/warning/critical).
 | `scope` | string | No | Event sheet or layout name to scope analysis |
 | `detail` | string | No | Detail level |
 
+### `validate_project`
+
+Run integrity checks over the whole project. No parameters.
+
+Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `entity`, `message` and an optional `suggestion`. `valid` is true when there are no errors.
+
+- **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries
+- **Warnings:** duplicate SIDs and UIDs, broken object references, layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`
+- **Info:** JSON files not registered in `project.c3proj`, leftover `.bak` files, orphaned objects
+
+**Known false positives.** Projects that open fine in Construct 3 can still get these reports; the first one makes `valid` false:
+- Construct 3 itself writes an empty subfolder without a `name` into `timelines`, which is reported as a `subfolder-structure` error.
+- Built-in function actions use `"objectClass": "Functions"`, which is reported as a `broken-object-reference` warning.
+- The editor's `*.uistate.json` files, and lowercase file names written by older releases (e.g. `objectTypes/text.json` for `Text`), are reported as `orphaned-file` info with the suggestion to delete them. Do not delete them.
+
+### `get_group_settings`
+
+Event group settings across event sheets: title, sheet, `isActiveOnStart`, `disabled`, nesting depth, parent group, child group and event counts. Returns `groups`, `summary` (totals) and `bySheet`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `eventsheet` | string | No | Filter to a specific event sheet |
+| `activeOnly` | boolean | No | Only groups with `isActiveOnStart = true` |
+| `inactiveOnly` | boolean | No | Only groups with `isActiveOnStart = false` |
+
 ---
 
 ## Mutation Tools
 
-All mutation tools follow the safety pipeline: validate → backup → write → verify → invalidate caches. They return a `WriteResult` object on success.
+Mutation tools that write through the project writer (objects, families, event sheets, layouts, animations, project metadata, addon auto-registration) follow the safety pipeline: validate → backup → write → verify → invalidate caches. The other write paths do less: `register_addon` / `unregister_addon` use a temp file but make no `.bak` backup and no read-back check; the timeline tools back up and use a temp file but do not read back; the runtime tools write `project.c3proj` and the bridge script in place, with no backup or read-back check; PNG images are written without a backup. Mutation tools return a `WriteResult` object on success.
+
+**Text style.** An overwritten file keeps its line endings (LF or CRLF), exact trailing whitespace and BOM. A new file follows `project.c3proj`, then the first JSON file with line breaks in its target folder, then Construct 3's own style: tab-indented JSON with LF line endings, no trailing newline and no BOM. Only files already in that tab layout get line-level diffs; files indented another way are re-indented in full.
+
+**Editor reload note.** Every response that reports a completed write includes `editorNote`: *"If this project is open in Construct 3, close and reopen it there before saving, or the editor can overwrite these changes."* The editor keeps an open project in memory, so saving from a session opened before the edit can overwrite it; its Project Bar reload (F9) re-reads script files only. A `WriteResult` with `success: true` counts as a write unless it is a dry run. Tools whose success does not imply a write carry no note: the `already_registered` no-op of `register_addon`, `fix_legacy_behavior_keys` with `dryRun: false` when it found nothing to rename, `clone_project`, and `export_for_preview` / `pack_project` with `injectBridge: false`. Error responses never carry the note, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
 ### `create_object`
 
@@ -233,6 +287,39 @@ Delete an object type from the project.
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
 - Backs up the JSON file and removes from c3proj
+
+### `create_family`
+
+Create a new family. Families group object types of one plugin and share instance variables and behaviors across them.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Family name (unique) |
+| `pluginId` | string | Yes | Plugin ID all members share (e.g. `"Sprite"`, `"Text"`) |
+| `members` | string[] | No | Initial member object names (default: `[]`); unknown names produce a warning |
+| `subfolder` | string | No | Subfolder path (e.g. `"UI"`) |
+
+### `update_family`
+
+Add or remove family members and shared instance variables.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Family name |
+| `addMembers` | string[] | No | Object names to add |
+| `removeMembers` | string[] | No | Object names to remove |
+| `addVariables` | array | No | `[{ name, type: "number"\|"string"\|"boolean" }]` |
+| `removeVariables` | string[] | No | Variable names to remove |
+
+At least one parameter besides `name` must be provided. Duplicates and missing entries are skipped with a warning.
+
+### `delete_family`
+
+Delete a family (backs up the JSON file and removes it from c3proj). No reference check.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Family name to delete |
 
 ### `create_event_sheet`
 
@@ -376,6 +463,57 @@ At least one update parameter must be provided.
 - Duplicate removal indices are automatically deduplicated
 - Warns when all conditions are removed (block becomes unconditional)
 
+### `update_event_block_action`
+
+Replace the parameters of a single action. The block is found by SID anywhere in the sheet; the action by its 0-based index.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sheetName` | string | Yes | Target event sheet |
+| `blockSid` | number | Yes | SID of the `block` or `function-block` holding the action |
+| `actionIndex` | number | Yes | 0-based action index |
+| `parameters` | object | Yes | New parameter values; replaces the existing `parameters` entirely (max 100 keys, depth 6) |
+
+### `update_event_variable`
+
+Update an event variable declaration found by SID.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sheetName` | string | Yes | Event sheet containing the variable |
+| `sid` | number | Yes | SID of the `variable` event |
+| `newName` | string | No | New name (must be unused in the sheet) |
+| `newType` | `"number"` \| `"string"` \| `"boolean"` | No | New type |
+| `newInitialValue` | string | No | New initial value, as a string |
+| `isStatic` | boolean | No | Value persists between calls |
+| `isConstant` | boolean | No | Value cannot change at runtime |
+
+At least one change must be provided. References to the old name are not updated.
+
+### `move_events_between_sheets`
+
+Copy top-level events from one sheet to another by SID; with `deleteSource` they are moved. SIDs and nested children are kept as they are.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sourceSheet` | string | Yes | Sheet to copy/move from |
+| `targetSheet` | string | Yes | Sheet to copy/move into (must differ from the source) |
+| `sids` | number[] | Yes | SIDs of top-level events in the source sheet (min 1) |
+| `deleteSource` | boolean | No | Remove the events from the source after copying (default: false) |
+| `targetGroupPath` | string | No | Insert into a group by title path (e.g. `"Movement > Collision"`) |
+| `position` | `"start"` \| `"end"` | No | Insert position (default: end) |
+
+Returns `movedSids`, `movedCount` and `backupFiles` (target first, then source when modified).
+
+### `remove_event_from_sheet`
+
+Remove include events for a given sheet from an event sheet. Use `delete_event_from_sheet` with a SID for other event types.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sheetName` | string | Yes | Event sheet to modify |
+| `includeSheet` | string | Yes | Name of the included sheet to remove |
+
 ### `fix_legacy_behavior_keys`
 
 Repair event sheets written by construct3-mcp 1.8.1 and earlier, which stored the behavior of a condition/action under `"behavior-type"`. Construct 3 reads `"behaviorType"`; with only the legacy key it looks the ACE up on the object's base plugin and fails to open the project (e.g. `Error: missing action id 'flash'`, issue #16).
@@ -470,6 +608,84 @@ Update layout properties (event sheet binding, dimensions).
 
 At least one parameter must be provided.
 
+### `add_layer`
+
+Add a new layer to a layout.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `layoutName` | string | Yes | Layout to add the layer to |
+| `layerName` | string | Yes | New layer name (unique within the layout) |
+| `index` | number | No | Insert position (0 = bottom; default: on top) |
+| `isInitiallyVisible` | boolean | No | Starts visible (default: true) |
+| `isTransparent` | boolean | No | Transparent background (default: true) |
+| `parallaxX` | number | No | Horizontal parallax rate (default: 1) |
+| `parallaxY` | number | No | Vertical parallax rate (default: 1) |
+| `blendMode` | enum | No | `"normal"` (default), `"additive"`, `"xor"`, `"copy"`, `"destination-over"`, `"source-in"`, `"destination-in"`, `"source-out"`, `"destination-out"`, `"source-atop"`, `"destination-atop"` |
+
+### `update_layer`
+
+Update properties of an existing layer.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `layoutName` | string | Yes | Layout name |
+| `layerName` | string | Yes | Layer to update |
+| `newName` | string | No | Rename the layer (must be unused in the layout) |
+| `isInitiallyVisible` | boolean | No | Initial visibility |
+| `isInitiallyInteractive` | boolean | No | Initial interactivity |
+| `isTransparent` | boolean | No | Transparency |
+| `parallaxX` | number | No | Horizontal parallax rate |
+| `parallaxY` | number | No | Vertical parallax rate |
+| `blendMode` | enum | No | Same values as `add_layer` |
+| `scaleRate` | number | No | Scale rate (parallax zoom) |
+| `zElevation` | number | No | Z elevation for 3D layering |
+
+At least one property must be provided.
+
+### `delete_layer`
+
+Delete a layer from a layout.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `layoutName` | string | Yes | Layout name |
+| `layerName` | string | Yes | Layer to delete |
+| `force` | boolean | No | Delete even if the layer holds instances; they are lost (default: false) |
+
+**Behavior:**
+- The last layer of a layout cannot be deleted
+- A layer with instances returns `success: false`, `action: "delete_blocked"` unless `force=true`
+
+### `update_instance`
+
+Update a placed instance, found by UID on any layer or among the non-world instances (which ignore position, size, angle, Z elevation and color).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `layoutName` | string | Yes | Layout name |
+| `uid` | number | Yes | UID of the instance |
+| `x`, `y` | number | No | New position |
+| `width`, `height` | number | No | New size |
+| `angle` | number | No | New angle in radians |
+| `zElevation` | number | No | New Z elevation |
+| `color` | number[4] | No | RGBA tint `[r, g, b, a]`, values 0-1 |
+| `showing` | boolean | No | Initial visibility |
+| `locked` | boolean | No | Locked in the editor |
+| `tags` | string | No | Comma-separated tags |
+| `instanceVariables` | object | No | Values merged into the instance's existing `instanceVariables` |
+
+At least one property must be provided.
+
+### `delete_instance_from_layout`
+
+Remove a placed instance by UID from the layout's layers or its non-world instances.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `layoutName` | string | Yes | Layout name |
+| `uid` | number | Yes | UID of the instance to remove |
+
 ### `update_project_metadata`
 
 Update project-level metadata.
@@ -482,6 +698,30 @@ Update project-level metadata.
 | `description` | string | No | Project description |
 
 At least one parameter must be provided.
+
+### `register_addon`
+
+Add an addon to the project's `usedAddons`. Known Scirra plugins and behaviors are registered automatically by `create_object` and `update_object_properties`; effects are not, so register them with this tool.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `type` | `"plugin"` \| `"behavior"` \| `"effect"` | Yes | Addon type |
+| `id` | string | Yes | Addon ID (e.g. `"Sprite"`, `"Tween"`, `"hsladjust"`) |
+| `name` | string | Yes | Display name |
+| `author` | string | No | Author (default: `"Scirra"`) |
+| `bundled` | boolean | No | Value of the entry's `bundled` flag (default: false) |
+
+An addon that is already registered returns `action: "already_registered"` and nothing is written.
+
+### `unregister_addon`
+
+Remove an addon from `usedAddons`. Construct 3 errors on load if objects or behaviors still use it.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `type` | `"plugin"` \| `"behavior"` \| `"effect"` | Yes | Addon type |
+| `id` | string | Yes | Addon ID |
+| `force` | boolean | No | Required to remove a known Scirra built-in plugin or behavior (default: false) |
 
 ### `add_animation_to_sprite`
 
@@ -518,6 +758,171 @@ Update properties of an existing animation on a Sprite object.
 | `repeatCount` | number | No | New repeat count |
 
 At least one property must be provided.
+
+### `rename_animation`
+
+Rename an animation on a Sprite object.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objectName` | string | Yes | Sprite object name |
+| `animationName` | string | Yes | Current animation name |
+| `newName` | string | Yes | New animation name |
+
+### `delete_animation`
+
+Delete an animation from a Sprite object. The last animation cannot be deleted.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objectName` | string | Yes | Sprite object name |
+| `animationName` | string | Yes | Animation to delete |
+
+### `add_frame_to_animation`
+
+Add a blank frame (with a placeholder PNG in `images/`) to a Sprite animation.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objectName` | string | Yes | Sprite object name |
+| `animationName` | string | Yes | Animation name |
+| `index` | number | No | Insert at this frame index (default: append) |
+| `width` | number | No | Frame width in pixels (default: first frame's width) |
+| `height` | number | No | Frame height in pixels (default: first frame's height) |
+| `duration` | number | No | Frame duration (default: 1) |
+
+### `update_frame`
+
+Update per-frame properties of a Sprite animation frame.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objectName` | string | Yes | Sprite object name |
+| `animationName` | string | Yes | Animation name |
+| `frameIndex` | number | Yes | 0-based frame index |
+| `width` | number | No | New frame width in pixels |
+| `height` | number | No | New frame height in pixels |
+| `duration` | number | No | New frame duration |
+| `originX` | number | No | Horizontal origin 0-1 (0.5 = center) |
+| `originY` | number | No | Vertical origin 0-1 (0.5 = center) |
+
+### `delete_frame_from_animation`
+
+Delete a frame by index. The last frame of an animation cannot be deleted.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objectName` | string | Yes | Sprite object name |
+| `animationName` | string | Yes | Animation name |
+| `frameIndex` | number | Yes | 0-based frame index |
+
+### `replace_sprite_image`
+
+Replace a frame's image with real PNG data. The PNG is written to the frame's file in `images/`; the object JSON is backed up and rewritten.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `objectName` | string | Yes | Sprite object name |
+| `animationName` | string | Yes | Animation name |
+| `frameIndex` | number | Yes | 0-based frame index |
+| `pngBase64` | string | Yes | Base64-encoded PNG (checked for the PNG signature) |
+| `width` | number | No | Image width in pixels; updates the frame metadata |
+| `height` | number | No | Image height in pixels; updates the frame metadata |
+
+### `create_timeline`
+
+Create a timeline in `timelines/` and register it in `project.c3proj`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Timeline name (unique) |
+| `totalTime` | number | No | Total duration in seconds (default: 5) |
+| `loop` | boolean | No | Loop the timeline (default: false) |
+| `pingPong` | boolean | No | Ping-pong playback (default: false) |
+| `repeatCount` | number | No | Repeat count when not looping (default: 1) |
+| `startOnLayout` | string | No | Layout to auto-start on (default: `""` = none) |
+| `ignoreSystemTimescale` | boolean | No | Ignore the system timescale (default: true) |
+| `subfolder` | string | No | Subfolder within `timelines/` (e.g. `"transitions"`) |
+
+### `update_timeline`
+
+Update the settings of an existing timeline.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Timeline name |
+| `totalTime` | number | No | New total duration in seconds |
+| `loop` | boolean | No | Loop setting |
+| `pingPong` | boolean | No | Ping-pong playback |
+| `repeatCount` | number | No | Repeat count |
+| `startOnLayout` | string | No | Auto-start layout (`""` = none) |
+| `ignoreSystemTimescale` | boolean | No | Ignore the system timescale |
+| `enabled` | boolean | No | Enable or disable the timeline |
+
+At least one setting must be provided.
+
+### `delete_timeline`
+
+Delete a timeline file (backed up first) and remove it from `project.c3proj`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Timeline name to delete |
+
+---
+
+## Runtime Tools
+
+These tools let external automation (Playwright, a browser console, anything that speaks the Chrome DevTools Protocol) drive a running preview through an injected bridge script, `scripts/c3-runtime-bridge.js`, exposed as `globalThis.__c3bridge`.
+
+### `inject_runtime_bridge`
+
+Write the bridge script and register it in `project.c3proj` (`rootFileFolders.script.items`). The script starts through `runOnStartup()` and processes commands each tick. No parameters.
+
+### `remove_runtime_bridge`
+
+Delete the bridge script and remove its registration from `project.c3proj`. No parameters.
+
+### `get_bridge_commands`
+
+List the commands the bridge understands (`ping`, `callFunction`, `getGlobalVar`, `setGlobalVar`, `getObjectState`, `getAllInstances`, `getLayout`, `goToLayout`, `evaluateExpression`, `listObjects`, `listGlobalVars`) with their arguments. No parameters.
+
+### `generate_bridge_eval_script`
+
+Generate a Python script and manual console steps that submit a bridge command and poll for its result.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | Yes | Bridge command (e.g. `"callFunction"`, `"getGlobalVar"`) |
+| `args` | object | No | Command arguments (max 100 keys, depth 6) |
+
+### `export_for_preview`
+
+Pre-flight check for preview testing: reports the project's worker mode (`useWorker` should be `"dom"` so the bridge can reach `globalThis`) and, by default, injects the bridge.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `injectBridge` | boolean | No | Inject the runtime bridge (default: true) |
+
+### `clone_project`
+
+Copy the project folder to a new directory, optionally with the bridge injected into the copy. The original project is not modified.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `targetDir` | string | Yes | Target directory for the copy |
+| `includeBridge` | boolean | No | Inject the bridge into the copy (default: true) |
+
+### `pack_project`
+
+Pack the project folder into a `.c3p` file (ZIP archive) that the Construct 3 editor can open. Skips `.git`, `node_modules`, `.bak` files, `.DS_Store` and `Thumbs.db`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `outputPath` | string | Yes | Output path for the `.c3p` file |
+| `injectBridge` | boolean | No | Inject the bridge into the project before packing (default: true) |
+
+Returns `success`, `packed`, `outputPath`, `fileCount`, `sizeBytes`, `sizeMB` and `bridgeInjected`.
 
 ---
 
@@ -576,14 +981,17 @@ Mutation tools return this structure on success:
 interface WriteResult {
   success: boolean;
   entity: string;        // name of the entity
-  category: string;      // "object" | "eventsheet" | "layout" | "project"
-  action: string;        // "created" | "updated" | "deleted"
+  category: string;      // "object" | "family" | "eventsheet" | "layout" | "timeline" | "project" | "addon"
+  action: string;        // "created" | "updated" | "deleted" (also "delete_blocked", "would_delete", "already_registered")
   generatedSid?: number;
   generatedUid?: number;
   warnings?: string[];   // e.g., "Auto-registered plugin..."
   backupFile?: string;   // path to .bak file
+  editorNote?: string;   // not in the TypeScript type: toolResult adds it to every completed write
 }
 ```
+
+Some tools add their own fields (for example `deletedSid`, `movedSids`, `backupFiles`). Responses with `success: false` (`action: "delete_blocked"`), dry runs and no-ops carry no `editorNote`.
 
 ### Common Errors
 
@@ -636,4 +1044,4 @@ interface ReferenceCheckResult {
 
 ---
 
-**Last Updated**: 2026-02-21
+**Last Updated**: 2026-09-25
