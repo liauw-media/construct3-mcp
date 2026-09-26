@@ -10,6 +10,10 @@ import { join } from 'path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { Construct3ProjectWriter } from '../../src/construct3/project-writer.js';
 import { IdGenerator } from '../../src/construct3/id-generator.js';
+import { validateProjectIntegrity } from '../../src/construct3/analyzers/integrity.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+import { registerEventTools } from '../../src/tools/event-tools.js';
+import { MockServer } from '../mocks/mock-server.js';
 
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 
@@ -660,5 +664,98 @@ describe('Behavior workflow (integration)', () => {
     // Verify PNG still exists
     const pngPath = join(tmpDir, 'images', 'hero-Animation 1-000.png');
     await expect(stat(pngPath)).resolves.toBeDefined();
+  });
+});
+
+// ─── Legacy behavior-type Repair (issue #16) ────────────────
+
+describe('Legacy behavior-type repair (integration)', () => {
+  let tmpDir: string;
+  let reader: Construct3ProjectReader;
+  let server: MockServer;
+
+  beforeEach(async () => {
+    resetProjectIndex();
+    tmpDir = await createTempProject();
+    reader = new Construct3ProjectReader(join(tmpDir, 'project.c3proj'));
+    await reader.loadProject();
+    const idGen = new IdGenerator();
+    await idGen.initialize(reader);
+    const writer = new Construct3ProjectWriter(reader, idGen);
+    server = new MockServer();
+    registerEventTools({ server, reader, writer, idGen } as any);
+  });
+
+  afterEach(async () => {
+    resetProjectIndex();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('validate_project flags the legacy key and fix_legacy_behavior_keys repairs it on disk', async () => {
+    // Give the Sprite a Platform behavior (shape as in real C3 object types)
+    const spritePath = join(tmpDir, 'objectTypes', 'Sprite.json');
+    const sprite = JSON.parse(await readFile(spritePath, 'utf-8'));
+    sprite.behaviorTypes = [{ behaviorId: 'Platform', name: 'Platform', sid: 500000000000001 }];
+    await writeFile(spritePath, JSON.stringify(sprite, null, '\t'), 'utf-8');
+
+    // Simulate a sheet written by construct3-mcp <= 1.8.1
+    const sheetPath = join(tmpDir, 'eventSheets', 'MainSheet.json');
+    const sheet = JSON.parse(await readFile(sheetPath, 'utf-8'));
+    sheet.events[0].actions.push({
+      id: 'simulate-control', objectClass: 'Sprite', sid: 400000000000010,
+      'behavior-type': 'Platform', parameters: { control: 'jump' },
+    });
+    await writeFile(sheetPath, JSON.stringify(sheet, null, '\t'), 'utf-8');
+    reader.invalidateCaches();
+
+    const before = await validateProjectIntegrity(reader);
+    expect(before.errors.some(e => e.check === 'legacy-behavior-key')).toBe(true);
+
+    // Dry run leaves the file alone
+    const dry = JSON.parse((await server.callTool('fix_legacy_behavior_keys', {})).content[0].text);
+    expect(dry.totalRenamed).toBe(1);
+    expect(await readFile(sheetPath, 'utf-8')).toContain('"behavior-type"');
+
+    const fixed = JSON.parse((await server.callTool('fix_legacy_behavior_keys', { dryRun: false })).content[0].text);
+    expect(fixed.totalRenamed).toBe(1);
+    expect(fixed.sheets[0].backupFile).toBe(sheetPath + '.bak');
+
+    const onDisk = await readFile(sheetPath, 'utf-8');
+    expect(onDisk).not.toContain('"behavior-type"');
+    const action = JSON.parse(onDisk).events[0].actions[1];
+    expect(action).toEqual({
+      id: 'simulate-control', objectClass: 'Sprite', sid: 400000000000010,
+      behaviorType: 'Platform', parameters: { control: 'jump' },
+    });
+    // The backup keeps the pre-fix content
+    expect(await readFile(sheetPath + '.bak', 'utf-8')).toContain('"behavior-type"');
+
+    // Caches were invalidated by the writer: validation now sees the fixed sheet
+    const after = await validateProjectIntegrity(reader);
+    expect(after.errors.some(e => e.check === 'legacy-behavior-key')).toBe(false);
+  });
+
+  it('leaves a legacy value that names no behavior on disk and keeps reporting it', async () => {
+    // Sprite has no behaviors in the fixture, so "Platform" cannot resolve
+    const sheetPath = join(tmpDir, 'eventSheets', 'MainSheet.json');
+    const sheet = JSON.parse(await readFile(sheetPath, 'utf-8'));
+    sheet.events[0].actions.push({
+      id: 'simulate-control', objectClass: 'Sprite', sid: 400000000000011,
+      'behavior-type': 'Platform', parameters: { control: 'jump' },
+    });
+    await writeFile(sheetPath, JSON.stringify(sheet, null, '\t'), 'utf-8');
+    reader.invalidateCaches();
+
+    const fixed = JSON.parse((await server.callTool('fix_legacy_behavior_keys', { dryRun: false })).content[0].text);
+    expect(fixed.totalRenamed).toBe(0);
+    expect(fixed.totalUnresolved).toBe(1);
+    expect(fixed.sheets[0].unresolved[0].reason).toContain('available: none');
+    expect(await readFile(sheetPath, 'utf-8')).toContain('"behavior-type"');
+    await expect(stat(sheetPath + '.bak')).rejects.toThrow();
+
+    const after = await validateProjectIntegrity(reader);
+    const err = after.errors.find(e => e.check === 'legacy-behavior-key');
+    expect(err?.message).toContain('cannot be renamed automatically');
+    expect(err?.suggestion).not.toContain('fix_legacy_behavior_keys');
   });
 });

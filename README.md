@@ -112,6 +112,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
 | `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
 | `update_event_block` | Update an existing block: modify/add/remove actions and conditions |
+| `fix_legacy_behavior_keys` | Rename legacy `"behavior-type"` keys (written by older versions) to `"behaviorType"` in all event sheets, checking each name against the object's behaviors (dry-run by default) |
 | `create_layout` | Create a new layout with configurable layers |
 | `add_instance_to_layout` | Place an object instance on a layout layer with full property control |
 | `delete_layout` | Delete a layout (blocks startup layout, checks references) |

@@ -14,11 +14,19 @@ import {
   validateObjectClasses,
   collectObjectRefs,
   buildBlockEvent,
+  buildCondition,
+  buildStandardAction,
   findEventBySid,
   countDescendants,
   summarizeEvents,
+  loadBehaviorLookup,
+  normalizeLegacyBehaviorKeys,
 } from './event-helpers.js';
+import type { ObjectRef } from './event-helpers.js';
 import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/index-builder.js';
+import { scanLegacyBehaviorKeys } from '../construct3/analyzers/legacy-behavior-keys.js';
+import { checkBehaviorName } from '../construct3/analyzers/behavior-refs.js';
+import type { LegacyBehaviorKeyHit, LegacyBehaviorKeyConflict } from '../construct3/analyzers/legacy-behavior-keys.js';
 import {
   createEmptySheet,
   createVariableEvent,
@@ -27,6 +35,9 @@ import {
   createIncludeEvent,
   createCommentEvent,
 } from '../construct3/templates.js';
+
+/** Per-sheet cap on change details returned by fix_legacy_behavior_keys. */
+const MAX_REPORTED_CHANGES = 100;
 
 export function registerEventTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_event_sheet ───────────────────────────────────
@@ -222,7 +233,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         // Collect all objectClass references from entire tree (parent + descendants)
-        const allRefs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
+        const allRefs: ObjectRef[] = [];
         collectObjectRefs(
           args.conditions,
           args.actions as Array<Record<string, unknown>>,
@@ -640,6 +651,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const action = actions[args.actionIndex];
         action.parameters = args.parameters;
+        // Don't re-emit a legacy "behavior-type" key on the edited action (issue #16)
+        const warnings = await normalizeLegacyBehaviorKeys(reader, [{ ace: action, kind: 'action' }]);
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
@@ -653,6 +666,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           updatedBlockSid: args.blockSid,
           updatedActionIndex: args.actionIndex,
           actionId: action.id,
+          ...(warnings.length > 0 ? { warnings } : {}),
           backupFile: backupPath,
         });
       } catch (error) {
@@ -854,6 +868,25 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const conditions = event.conditions as Record<string, unknown>[];
         const actions = event.actions as Record<string, unknown>[];
         const warnings: string[] = [];
+        // Existing conditions/actions edited in place (checked for the legacy behavior key before writing)
+        const touched: Array<{ ace: Record<string, unknown>; kind: 'condition' | 'action' }> = [];
+
+        // ── Validate objectClasses of all additions up front, in one pass ──
+        // (normalizes the deprecated behavior-type alias; throws on conflicting keys before anything changes)
+        const addRefs: ObjectRef[] = [];
+        collectObjectRefs(
+          args.addConditions ?? [],
+          (args.addActions ?? []) as Array<Record<string, unknown>>,
+          [],
+          addRefs,
+        );
+        if (addRefs.length > 0) {
+          const { errors, warnings: valWarnings } = await validateObjectClasses(reader, addRefs);
+          if (errors.length > 0) {
+            return toolError(`Object class validation failed:\n${errors.join('\n')}`);
+          }
+          warnings.push(...valWarnings);
+        }
 
         // ── Apply block-level disabled toggle ──
         if (args.disabled !== undefined) {
@@ -875,6 +908,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               return toolError(`Condition index ${upd.index} is out of range (block has ${conditions.length} condition(s), indices 0-${conditions.length - 1}).`);
             }
             const cond = conditions[upd.index];
+            touched.push({ ace: cond, kind: 'condition' });
             if (upd.parameters) {
               cond.parameters = { ...(cond.parameters as Record<string, unknown> || {}), ...upd.parameters };
             }
@@ -895,6 +929,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               return toolError(`Action index ${upd.index} is out of range (block has ${actions.length} action(s), indices 0-${actions.length - 1}).`);
             }
             const act = actions[upd.index];
+            touched.push({ ace: act, kind: 'action' });
             if (upd.parameters) {
               act.parameters = { ...(act.parameters as Record<string, unknown> || {}), ...upd.parameters };
             }
@@ -930,51 +965,16 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
         }
 
-        // ── Add new conditions ──
+        // ── Add new conditions (validated up front) ──
         if (args.addConditions && args.addConditions.length > 0) {
-          // Validate objectClasses
-          const refs = args.addConditions.map(c => ({
-            objectClass: c.objectClass,
-            'behavior-type': c['behavior-type'],
-          }));
-          const { errors, warnings: valWarnings } = await validateObjectClasses(reader, refs);
-          if (errors.length > 0) {
-            return toolError(`Object class validation failed:\n${errors.join('\n')}`);
-          }
-          warnings.push(...valWarnings);
-
           for (const c of args.addConditions) {
             const condSid = await idGen.generateSid(reader);
-            const built: Record<string, unknown> = {
-              id: c.id,
-              objectClass: c.objectClass,
-              sid: condSid,
-            };
-            if (c['behavior-type']) built['behavior-type'] = c['behavior-type'];
-            if (c.parameters) built.parameters = c.parameters;
-            if (c.isInverted) built.isInverted = true;
-            if (c.isOr) built.isOr = true;
-            conditions.push(built);
+            conditions.push(buildCondition(c, condSid));
           }
         }
 
-        // ── Add new actions ──
+        // ── Add new actions (validated up front) ──
         if (args.addActions && args.addActions.length > 0) {
-          // Validate objectClasses for standard actions
-          const refs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
-          for (const a of args.addActions) {
-            if ('objectClass' in a && typeof a.objectClass === 'string') {
-              refs.push({ objectClass: a.objectClass, 'behavior-type': a['behavior-type'] });
-            }
-          }
-          if (refs.length > 0) {
-            const { errors, warnings: valWarnings } = await validateObjectClasses(reader, refs);
-            if (errors.length > 0) {
-              return toolError(`Object class validation failed:\n${errors.join('\n')}`);
-            }
-            warnings.push(...valWarnings);
-          }
-
           for (const a of args.addActions) {
             if ('type' in a && a.type === 'script') {
               const scriptAct: Record<string, unknown> = {
@@ -985,16 +985,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               actions.push(scriptAct);
             } else if ('id' in a) {
               const actSid = await idGen.generateSid(reader);
-              const built: Record<string, unknown> = {
-                id: a.id,
-                objectClass: a.objectClass,
-                sid: actSid,
-              };
-              if (a['behavior-type']) built['behavior-type'] = a['behavior-type'];
-              if (a.parameters) built.parameters = a.parameters;
-              if (a.callFunction) built.callFunction = a.callFunction;
-              if (a.disabled) built.disabled = true;
-              actions.push(built);
+              actions.push(buildStandardAction(a, actSid));
             }
           }
         }
@@ -1003,6 +994,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (conditions.length === 0 && !event.isElse) {
           warnings.push('All conditions were removed — block will match unconditionally (always true).');
         }
+
+        // Edited conditions/actions written by older versions may still carry
+        // "behavior-type" (issue #16): normalize them instead of re-emitting it.
+        warnings.push(...await normalizeLegacyBehaviorKeys(
+          reader,
+          touched.filter(t => (t.kind === 'condition' ? conditions : actions).includes(t.ace)),
+        ));
 
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
@@ -1021,6 +1019,139 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       } catch (error) {
         console.error('[update_event_block] failed:', error);
         return toolError(`Error updating event block: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // ─── fix_legacy_behavior_keys ───────────────────────────────
+
+  server.tool(
+    'fix_legacy_behavior_keys',
+    'Repair event sheets written by older versions of this server: rename the legacy "behavior-type" key on conditions/actions to "behaviorType", the key Construct 3 reads. Without it C3 looks behavior ACEs up on the base plugin and fails to open the project ("missing action id"). Only names that match a behavior on the object or its families are renamed; the rest is reported. Dry run by default.',
+    {
+      dryRun: z.boolean().optional().default(true).describe('If true (default), only report what would change. Set false to rewrite the affected sheets (each is backed up first).'),
+    },
+    async (args) => {
+      const writtenSheets: string[] = [];
+      try {
+        const sheetNames = await reader.listEventSheets();
+        const unreadableSheets: string[] = [];
+        const loaded: Array<{ sheetName: string; sheet: EventSheet }> = [];
+        for (const sheetName of sheetNames) {
+          try {
+            const sheet = await reader.readEventSheet(sheetName);
+            if (Array.isArray(sheet.events)) loaded.push({ sheetName, sheet });
+          } catch {
+            unreadableSheets.push(sheetName);
+          }
+        }
+
+        // Load only the object types the legacy keys point at, then check each
+        // name before renaming it: renaming turns the key into an active
+        // behavior lookup, so a name C3 cannot resolve is reported instead.
+        const referenced = new Set<string>();
+        for (const { sheet } of loaded) {
+          for (const hit of scanLegacyBehaviorKeys(sheet.events).fixable) {
+            if (hit.objectClass) referenced.add(hit.objectClass);
+          }
+        }
+        const lookup = await loadBehaviorLookup(reader, referenced);
+        const resolve = (objectClass: string, behaviorName: string) => checkBehaviorName(objectClass, behaviorName, lookup);
+
+        const sheets: Array<{
+          sheetName: string;
+          renamed: number;
+          changes: LegacyBehaviorKeyHit[];
+          changesTruncated?: boolean;
+          unresolved?: LegacyBehaviorKeyConflict[];
+          conflicts?: LegacyBehaviorKeyConflict[];
+          scanTruncated?: boolean;
+          backupFile?: string;
+        }> = [];
+        let totalRenamed = 0;
+        let totalUnverified = 0;
+        let totalUnresolved = 0;
+        let totalConflicts = 0;
+        const truncatedSheets: string[] = [];
+
+        for (const { sheetName, sheet } of loaded) {
+          const scan = scanLegacyBehaviorKeys(sheet.events, { apply: !args.dryRun, resolve });
+          if (scan.truncated) truncatedSheets.push(sheetName);
+          if (scan.fixable.length === 0 && scan.unresolved.length === 0 && scan.conflicts.length === 0) continue;
+
+          const entry: (typeof sheets)[number] = {
+            sheetName,
+            renamed: scan.fixable.length,
+            changes: scan.fixable.slice(0, MAX_REPORTED_CHANGES),
+          };
+          if (scan.fixable.length > MAX_REPORTED_CHANGES) entry.changesTruncated = true;
+          if (scan.unresolved.length > 0) entry.unresolved = scan.unresolved;
+          if (scan.conflicts.length > 0) entry.conflicts = scan.conflicts;
+          if (scan.truncated) entry.scanTruncated = true;
+
+          if (!args.dryRun && scan.fixable.length > 0) {
+            const subfolder = writer.getSubfolderForEntity('eventSheets', sheetName);
+            entry.backupFile = await writer.writeEntityFile('eventSheets', sheetName, sheet, subfolder);
+            writtenSheets.push(sheetName);
+          }
+
+          totalRenamed += scan.fixable.length;
+          totalUnverified += scan.fixable.filter(h => h.warning).length;
+          totalUnresolved += scan.unresolved.length;
+          totalConflicts += scan.conflicts.length;
+          sheets.push(entry);
+        }
+
+        if (writtenSheets.length > 0) resetProjectIndex();
+
+        const parts: string[] = [];
+        if (totalRenamed > 0) {
+          const verb = args.dryRun ? 'would be renamed' : 'renamed';
+          parts.push(`${totalRenamed} condition(s)/action(s) in ${sheets.filter(s => s.renamed > 0).length} sheet(s) ${verb} from "behavior-type" to "behaviorType".`);
+          if (totalUnverified > 0) {
+            parts.push(`${totalUnverified} of them could not be checked against the object's behaviors (see the warning on each change).`);
+          }
+        }
+        if (totalUnresolved > 0) {
+          parts.push(`${totalUnresolved} condition(s)/action(s) were left untouched because their "behavior-type" value matches no behavior on the object or its families (see unresolved) — set "behaviorType" to the behavior's name by hand.`);
+        }
+        if (totalConflicts > 0) {
+          parts.push(`${totalConflicts} condition(s)/action(s) were left untouched because their keys conflict or hold no behavior name (see conflicts) — resolve them by hand.`);
+        }
+        if (parts.length === 0) {
+          parts.push(unreadableSheets.length > 0
+            ? `No legacy "behavior-type" keys found in the ${loaded.length} readable sheet(s).`
+            : 'No legacy "behavior-type" keys found.');
+        }
+        if (unreadableSheets.length > 0) {
+          parts.push(`${unreadableSheets.length} sheet(s) could not be read and were not checked: ${unreadableSheets.join(', ')}.`);
+        }
+        if (truncatedSheets.length > 0) {
+          parts.push(`The scan stopped at its size limit in ${truncatedSheets.join(', ')}; some conditions/actions there were not checked.`);
+        }
+        if (args.dryRun && totalRenamed > 0) {
+          parts.push('Run again with dryRun: false to apply.');
+        }
+
+        return toolResult({
+          success: true,
+          dryRun: args.dryRun,
+          category: 'eventsheet',
+          action: args.dryRun ? 'would_fix' : 'fixed',
+          sheetsScanned: loaded.length,
+          totalRenamed,
+          totalUnresolved,
+          totalConflicts,
+          sheets,
+          ...(unreadableSheets.length > 0 ? { unreadableSheets } : {}),
+          message: parts.join(' '),
+        });
+      } catch (error) {
+        console.error('[fix_legacy_behavior_keys] failed:', error);
+        const partial = writtenSheets.length > 0
+          ? ` Sheets already rewritten before the failure: ${writtenSheets.join(', ')}.`
+          : '';
+        return toolError(`Error fixing legacy behavior keys: ${error instanceof Error ? error.message : String(error)}${partial}`);
       }
     }
   );

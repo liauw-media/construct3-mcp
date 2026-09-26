@@ -269,8 +269,8 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
-| `conditions` | array | No* | Conditions. Each: `{ id, objectClass, "behavior-type"?, parameters?, isInverted?, isOr? }`. *Required (min 1) unless `isElse` is true. |
-| `actions` | array | No | Actions (default: `[]`). Standard: `{ id, objectClass, "behavior-type"?, parameters?, callFunction?, disabled? }`. Script: `{ type: "script", script }` |
+| `conditions` | array | No* | Conditions. Each: `{ id, objectClass, behaviorType?, parameters?, isInverted?, isOr? }`. *Required (min 1) unless `isElse` is true. |
+| `actions` | array | No | Actions (default: `[]`). Standard: `{ id, objectClass, behaviorType?, parameters?, callFunction?, disabled? }`. Script: `{ type: "script", script }` |
 | `groupPath` | string | No | Insert inside group by title path (e.g., `"Movement > Collision"`) |
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 | `disabled` | boolean | No | Create the block disabled (default: false) |
@@ -278,10 +278,13 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 | `children` | array | No | Sub-events nested inside this block (recursive). Each child has the same shape: `{ conditions?, actions?, disabled?, isElse?, children? }` |
 
 **Condition fields:**
+- `behaviorType` — For behavior conditions/actions: the behavior's *name* as defined on the object type or one of its families (e.g. `"Platform"`, `"8Direction"` — not the behaviorId `"EightDir"`). Omit for plugin and System ACEs. Written to the event sheet as `"behaviorType"`, the key Construct 3 reads.
+- `"behavior-type"` — **Deprecated** alias for `behaviorType`, still accepted and written as `behaviorType` (with a warning). Passing both with different values is an error.
 - `isOr` — OR-combine with the previous condition (default is AND). The first condition's `isOr` is ignored by C3.
 - `isInverted` — Negate the condition.
 
 **Action fields:**
+- `behaviorType` / deprecated `"behavior-type"` — same as for conditions.
 - `disabled` — Disable an individual action (the action exists but won't run).
 
 **Sub-events (`children`):**
@@ -291,7 +294,7 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 
 **Validation:**
 - `objectClass` is hard-validated against project objects, families, and `"System"` — across the entire tree (parent + all descendants)
-- `behavior-type` is soft-validated (warning only, since behaviors may come from families)
+- `behaviorType` is soft-validated (warning only, never blocks the write): it must name a behavior on the object type or on a family the object belongs to (for a family `objectClass`: on the family). The warning lists the available behavior names and hints when a behaviorId was passed instead of the name. When the object type or a family file cannot be read, the warning says the behavior could not be verified instead.
 - `id` (ACE identifier) is **not** validated — Claude knows the hundreds of C3 ACE IDs
 - Script actions (`type: "script"`) skip objectClass validation and SID generation
 
@@ -299,7 +302,7 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 1. Reads the target event sheet
 2. Validates all `objectClass` references across the entire event tree
 3. Recursively generates SIDs for each block, condition, and standard action
-4. Builds condition/action objects with optional fields (`behavior-type`, `parameters`, `isInverted`, `isOr`, `callFunction`, `disabled`)
+4. Builds condition/action objects with optional fields (`behaviorType`, `parameters`, `isInverted`, `isOr`, `callFunction`, `disabled`)
 5. Recursively builds child sub-events with `isElse` support
 6. If `groupPath`: resolves nested group path (error with available groups on miss)
 7. Inserts at position (`start`/`end`)
@@ -368,9 +371,31 @@ At least one update parameter must be provided.
 **Notes:**
 - Only works on `block` or `function-block` events (not groups, variables, etc.)
 - New actions/conditions get fresh SIDs via the ID generator
-- `objectClass` is validated on new conditions/actions
+- `objectClass` is validated on new conditions/actions; `behaviorType` is soft-validated and the deprecated `"behavior-type"` alias is normalized, as in `add_event_block`. All additions are validated in one pass before anything changes, so each warning appears once and a conflicting key aborts the call without writing.
+- Existing conditions/actions edited through `updateConditions`/`updateActions` that still carry the legacy `"behavior-type"` key are normalized to `"behaviorType"` with the same rules as `fix_legacy_behavior_keys`, and each one is reported in `warnings`. `update_event_block_action` does the same for the action it edits.
 - Duplicate removal indices are automatically deduplicated
 - Warns when all conditions are removed (block becomes unconditional)
+
+### `fix_legacy_behavior_keys`
+
+Repair event sheets written by construct3-mcp 1.8.1 and earlier, which stored the behavior of a condition/action under `"behavior-type"`. Construct 3 reads `"behaviorType"`; with only the legacy key it looks the ACE up on the object's base plugin and fails to open the project (e.g. `Error: missing action id 'flash'`, issue #16).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `dryRun` | boolean | No | Only report what would change (default: **true**). Set `false` to rewrite the affected sheets. |
+
+**Behavior:**
+- Scans every event sheet, including groups, sub-events and function blocks.
+- Renames `"behavior-type"` to `"behaviorType"` in place (key order is kept); drops the legacy key when an identical `"behaviorType"` already exists.
+- Before renaming, checks that the value names a behavior on the object type or one of its families (as `add_event_block` does). Values that match no behavior — e.g. a behaviorId such as `"EightDir"` instead of the name `"8Direction"` — are reported under `unresolved` with a hint and left untouched, since renaming them would not make the project loadable. Values that cannot be checked (unreadable object type or family file) are renamed and carry a `warning`.
+- Conditions/actions where both keys disagree, or the legacy value is not a non-empty string, are reported under `conflicts` and left untouched.
+- Only sheets with changes are written, each through the normal pipeline (backup → validate → write → verify → invalidate caches).
+- Returns `totalRenamed`, `totalUnresolved`, `totalConflicts` and per-sheet `changes` (SID, ACE id, objectClass; capped at 100 per sheet), `unresolved`, `conflicts` plus `backupFile` when written. Sheets that could not be read are listed in `unreadableSheets` and named in the message.
+- If a write fails part-way, the error names the sheets already rewritten.
+
+`validate_project` reports affected sheets with check `legacy-behavior-key`:
+- **error** when a condition/action names its behavior only under `"behavior-type"` (the load failure above). The message calls out values that match no behavior, and the suggestion only points to this tool for the ones it can rename.
+- **warning** when the legacy key is a leftover next to a valid `"behaviorType"` or holds no behavior name — Construct 3 does not read the key, so it is dead data.
 
 ### `create_layout`
 

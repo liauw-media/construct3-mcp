@@ -2,6 +2,21 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `fix_legacy_behavior_keys` tool: renames legacy `"behavior-type"` keys to `"behaviorType"` in all event sheets, checking each value against the object's behaviors first (dry-run by default) (#16).
+- `validate_project` check `legacy-behavior-key`: error when a condition/action names its behavior only under the legacy key, warning for leftover keys (#16).
+
+### Changed
+
+- `update_event_block` and `update_event_block_action` normalize the legacy `"behavior-type"` key on the conditions/actions they edit and report it in `warnings`; `update_event_block` validates all additions before changing anything (#16).
+
+### Fixed
+
+- Behavior conditions/actions are written with the `behaviorType` key that Construct 3 reads, instead of `behavior-type`, which made the editor refuse to open the project. `"behavior-type"` is still accepted as a deprecated input alias (#16).
+
 ## [1.8.1] - 2026-04-16
 
 ### VAL-02 Remediation — Honest Acceptance Contract

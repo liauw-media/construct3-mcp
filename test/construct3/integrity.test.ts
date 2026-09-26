@@ -3,7 +3,9 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { join } from 'path';
 import { MockReader } from '../mocks/mock-reader.js';
+import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { validateProjectIntegrity } from '../../src/construct3/analyzers/integrity.js';
 import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 
@@ -52,7 +54,7 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(13);
+    expect(result.summary.checksRun).toBe(14);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 
@@ -197,6 +199,131 @@ describe('validateProjectIntegrity', () => {
     const err = result.errors.find(e => e.check === 'name-consistency' && e.entity.includes('MainSheet'));
     expect(err).toBeDefined();
     expect(err!.message).toContain('OtherName');
+  });
+
+  // ─── Check 3c: legacy-behavior-key (issue #16) ───────────
+
+  function projectWithSheet(events: unknown[]) {
+    return createReader({
+      objects: new Map([
+        ['Car', {
+          name: 'Car', 'plugin-id': 'Sprite', sid: 100,
+          behaviorTypes: [{ behaviorId: 'Car', name: 'Car', sid: 101 }, { behaviorId: 'Flash', name: 'Flash', sid: 102 }],
+        }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', sid: 200, events }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+  }
+
+  it('reports legacy "behavior-type" keys as an error', async () => {
+    const reader = projectWithSheet([{
+      eventType: 'group', title: 'G', sid: 210, children: [{
+        eventType: 'block', sid: 211,
+        conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 212, 'behavior-type': 'Car' }],
+        actions: [{ id: 'flash', objectClass: 'Car', sid: 213, 'behavior-type': 'Flash' }],
+      }],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(false);
+    const errs = result.errors.filter(e => e.check === 'legacy-behavior-key');
+    expect(errs).toHaveLength(1); // one entry per sheet
+    expect(errs[0].entity).toBe('eventSheets/MainSheet');
+    expect(errs[0].message).toContain('2 condition(s)/action(s)');
+    expect(errs[0].message).toContain('action "flash" on "Car" (SID 213)');
+    expect(errs[0].message).not.toContain('cannot be renamed');
+    expect(errs[0].suggestion).toContain('fix_legacy_behavior_keys');
+  });
+
+  it('reports a legacy key next to an identical behaviorType as a warning, not an error', async () => {
+    const reader = projectWithSheet([{
+      eventType: 'block', sid: 211,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 212, behaviorType: 'Car', 'behavior-type': 'Car' }],
+      actions: [],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(true);
+    expect(result.errors.filter(e => e.check === 'legacy-behavior-key')).toHaveLength(0);
+    const warn = result.warnings.find(e => e.check === 'legacy-behavior-key');
+    expect(warn!.message).toContain('condition "is-moving" on "Car" (SID 212): same value as "behaviorType"');
+    expect(warn!.message).not.toContain('fails to open');
+    expect(warn!.suggestion).toContain('fix_legacy_behavior_keys');
+  });
+
+  it('describes conflicts by their reason and does not point them to the fix tool', async () => {
+    const reader = projectWithSheet([{
+      eventType: 'block', sid: 211,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 6, 'behavior-type': null }],
+      actions: [{ id: 'flash', objectClass: 'Car', sid: 7, behaviorType: 'Flash', 'behavior-type': 'Car' }],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(true);
+    const warn = result.warnings.find(e => e.check === 'legacy-behavior-key')!;
+    expect(warn.message).toContain('condition "is-moving" on "Car" (SID 6): "behavior-type" holds null, not a behavior name');
+    expect(warn.message).toContain('"behaviorType" "Flash" and "behavior-type" "Car" disagree');
+    expect(warn.message).not.toContain('also carry a conflicting');
+    expect(warn.suggestion).not.toContain('fix_legacy_behavior_keys');
+    expect(warn.suggestion).toContain('by hand');
+  });
+
+  it('calls out legacy names that match no behavior, which renaming alone cannot fix', async () => {
+    const reader = projectWithSheet([{
+      eventType: 'block', sid: 211,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 212, 'behavior-type': 'Car' }],
+      actions: [{ id: 'flash', objectClass: 'Car', sid: 213, 'behavior-type': 'flash' }],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(false);
+    const err = result.errors.find(e => e.check === 'legacy-behavior-key')!;
+    expect(err.message).toContain('2 condition(s)/action(s)');
+    expect(err.message).toContain('1 of them cannot be renamed automatically');
+    expect(err.message).toContain('Did you mean "Flash"?');
+    expect(err.suggestion).toContain('fix_legacy_behavior_keys');
+    expect(err.suggestion).toContain('on 1 of them');
+    expect(err.suggestion).toContain('by hand');
+  });
+
+  it('does not suggest the fix tool when no legacy name can be renamed', async () => {
+    const reader = projectWithSheet([{
+      eventType: 'block', sid: 211,
+      conditions: [],
+      actions: [{ id: 'flash', objectClass: 'Car', sid: 213, 'behavior-type': 'Blink' }],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    const err = result.errors.find(e => e.check === 'legacy-behavior-key')!;
+    expect(err.message).toContain('available: Car, Flash');
+    expect(err.suggestion).not.toContain('fix_legacy_behavior_keys');
+  });
+
+  it('warns when the legacy-key scan hits its depth limit', async () => {
+    let deepest: Record<string, unknown> = { eventType: 'block', sid: 9000, conditions: [], actions: [] };
+    for (let i = 0; i < 55; i++) {
+      deepest = { eventType: 'group', title: `G${i}`, sid: 8000 + i, children: [deepest] };
+    }
+    const result = await validateProjectIntegrity(projectWithSheet([deepest]));
+    const warn = result.warnings.find(e => e.check === 'legacy-behavior-key');
+    expect(warn!.message).toContain('size limit');
+  });
+
+  it('does not report behaviorType keys', async () => {
+    const reader = projectWithSheet([{
+      eventType: 'block', sid: 211,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 212, behaviorType: 'Car' }],
+      actions: [
+        { id: 'flash', objectClass: 'Car', sid: 213, behaviorType: 'Flash' },
+        { type: 'script', script: ['const a = 1;', 'const b = 2;'] },
+      ],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.filter(e => e.check === 'legacy-behavior-key')).toHaveLength(0);
+  });
+
+  it('produces no errors on the editor-verified c3-loadable-minimal fixture', async () => {
+    const fixture = join(__dirname, '..', 'fixtures', 'c3-loadable-minimal', 'project.c3proj');
+    const reader = new Construct3ProjectReader(fixture);
+    await reader.loadProject();
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors).toEqual([]);
   });
 
   // ─── Check 4: duplicate-sid ──────────────────────────────

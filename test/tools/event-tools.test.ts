@@ -1439,3 +1439,489 @@ describe('update_event_variable', () => {
     expect(result.content[0].text).toContain('No updates');
   });
 });
+
+// ─── Issue #16: behaviorType key ─────────────────────────────
+
+/** Objects shaped like real C3 data (see event-helpers.test.ts). */
+function behaviorObjects() {
+  return new Map<string, Record<string, unknown>>([
+    ['Player', {
+      name: 'Player', 'plugin-id': 'Sprite', sid: 1,
+      behaviorTypes: [
+        { behaviorId: 'Platform', name: 'Platform', sid: 11 },
+        // Real pair from battlelands: behaviorId "EightDir", name "8Direction"
+        { behaviorId: 'EightDir', name: '8Direction', sid: 12 },
+      ],
+    }],
+    ['Car', {
+      name: 'Car', 'plugin-id': 'Sprite', sid: 2,
+      behaviorTypes: [
+        { behaviorId: 'Car', name: 'Car', sid: 21 },
+        { behaviorId: 'Flash', name: 'Flash', sid: 22 },
+      ],
+    }],
+  ]);
+}
+
+function behaviorProject(events: unknown[] = []) {
+  return {
+    objects: behaviorObjects(),
+    eventSheets: new Map([['MainSheet', { name: 'MainSheet', events, sid: 10 }]]),
+  };
+}
+
+describe('add_event_block behaviorType (issue #16)', () => {
+  it('writes behaviorType and never behavior-type', async () => {
+    const { server, writer } = setup(behaviorProject());
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'is-on-floor', objectClass: 'Player', behaviorType: 'Platform' }],
+      actions: [{ id: 'simulate-control', objectClass: 'Player', behaviorType: 'Platform', parameters: { control: 'jump' } }],
+      children: [{
+        conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+        actions: [{ id: 'flash', objectClass: 'Car', behaviorType: 'Flash' }],
+      }],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    expect(JSON.stringify(written)).not.toContain('behavior-type');
+    const block = (written.events as any[])[0];
+    expect(block.conditions[0].behaviorType).toBe('Platform');
+    expect(block.actions[0].behaviorType).toBe('Platform');
+    expect(block.children[0].actions[0].behaviorType).toBe('Flash');
+  });
+
+  it('accepts the deprecated behavior-type alias, writes behaviorType and warns', async () => {
+    const { server, writer } = setup(behaviorProject());
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [{ id: 'set-speed', objectClass: 'Car', 'behavior-type': 'Car', parameters: { speed: '100' } }],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('deprecated "behavior-type"'))).toBe(true);
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    const action = (written.events as any[])[0].actions[0];
+    expect(action.behaviorType).toBe('Car');
+    expect('behavior-type' in action).toBe(false);
+  });
+
+  it('warns but still writes when the behavior is not on the object', async () => {
+    const { server, writer } = setup(behaviorProject());
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'is-on-floor', objectClass: 'Player', behaviorType: 'Platfrom' }],
+      actions: [],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('behaviorType "Platfrom"'))).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('rejects conflicting behaviorType and behavior-type values without writing', async () => {
+    const { server, writer } = setup(behaviorProject());
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'is-on-floor', objectClass: 'Player', behaviorType: 'Platform', 'behavior-type': 'Solid' }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Conflicting behavior keys');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+});
+
+describe('update_event_block behaviorType (issue #16)', () => {
+  it('writes behaviorType for added conditions and actions, including the alias', async () => {
+    const { server, writer } = setup(behaviorProject([
+      { eventType: 'block', sid: 100, conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }], actions: [] },
+    ]));
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addConditions: [{ id: 'is-on-floor', objectClass: 'Player', 'behavior-type': 'Platform' }],
+      addActions: [
+        { id: 'flash', objectClass: 'Car', behaviorType: 'Flash' },
+        { type: 'script', script: 'console.log(1);' },
+      ],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('deprecated "behavior-type"'))).toBe(true);
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
+    expect(JSON.stringify(written)).not.toContain('behavior-type');
+    const block = (written.events as any[])[0];
+    expect(block.conditions[1].behaviorType).toBe('Platform');
+    expect(block.actions[0].behaviorType).toBe('Flash');
+    expect(block.actions[1].type).toBe('script');
+  });
+
+  it('rejects conflicting keys on additions before changing or writing anything', async () => {
+    const project = behaviorProject([
+      { eventType: 'block', sid: 100, conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }], actions: [] },
+    ]);
+    const { server, writer } = setup(project);
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      disabled: true,
+      addConditions: [{ id: 'is-on-floor', objectClass: 'Player', behaviorType: 'Platform' }],
+      addActions: [{ id: 'flash', objectClass: 'Car', behaviorType: 'Flash', 'behavior-type': 'Car' }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Conflicting behavior keys');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    // Validation ran before the disabled toggle and the additions
+    const block = (project.eventSheets.get('MainSheet')!.events as any[])[0];
+    expect(block.disabled).toBeUndefined();
+    expect(block.conditions).toHaveLength(1);
+  });
+
+  it('warns once per problem when conditions and actions are added together', async () => {
+    const { server, writer } = setup(behaviorProject([
+      { eventType: 'block', sid: 100, conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }], actions: [] },
+    ]));
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addConditions: [{ id: 'is-moving', objectClass: 'Car', 'behavior-type': 'Nope' }],
+      addActions: [{ id: 'stop', objectClass: 'Car', 'behavior-type': 'Nope' }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.filter((w: string) => w.includes('behaviorType "Nope" does not match'))).toHaveLength(1);
+    expect(data.warnings.filter((w: string) => w.includes('deprecated "behavior-type"'))).toHaveLength(1);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('renames the legacy key on edited conditions/actions instead of writing it back', async () => {
+    const { server, writer } = setup(behaviorProject([{
+      eventType: 'block', sid: 5,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 7, 'behavior-type': 'Car' }],
+      actions: [
+        { id: 'flash', objectClass: 'Car', sid: 8, 'behavior-type': 'Flash', parameters: { a: 1 } },
+        { id: 'stop', objectClass: 'Car', sid: 9, 'behavior-type': 'Car' },
+      ],
+    }]));
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 5,
+      updateConditions: [{ index: 0, isInverted: true }],
+      updateActions: [{ index: 0, parameters: { a: 2 } }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.filter((w: string) => w.includes('Renamed the legacy "behavior-type" key'))).toHaveLength(2);
+    expect(data.warnings.some((w: string) => w.includes('fix_legacy_behavior_keys'))).toBe(true);
+
+    const block = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[0];
+    expect(block.actions[0]).toEqual({ id: 'flash', objectClass: 'Car', sid: 8, behaviorType: 'Flash', parameters: { a: 2 } });
+    expect(Object.keys(block.actions[0])).toEqual(['id', 'objectClass', 'sid', 'behaviorType', 'parameters']);
+    expect(block.conditions[0]).toEqual({ id: 'is-moving', objectClass: 'Car', sid: 7, behaviorType: 'Car', isInverted: true });
+    // Only edited ACEs are normalized; fix_legacy_behavior_keys handles the rest
+    expect(block.actions[1]['behavior-type']).toBe('Car');
+  });
+
+  it('leaves an edited legacy key that names no behavior and says why', async () => {
+    const { server, writer } = setup(behaviorProject([{
+      eventType: 'block', sid: 5,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 6 }],
+      actions: [{ id: 'simulate-control', objectClass: 'Player', sid: 8, 'behavior-type': 'EightDir', parameters: { control: 'up' } }],
+    }]));
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 5,
+      updateActions: [{ index: 0, parameters: { control: 'down' } }],
+    }));
+    expect(data.success).toBe(true);
+    const warning = data.warnings.find((w: string) => w.includes('still carries the legacy "behavior-type" key'));
+    expect(warning).toContain('Did you mean the behavior name "8Direction"');
+
+    const action = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[0].actions[0];
+    expect(action['behavior-type']).toBe('EightDir');
+    expect(action.behaviorType).toBeUndefined();
+    expect(action.parameters).toEqual({ control: 'down' });
+  });
+});
+
+describe('update_event_block_action legacy behavior key (issue #16)', () => {
+  it('renames the legacy key on the edited action and warns', async () => {
+    const { server, writer } = setup(behaviorProject([{
+      eventType: 'block', sid: 5,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 6 }],
+      actions: [{ id: 'flash', objectClass: 'Car', sid: 8, 'behavior-type': 'Flash', parameters: { a: 1 } }],
+    }]));
+    const data = parseResult(await server.callTool('update_event_block_action', {
+      sheetName: 'MainSheet',
+      blockSid: 5,
+      actionIndex: 0,
+      parameters: { a: 2 },
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('Renamed the legacy "behavior-type" key'))).toBe(true);
+
+    const action = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[0].actions[0];
+    expect(action).toEqual({ id: 'flash', objectClass: 'Car', sid: 8, behaviorType: 'Flash', parameters: { a: 2 } });
+  });
+
+  it('adds no warnings for actions without the legacy key', async () => {
+    const { server } = setup(behaviorProject([{
+      eventType: 'block', sid: 5,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 6 }],
+      actions: [{ id: 'flash', objectClass: 'Car', sid: 8, behaviorType: 'Flash', parameters: { a: 1 } }],
+    }]));
+    const data = parseResult(await server.callTool('update_event_block_action', {
+      sheetName: 'MainSheet', blockSid: 5, actionIndex: 0, parameters: { a: 2 },
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+  });
+});
+
+describe('fix_legacy_behavior_keys', () => {
+  /** A sheet as written by construct3-mcp <= 1.8.1 (legacy key), nested in a group and a function. */
+  function legacySheet() {
+    return {
+      name: 'MainSheet',
+      sid: 10,
+      events: [
+        {
+          eventType: 'group', title: 'Driving', sid: 200, children: [
+            {
+              eventType: 'block', sid: 201,
+              conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 202, 'behavior-type': 'Car' }],
+              actions: [
+                { id: 'flash', objectClass: 'Car', sid: 203, 'behavior-type': 'Flash', parameters: { 'on-time': '0.1' } },
+                // Script actions come in two shapes: a string, or an array of lines (as C3 writes it)
+                { type: 'script', script: ['runtime.x = 1;', 'runtime.y = 2;'] },
+                { type: 'script', script: 'runtime.z = 3;' },
+              ],
+            },
+          ],
+        },
+        {
+          eventType: 'function-block', functionName: 'Boost', sid: 300,
+          conditions: [],
+          actions: [{ id: 'set-speed', objectClass: 'Car', sid: 301, 'behavior-type': 'Car', parameters: { speed: '400' } }],
+        },
+        {
+          eventType: 'block', sid: 400,
+          conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 401 }],
+          actions: [{ id: 'simulate-control', objectClass: 'Player', sid: 402, behaviorType: 'Platform', parameters: { control: 'jump' } }],
+        },
+      ],
+    };
+  }
+
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('fix_legacy_behavior_keys')).toBe(true);
+  });
+
+  it('defaults to a dry run that reports without writing', async () => {
+    const sheet = legacySheet();
+    const { server, writer } = setup({ objects: behaviorObjects(), eventSheets: new Map([['MainSheet', sheet]]) });
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', {}));
+
+    expect(data.success).toBe(true);
+    expect(data.dryRun).toBe(true);
+    expect(data.action).toBe('would_fix');
+    expect(data.totalRenamed).toBe(3);
+    expect(data.totalConflicts).toBe(0);
+    expect(data.sheets).toHaveLength(1);
+    expect(data.sheets[0].sheetName).toBe('MainSheet');
+    expect(data.sheets[0].changes.map((c: any) => c.sid)).toEqual([202, 203, 301]);
+    expect(data.message).toContain('dryRun: false');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    // Source data untouched
+    expect(JSON.stringify(sheet)).toContain('behavior-type');
+  });
+
+  it('rewrites legacy keys to behaviorType when dryRun is false', async () => {
+    const { server, writer } = setup({
+      objects: behaviorObjects(),
+      eventSheets: new Map([
+        ['MainSheet', legacySheet()],
+        ['CleanSheet', { name: 'CleanSheet', sid: 11, events: [] }],
+      ]),
+    });
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', { dryRun: false }));
+
+    expect(data.success).toBe(true);
+    expect(data.action).toBe('fixed');
+    expect(data.totalRenamed).toBe(3);
+    expect(data.sheetsScanned).toBe(2);
+    expect(data.sheets[0].backupFile).toBeDefined();
+
+    const writes = writer.callsFor('writeEntityFile');
+    expect(writes).toHaveLength(1); // CleanSheet is not rewritten
+    expect(writes[0].args[0]).toBe('eventSheets');
+    expect(writes[0].args[1]).toBe('MainSheet');
+    const written = writes[0].args[2] as any;
+    expect(JSON.stringify(written)).not.toContain('behavior-type');
+
+    const flash = written.events[0].children[0].actions[0];
+    expect(flash.behaviorType).toBe('Flash');
+    // Renamed in place: key order preserved (id, objectClass, sid, behaviorType, parameters)
+    expect(Object.keys(flash)).toEqual(['id', 'objectClass', 'sid', 'behaviorType', 'parameters']);
+    expect(written.events[1].actions[0].behaviorType).toBe('Car');
+    // Script actions of both shapes are left as they were
+    expect(written.events[0].children[0].actions[1].script).toEqual(['runtime.x = 1;', 'runtime.y = 2;']);
+    expect(written.events[0].children[0].actions[2].script).toBe('runtime.z = 3;');
+    // Already-correct ACEs are untouched
+    expect(written.events[2].actions[0]).toEqual({ id: 'simulate-control', objectClass: 'Player', sid: 402, behaviorType: 'Platform', parameters: { control: 'jump' } });
+  });
+
+  it('leaves conflicting keys untouched and reports them', async () => {
+    const { server, writer } = setup({
+      objects: behaviorObjects(),
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 10,
+        events: [{
+          eventType: 'block', sid: 100,
+          conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 101, behaviorType: 'Car', 'behavior-type': 'Car' }],
+          actions: [{ id: 'flash', objectClass: 'Car', sid: 102, behaviorType: 'Flash', 'behavior-type': 'Car' }],
+        }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', { dryRun: false }));
+
+    expect(data.totalRenamed).toBe(1); // identical duplicate key is just dropped
+    expect(data.totalConflicts).toBe(1);
+    expect(data.sheets[0].conflicts[0].sid).toBe(102);
+    expect(data.message).toContain('resolve them by hand');
+
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.events[0].conditions[0]).toEqual({ id: 'is-moving', objectClass: 'Car', sid: 101, behaviorType: 'Car' });
+    expect(written.events[0].actions[0]['behavior-type']).toBe('Car');
+    expect(written.events[0].actions[0].behaviorType).toBe('Flash');
+  });
+
+  it('reports nothing to do on clean projects', async () => {
+    const { server, writer } = setup(behaviorProject([
+      { eventType: 'block', sid: 100, conditions: [{ id: 'is-on-floor', objectClass: 'Player', sid: 101, behaviorType: 'Platform' }], actions: [] },
+    ]));
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', { dryRun: false }));
+    expect(data.success).toBe(true);
+    expect(data.totalRenamed).toBe(0);
+    expect(data.sheets).toEqual([]);
+    expect(data.message).toContain('No legacy');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('renames only names that match a behavior and reports the rest as unresolved', async () => {
+    const { server, writer } = setup(behaviorProject([{
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 101, 'behavior-type': 'Car' }],
+      actions: [
+        // behaviorId instead of the behavior name, as older callers were invited to pass
+        { id: 'simulate-control', objectClass: 'Player', sid: 102, 'behavior-type': 'EightDir', parameters: { control: 'up' } },
+        { id: 'destroy', objectClass: 'System', sid: 103, 'behavior-type': 'Car' },
+      ],
+    }]));
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', { dryRun: false }));
+
+    expect(data.totalRenamed).toBe(1);
+    expect(data.totalUnresolved).toBe(2);
+    expect(data.sheets[0].unresolved.map((u: any) => u.sid)).toEqual([102, 103]);
+    expect(data.sheets[0].unresolved[0].reason).toContain('Did you mean the behavior name "8Direction"');
+    expect(data.sheets[0].unresolved[1].reason).toContain('System has no behaviors');
+    expect(data.message).toContain('matches no behavior');
+
+    const written = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[0];
+    expect(written.conditions[0].behaviorType).toBe('Car');
+    expect(written.actions[0]['behavior-type']).toBe('EightDir');
+    expect(written.actions[0].behaviorType).toBeUndefined();
+    expect(written.actions[1]['behavior-type']).toBe('Car');
+  });
+
+  it('renames names it cannot verify, with a warning', async () => {
+    const { server, reader, writer } = setup(behaviorProject([{
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }],
+      actions: [{ id: 'simulate-control', objectClass: 'Ghost', sid: 102, 'behavior-type': 'Platform' }],
+    }]));
+    // "Ghost" is registered in the project but its object type file cannot be read
+    reader.listObjectTypes = async () => ['Player', 'Car', 'Ghost'];
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', { dryRun: false }));
+
+    expect(data.totalRenamed).toBe(1);
+    expect(data.sheets[0].changes[0].warning).toContain('could not be verified (object type file unreadable)');
+    expect(data.message).toContain('could not be checked');
+    expect((writer.callsFor('writeEntityFile')[0].args[2] as any).events[0].actions[0].behaviorType).toBe('Platform');
+  });
+
+  it('does not open the message with a zero rename count when only conflicts exist', async () => {
+    const { server, writer } = setup(behaviorProject([{
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 101, 'behavior-type': null }],
+      actions: [],
+    }]));
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', { dryRun: false }));
+
+    expect(data.totalRenamed).toBe(0);
+    expect(data.totalConflicts).toBe(1);
+    expect(data.sheets[0].conflicts[0].reason).toContain('holds null, not a behavior name');
+    expect(data.message).not.toContain('renamed');
+    expect(data.message).toMatch(/^1 condition\(s\)\/action\(s\) were left untouched/);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('names unreadable sheets instead of claiming nothing was found', async () => {
+    const { server, reader } = setup(behaviorProject());
+    reader.listEventSheets = async () => ['MainSheet', 'Broken'];
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', {}));
+
+    expect(data.success).toBe(true);
+    expect(data.sheetsScanned).toBe(1);
+    expect(data.unreadableSheets).toEqual(['Broken']);
+    expect(data.message).toContain('No legacy "behavior-type" keys found in the 1 readable sheet(s).');
+    expect(data.message).toContain('1 sheet(s) could not be read and were not checked: Broken.');
+  });
+
+  it('reports sheets already rewritten when a later write fails', async () => {
+    const legacy = (sid: number) => ({
+      name: `S${sid}`, sid,
+      events: [{
+        eventType: 'block', sid: sid + 1,
+        conditions: [{ id: 'is-moving', objectClass: 'Car', sid: sid + 2, 'behavior-type': 'Car' }],
+        actions: [],
+      }],
+    });
+    const { server, writer } = setup({
+      objects: behaviorObjects(),
+      eventSheets: new Map([['SheetA', legacy(100)], ['SheetB', legacy(200)]]),
+    });
+    const write = writer.writeEntityFile.bind(writer);
+    writer.writeEntityFile = async (category, name, data, subfolder) => {
+      if (name === 'SheetB') throw new Error('disk full');
+      return write(category, name, data, subfolder);
+    };
+    const result = await server.callTool('fix_legacy_behavior_keys', { dryRun: false });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('disk full');
+    expect(result.content[0].text).toContain('Sheets already rewritten before the failure: SheetA.');
+  });
+
+  it('flags sheets whose scan hit the depth limit', async () => {
+    // A legacy condition nested 55 levels deep (the scanner stops at 50)
+    let deepest: Record<string, unknown> = {
+      eventType: 'block', sid: 9000,
+      conditions: [{ id: 'is-moving', objectClass: 'Car', sid: 9001, 'behavior-type': 'Car' }],
+      actions: [],
+    };
+    for (let i = 0; i < 55; i++) {
+      deepest = { eventType: 'group', title: `G${i}`, sid: 8000 + i, children: [deepest] };
+    }
+    const { server } = setup(behaviorProject([deepest]));
+    const data = parseResult(await server.callTool('fix_legacy_behavior_keys', {}));
+
+    expect(data.totalRenamed).toBe(0);
+    expect(data.message).toContain('The scan stopped at its size limit in MainSheet');
+  });
+});

@@ -4,12 +4,14 @@ import {
   validateObjectClasses,
   collectObjectRefs,
   buildBlockEvent,
+  resolveBehaviorType,
   findEventBySid,
   countDescendants,
   summarizeEvents,
   MAX_NESTING_DEPTH,
   MAX_TOTAL_EVENTS,
 } from '../../src/tools/event-helpers.js';
+import type { ObjectRef } from '../../src/tools/event-helpers.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 
@@ -84,36 +86,190 @@ describe('validateObjectClasses', () => {
     expect(errors[0]).toContain('Unknown objectClass "NonExistent"');
   });
 
-  it('warns about behavior-type usage', async () => {
-    const reader = new MockReader({
-      objects: new Map([['Player', { name: 'Player', 'plugin-id': 'Sprite', sid: 1 }]]),
+  // Behavior fixtures mirror real C3 data (mapsandapps/construct-3-games
+  // battlelands): Player has behaviors MoveTo and EightDir (named "8Direction");
+  // family Entities (members Player, Enemy) has Tween, and the real event
+  // sheets use objectClass "Enemy" + behaviorType "Tween".
+  function behaviorReader() {
+    return new MockReader({
+      objects: new Map<string, Record<string, unknown>>([
+        ['Player', {
+          name: 'Player', 'plugin-id': 'Sprite', sid: 1,
+          behaviorTypes: [
+            { behaviorId: 'MoveTo', name: 'MoveTo', sid: 11 },
+            { behaviorId: 'EightDir', name: '8Direction', sid: 12 },
+          ],
+        }],
+        ['Enemy', { name: 'Enemy', 'plugin-id': 'Sprite', sid: 2, behaviorTypes: [] }],
+        ['Wall', { name: 'Wall', 'plugin-id': 'Sprite', sid: 3 }],
+      ]),
+      families: new Map([
+        ['Entities', {
+          name: 'Entities', 'plugin-id': 'Sprite', sid: 4, members: ['Player', 'Enemy'],
+          behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 41 }],
+        }],
+      ]),
     });
+  }
+
+  it('accepts a behaviorType defined on the object type without warnings', async () => {
     const { errors, warnings } = await validateObjectClasses(
-      reader as any,
-      [{ objectClass: 'Player', 'behavior-type': 'Platform' }],
+      behaviorReader() as any,
+      [{ objectClass: 'Player', behaviorType: '8Direction' }],
+    );
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('accepts a behaviorType inherited from a family the object belongs to', async () => {
+    const { errors, warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [{ objectClass: 'Enemy', behaviorType: 'Tween' }, { objectClass: 'Entities', behaviorType: 'Tween' }],
+    );
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('warns (does not error) when behaviorType is not on the object or its families', async () => {
+    const { errors, warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [{ objectClass: 'Player', behaviorType: 'Platform' }],
     );
     expect(errors).toHaveLength(0);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('Behavior-type "Platform"');
+    expect(warnings[0]).toContain('behaviorType "Platform"');
+    expect(warnings[0]).toContain('available: MoveTo, 8Direction, Tween');
+  });
+
+  it('suggests the behavior name when a behaviorId is passed', async () => {
+    const { warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [{ objectClass: 'Player', behaviorType: 'EightDir' }],
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Did you mean the behavior name "8Direction"');
+  });
+
+  it('checks family objectClasses against the family behaviors only', async () => {
+    const { warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [{ objectClass: 'Entities', behaviorType: '8Direction' }],
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('family "Entities"');
+  });
+
+  it('warns about behaviorType on System and on objects without behaviors', async () => {
+    const { errors, warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [{ objectClass: 'System', behaviorType: 'Platform' }, { objectClass: 'Wall', behaviorType: 'Solid' }],
+    );
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain('System has no behaviors');
+    expect(warnings[1]).toContain('available: none');
+  });
+
+  it('says "could not be verified" when a family file is unreadable', async () => {
+    const reader = behaviorReader();
+    // Entities is listed in the project, but its file could not be read
+    reader.readAllFamilies = async () => new Map();
+    const { errors, warnings } = await validateObjectClasses(
+      reader as any,
+      [{ objectClass: 'Entities', behaviorType: 'Tween' }, { objectClass: 'Enemy', behaviorType: 'Tween' }],
+    );
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain('could not be verified (family file unreadable)');
+    expect(warnings[1]).toContain('could not be verified');
+    expect(warnings.join('\n')).not.toContain('available: none');
+  });
+
+  it('reports each object/behavior pair once', async () => {
+    const { warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [{ objectClass: 'Player', behaviorType: 'Nope' }, { objectClass: 'Player', behaviorType: 'Nope' }],
+    );
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('warns once when the deprecated behavior-type alias was used', async () => {
+    const { warnings } = await validateObjectClasses(
+      behaviorReader() as any,
+      [
+        { objectClass: 'Player', behaviorType: '8Direction', usedLegacyKey: true },
+        { objectClass: 'Player', behaviorType: 'MoveTo', usedLegacyKey: true },
+      ],
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('deprecated "behavior-type"');
+  });
+});
+
+describe('resolveBehaviorType', () => {
+  it('returns the canonical behaviorType', () => {
+    expect(resolveBehaviorType({ objectClass: 'Player', behaviorType: 'Platform' }))
+      .toEqual({ behaviorType: 'Platform', usedLegacyKey: false });
+  });
+
+  it('normalizes the deprecated behavior-type alias', () => {
+    expect(resolveBehaviorType({ objectClass: 'Player', 'behavior-type': 'Platform' }))
+      .toEqual({ behaviorType: 'Platform', usedLegacyKey: true });
+  });
+
+  it('accepts both keys when they agree', () => {
+    expect(resolveBehaviorType({ objectClass: 'Player', behaviorType: 'Platform', 'behavior-type': 'Platform' }).behaviorType)
+      .toBe('Platform');
+  });
+
+  it('throws when both keys disagree', () => {
+    expect(() => resolveBehaviorType({ id: 'flash', objectClass: 'Car', behaviorType: 'Car', 'behavior-type': 'Flash' }))
+      .toThrow('Conflicting behavior keys');
+  });
+
+  it('treats a missing or empty value as no behavior', () => {
+    expect(resolveBehaviorType({ objectClass: 'System' }).behaviorType).toBeUndefined();
+    expect(resolveBehaviorType({ objectClass: 'System', behaviorType: '' }).behaviorType).toBeUndefined();
+  });
+
+  it('does not flag an empty deprecated alias as used (nothing is written for it)', () => {
+    expect(resolveBehaviorType({ objectClass: 'System', 'behavior-type': '' }))
+      .toEqual({ behaviorType: undefined, usedLegacyKey: false });
+    expect(resolveBehaviorType({ objectClass: 'Player', behaviorType: 'Platform', 'behavior-type': '' }))
+      .toEqual({ behaviorType: 'Platform', usedLegacyKey: false });
   });
 });
 
 describe('collectObjectRefs', () => {
   it('collects refs from conditions and actions', () => {
-    const refs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
+    const refs: ObjectRef[] = [];
     collectObjectRefs(
-      [{ objectClass: 'Player', 'behavior-type': 'Platform' }],
+      [{ objectClass: 'Player', behaviorType: 'Platform' }],
       [{ objectClass: 'Enemy', id: 'destroy', sid: 1 }],
       [],
       refs,
     );
     expect(refs).toHaveLength(2);
-    expect(refs[0].objectClass).toBe('Player');
-    expect(refs[1].objectClass).toBe('Enemy');
+    expect(refs[0]).toEqual({ objectClass: 'Player', behaviorType: 'Platform' });
+    expect(refs[1]).toEqual({ objectClass: 'Enemy' });
+  });
+
+  it('normalizes the deprecated behavior-type alias and flags it', () => {
+    const refs: ObjectRef[] = [];
+    collectObjectRefs(
+      [{ objectClass: 'Player', 'behavior-type': 'Platform' }],
+      [{ objectClass: 'Car', id: 'flash', 'behavior-type': 'Car' }],
+      [],
+      refs,
+    );
+    expect(refs).toEqual([
+      { objectClass: 'Player', behaviorType: 'Platform', usedLegacyKey: true },
+      { objectClass: 'Car', behaviorType: 'Car', usedLegacyKey: true },
+    ]);
   });
 
   it('collects refs from nested children', () => {
-    const refs: Array<{ objectClass: string; 'behavior-type'?: string }> = [];
+    const refs: ObjectRef[] = [];
     collectObjectRefs(
       [],
       [],
@@ -367,6 +523,81 @@ describe('buildBlockEvent', () => {
     );
 
     expect((block.actions[0] as any).disabled).toBe(true);
+  });
+
+  // Regression for issue #16: C3 reads "behaviorType"; "behavior-type" made
+  // the editor fail with "missing action id".
+  it('writes behaviorType (never behavior-type) on conditions, actions and children', async () => {
+    const reader = new MockReader();
+    const idGen = new MockIdGenerator();
+    const counter = { count: 0, warnings: [] };
+
+    const block = await buildBlockEvent(
+      reader as any,
+      idGen as any,
+      {
+        conditions: [{ id: 'is-on-floor', objectClass: 'Player', behaviorType: 'Platform' }],
+        actions: [{ id: 'simulate-control', objectClass: 'Player', behaviorType: 'Platform', parameters: { control: 'jump' } }],
+        children: [{
+          conditions: [{ id: 'is-moving', objectClass: 'Player', 'behavior-type': 'Platform' }],
+          actions: [{ id: 'flash', objectClass: 'Car', 'behavior-type': 'Flash' }],
+          children: [],
+        }],
+      },
+      1,
+      counter,
+    );
+
+    const json = JSON.stringify(block);
+    expect(json).not.toContain('behavior-type');
+    expect(block.conditions[0].behaviorType).toBe('Platform');
+    expect((block.actions[0] as any).behaviorType).toBe('Platform');
+    const child = block.children![0] as any;
+    expect(child.conditions[0].behaviorType).toBe('Platform');
+    expect(child.actions[0].behaviorType).toBe('Flash');
+    // Key order matches what C3 writes: id, objectClass, sid, behaviorType, parameters
+    expect(Object.keys(block.actions[0])).toEqual(['id', 'objectClass', 'sid', 'behaviorType', 'parameters']);
+  });
+
+  it('omits behaviorType for plugin and System ACEs', async () => {
+    const reader = new MockReader();
+    const idGen = new MockIdGenerator();
+    const counter = { count: 0, warnings: [] };
+
+    const block = await buildBlockEvent(
+      reader as any,
+      idGen as any,
+      {
+        conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+        actions: [{ id: 'destroy', objectClass: 'Player' }],
+        children: [],
+      },
+      1,
+      counter,
+    );
+
+    expect('behaviorType' in block.conditions[0]).toBe(false);
+    expect('behaviorType' in block.actions[0]).toBe(false);
+  });
+
+  it('rejects conflicting behaviorType and behavior-type values', async () => {
+    const reader = new MockReader();
+    const idGen = new MockIdGenerator();
+    const counter = { count: 0, warnings: [] };
+
+    await expect(
+      buildBlockEvent(
+        reader as any,
+        idGen as any,
+        {
+          conditions: [{ id: 'x', objectClass: 'Player', behaviorType: 'Platform', 'behavior-type': 'Solid' }],
+          actions: [],
+          children: [],
+        },
+        1,
+        counter,
+      ),
+    ).rejects.toThrow('Conflicting behavior keys');
   });
 });
 

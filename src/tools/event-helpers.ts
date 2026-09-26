@@ -7,17 +7,37 @@
 import { z } from 'zod';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { IdGenerator } from '../construct3/id-generator.js';
-import type { Condition, Action, BlockEvent } from '../construct3/types.js';
+import type { Condition, Action, BlockEvent, StandardAction } from '../construct3/types.js';
 import { createBlockEvent } from '../construct3/templates.js';
+import { checkBehaviorName } from '../construct3/analyzers/behavior-refs.js';
+import type { BehaviorLookupData } from '../construct3/analyzers/behavior-refs.js';
+import {
+  BEHAVIOR_TYPE_KEY,
+  LEGACY_BEHAVIOR_TYPE_KEY,
+  isBehaviorName,
+  describeLegacyHit,
+  scanLegacyBehaviorKeysInAces,
+} from '../construct3/analyzers/legacy-behavior-keys.js';
 import { boundedRecord } from './shared.js';
 
 // ─── Zod Schemas ────────────────────────────────────────────
+
+// Behavior ACEs: C3 stores the behavior under camelCase "behaviorType" (the
+// behavior's name on the object type or one of its families). The kebab-case
+// "behavior-type" is accepted as a deprecated input alias only — it is never
+// written, because C3 ignores it and fails to open the project (issue #16).
+const behaviorTypeDescription =
+  'Behavior name for behavior conditions/actions, as defined on the object type or one of its families ' +
+  '(e.g., "Platform", "8Direction"). Omit for plugin and System ACEs.';
+const legacyBehaviorTypeDescription =
+  'DEPRECATED alias for behaviorType — still accepted, but written as behaviorType. Use behaviorType.';
 
 /** Condition schema shared by top-level and child events */
 export const conditionSchema = z.object({
   id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
   objectClass: z.string().describe('Object name or "System"'),
-  'behavior-type': z.string().optional().describe('Behavior type (e.g., "Platform", "8Direction")'),
+  behaviorType: z.string().optional().describe(behaviorTypeDescription),
+  'behavior-type': z.string().optional().describe(legacyBehaviorTypeDescription),
   parameters: boundedRecord()
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
     .optional().describe('Condition parameters as key-value pairs (max 100 keys, depth 6)'),
@@ -29,7 +49,8 @@ export const conditionSchema = z.object({
 export const standardActionSchema = z.object({
   id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
   objectClass: z.string().describe('Object name or "System"'),
-  'behavior-type': z.string().optional().describe('Behavior type'),
+  behaviorType: z.string().optional().describe(behaviorTypeDescription),
+  'behavior-type': z.string().optional().describe(legacyBehaviorTypeDescription),
   parameters: boundedRecord()
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
     .optional().describe('Action parameters as key-value pairs (max 100 keys, depth 6)'),
@@ -233,12 +254,56 @@ export function findGroupByPath(
   return groups[groups.length - 1].children as Record<string, unknown>[];
 }
 
+// ─── Behavior Key Resolution ────────────────────────────────
+
+/** An objectClass reference (plus optional behavior) collected from tool input. */
+export interface ObjectRef {
+  objectClass: string;
+  behaviorType?: string;
+  /** True when the input used the deprecated "behavior-type" alias */
+  usedLegacyKey?: boolean;
+}
+
+/**
+ * Resolve the behavior of a condition/action input. "behaviorType" is the
+ * canonical key; the deprecated "behavior-type" alias is normalized to it.
+ * Throws when both keys are given with different values.
+ */
+export function resolveBehaviorType(
+  ace: Readonly<Record<string, unknown>>,
+): { behaviorType?: string; usedLegacyKey: boolean } {
+  // Empty values mean "no behavior" for either key (nothing is written for them).
+  const current = isBehaviorName(ace[BEHAVIOR_TYPE_KEY]) ? ace[BEHAVIOR_TYPE_KEY] : undefined;
+  const legacy = isBehaviorName(ace[LEGACY_BEHAVIOR_TYPE_KEY]) ? ace[LEGACY_BEHAVIOR_TYPE_KEY] : undefined;
+  if (current !== undefined && legacy !== undefined && current !== legacy) {
+    const label = typeof ace.id === 'string' ? `"${ace.id}" on "${String(ace.objectClass)}"` : `"${String(ace.objectClass)}"`;
+    throw new Error(
+      `Conflicting behavior keys for ${label}: behaviorType "${current}" vs deprecated ` +
+      `"behavior-type" "${legacy}". Pass only behaviorType.`,
+    );
+  }
+  return {
+    behaviorType: current ?? legacy,
+    usedLegacyKey: legacy !== undefined,
+  };
+}
+
+/** Build an ObjectRef from a condition/action input. */
+function toObjectRef(ace: Readonly<Record<string, unknown>> & { objectClass: string }): ObjectRef {
+  const { behaviorType, usedLegacyKey } = resolveBehaviorType(ace);
+  const ref: ObjectRef = { objectClass: ace.objectClass };
+  if (behaviorType) ref.behaviorType = behaviorType;
+  if (usedLegacyKey) ref.usedLegacyKey = true;
+  return ref;
+}
+
 // ─── Object Class Validation ────────────────────────────────
 
-/** Validate objectClass references against project objects, families, and "System". */
+/** Validate objectClass references against project objects, families, and "System".
+ *  Unknown objectClass → error. Behavior problems → warnings only (never block a write). */
 export async function validateObjectClasses(
   reader: Construct3ProjectReader,
-  refs: Array<{ objectClass: string; 'behavior-type'?: string }>,
+  refs: ObjectRef[],
 ): Promise<{ errors: string[]; warnings: string[] }> {
   const objects = await reader.listObjectTypes();
   // listFamilies() reads from an in-memory Map and never throws — no try/catch needed.
@@ -256,35 +321,126 @@ export async function validateObjectClasses(
         : '';
       errors.push(`Unknown objectClass "${ref.objectClass}".${hint}`);
     }
-    if (ref['behavior-type']) {
-      // Soft validate: warn but allow (behavior may come from families or third-party plugins)
-      warnings.push(`Behavior-type "${ref['behavior-type']}" on "${ref.objectClass}" was not validated — ensure it exists on the object or its families.`);
+  }
+
+  // Soft-validate behaviors: warn when behaviorType names no behavior on the
+  // object type or any family it belongs to (family behaviors are usable on
+  // member objects in C3 events).
+  const behaviorRefs = refs.filter(r => r.behaviorType && validClasses.has(r.objectClass));
+  if (behaviorRefs.length > 0) {
+    const lookup = await loadBehaviorLookup(reader, behaviorRefs.map(r => r.objectClass));
+    const checked = new Set<string>();
+    for (const ref of behaviorRefs) {
+      const key = `${ref.objectClass}\u0000${ref.behaviorType}`;
+      if (checked.has(key)) continue;
+      checked.add(key);
+      const check = checkBehaviorName(ref.objectClass, ref.behaviorType!, lookup);
+      if (check.status !== 'ok') warnings.push(check.message);
     }
+  }
+
+  if (refs.some(r => r.usedLegacyKey)) {
+    warnings.push('Input used the deprecated "behavior-type" key; it was written as "behaviorType" (the key Construct 3 reads). Use "behaviorType" in future calls.');
   }
 
   return { errors, warnings };
 }
 
+/**
+ * Load what checkBehaviorName needs: object type/family names, all readable
+ * families, and the object types named in `objectClasses` (unreadable ones
+ * are left out and reported as "could not be verified").
+ */
+export async function loadBehaviorLookup(
+  reader: Construct3ProjectReader,
+  objectClasses: Iterable<string>,
+): Promise<BehaviorLookupData> {
+  const objectNames = new Set(await reader.listObjectTypes());
+  const familyNames = new Set(await reader.listFamilies());
+  let families: Map<string, Record<string, unknown>>;
+  try {
+    families = await reader.readAllFamilies();
+  } catch {
+    families = new Map();
+  }
+  const objectTypes = new Map<string, unknown>();
+  for (const name of new Set(objectClasses)) {
+    if (!objectNames.has(name)) continue;
+    try {
+      objectTypes.set(name, await reader.readObjectType(name));
+    } catch {
+      // Unreadable object type: checkBehaviorName reports it as unverified
+    }
+  }
+  return { objectNames, familyNames, objectTypes, families };
+}
+
+// ─── Legacy Key Normalization ───────────────────────────────
+
+/**
+ * Normalize the legacy "behavior-type" key on existing conditions/actions
+ * that a tool edits and writes back (issue #16), with the same rules as
+ * fix_legacy_behavior_keys: a name that resolves to a behavior on the object
+ * (or cannot be checked) is renamed to "behaviorType" in place; unresolved
+ * names and conflicting values are left alone. Returns one warning per
+ * affected condition/action, so the change is never silent.
+ */
+export async function normalizeLegacyBehaviorKeys(
+  reader: Construct3ProjectReader,
+  aces: Array<{ ace: Record<string, unknown>; kind: 'condition' | 'action' }>,
+): Promise<string[]> {
+  const legacy = aces.filter(a => typeof a.ace === 'object' && a.ace !== null && LEGACY_BEHAVIOR_TYPE_KEY in a.ace);
+  if (legacy.length === 0) return [];
+
+  const lookup = await loadBehaviorLookup(
+    reader,
+    legacy.map(a => a.ace.objectClass).filter((c): c is string => typeof c === 'string'),
+  );
+  const resolve = (objectClass: string, behaviorName: string) => checkBehaviorName(objectClass, behaviorName, lookup);
+
+  const warnings: string[] = [];
+  for (const kind of ['condition', 'action'] as const) {
+    const list = legacy.filter(a => a.kind === kind).map(a => a.ace);
+    if (list.length === 0) continue;
+    const scan = scanLegacyBehaviorKeysInAces(list, kind, { apply: true, resolve });
+    for (const hit of scan.fixable) {
+      const what = hit.behaviorType !== undefined
+        ? `Dropped the leftover "behavior-type" key (same value as "behaviorType") on ${describeLegacyHit(hit)}.`
+        : `Renamed the legacy "behavior-type" key to "behaviorType" on ${describeLegacyHit(hit)} — Construct 3 only reads "behaviorType".`;
+      warnings.push(hit.warning ? `${what} ${hit.warning}` : what);
+    }
+    for (const hit of [...scan.unresolved, ...scan.conflicts]) {
+      warnings.push(
+        `${describeLegacyHit(hit)} still carries the legacy "behavior-type" key and was left as is: ${hit.reason}. ` +
+        'Set "behaviorType" to the behavior\'s name by hand and remove "behavior-type".',
+      );
+    }
+  }
+  warnings.push('Other conditions/actions in this project may carry the legacy "behavior-type" key too — run fix_legacy_behavior_keys to find them.');
+  return warnings;
+}
+
 // ─── Object Reference Collection ────────────────────────────
 
 /** Collect all objectClass references from a block and all its descendants.
- *  Depth-limited to match buildBlockEvent's MAX_NESTING_DEPTH guard. */
+ *  Depth-limited to match buildBlockEvent's MAX_NESTING_DEPTH guard.
+ *  Throws on conflicting behaviorType / "behavior-type" values. */
 export function collectObjectRefs(
-  conditions: Array<{ objectClass: string; 'behavior-type'?: string }>,
+  conditions: Array<Readonly<Record<string, unknown>> & { objectClass: string }>,
   actions: Array<Record<string, unknown>>,
   children: ChildEventInput[],
-  refs: Array<{ objectClass: string; 'behavior-type'?: string }>,
+  refs: ObjectRef[],
   depth = 0,
 ): void {
   if (depth > MAX_NESTING_DEPTH) {
     throw new Error(`collectObjectRefs nesting exceeds maximum depth of ${MAX_NESTING_DEPTH}`);
   }
   for (const c of conditions) {
-    refs.push({ objectClass: c.objectClass, 'behavior-type': c['behavior-type'] });
+    refs.push(toObjectRef(c));
   }
   for (const a of actions) {
     if ('objectClass' in a && typeof a.objectClass === 'string') {
-      refs.push({ objectClass: a.objectClass, 'behavior-type': a['behavior-type'] as string | undefined });
+      refs.push(toObjectRef(a as Record<string, unknown> & { objectClass: string }));
     }
   }
   for (const child of children) {
@@ -296,6 +452,41 @@ export function collectObjectRefs(
       depth + 1,
     );
   }
+}
+
+// ─── Condition / Action Builders ────────────────────────────
+
+/** Build a condition. The keys C3 defines follow its on-disk order:
+ *  id, objectClass, sid, behaviorType, parameters, isInverted.
+ *  `isOr` is this server's own flag, not a C3 key (real sheets mark OR
+ *  blocks with `isOrBlock` on the block); its encoding is tracked separately. */
+export function buildCondition(c: z.infer<typeof conditionSchema>, sid: number): Condition {
+  const cond: Condition = {
+    id: c.id,
+    objectClass: c.objectClass,
+    sid,
+  };
+  const { behaviorType } = resolveBehaviorType(c);
+  if (behaviorType) cond.behaviorType = behaviorType;
+  if (c.parameters) cond.parameters = c.parameters;
+  if (c.isInverted) cond.isInverted = true;
+  if (c.isOr) cond.isOr = true;
+  return cond;
+}
+
+/** Build a standard (non-script) action in C3's on-disk shape. */
+export function buildStandardAction(a: z.infer<typeof standardActionSchema>, sid: number): StandardAction {
+  const act: StandardAction = {
+    id: a.id,
+    objectClass: a.objectClass,
+    sid,
+  };
+  const { behaviorType } = resolveBehaviorType(a);
+  if (behaviorType) act.behaviorType = behaviorType;
+  if (a.parameters) act.parameters = a.parameters;
+  if (a.callFunction) act.callFunction = a.callFunction;
+  if (a.disabled) act.disabled = true;
+  return act;
 }
 
 // ─── Recursive Block Builder ────────────────────────────────
@@ -352,16 +543,7 @@ export async function buildBlockEvent(
   const builtConditions: Condition[] = [];
   for (const c of block.conditions) {
     const condSid = await idGen.generateSid(reader);
-    const cond: Condition = {
-      id: c.id,
-      objectClass: c.objectClass,
-      sid: condSid,
-    };
-    if (c['behavior-type']) cond['behavior-type'] = c['behavior-type'];
-    if (c.parameters) cond.parameters = c.parameters;
-    if (c.isInverted) cond.isInverted = true;
-    if (c.isOr) cond.isOr = true;
-    builtConditions.push(cond);
+    builtConditions.push(buildCondition(c, condSid));
   }
 
   // Build actions with SIDs (or as script actions)
@@ -376,16 +558,7 @@ export async function buildBlockEvent(
       builtActions.push(scriptAct);
     } else if ('id' in a) {
       const actSid = await idGen.generateSid(reader);
-      const act: Action = {
-        id: a.id,
-        objectClass: a.objectClass,
-        sid: actSid,
-      };
-      if (a['behavior-type']) act['behavior-type'] = a['behavior-type'];
-      if (a.parameters) act.parameters = a.parameters;
-      if (a.callFunction) act.callFunction = a.callFunction;
-      if (a.disabled) act.disabled = true;
-      builtActions.push(act);
+      builtActions.push(buildStandardAction(a, actSid));
     }
   }
 

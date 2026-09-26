@@ -353,7 +353,7 @@ Returns success with a warning that references were NOT cleaned up.
     {
       "id": "simulate-control",
       "objectClass": "Player",
-      "behavior-type": "Platform",
+      "behaviorType": "Platform",
       "parameters": { "control": "jump" }
     }
   ]
@@ -526,7 +526,7 @@ Returns success with a warning that references were NOT cleaned up.
     {
       "id": "simulate-control",
       "objectClass": "Player",
-      "behavior-type": "Platform",
+      "behaviorType": "Platform",
       "parameters": { "control": "jump" }
     }
   ]

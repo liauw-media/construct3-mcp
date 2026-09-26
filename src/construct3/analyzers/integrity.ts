@@ -10,6 +10,9 @@ import type { Construct3ProjectReader } from '../project-reader.js';
 import type { C3Event, Construct3Project, Layout, ObjectType, EventSheet } from '../types.js';
 import { getProjectIndex } from './index-builder.js';
 import { findOrphanedObjects } from './object-deps.js';
+import { scanLegacyBehaviorKeys, hasOnlyLegacyBehaviorName, describeLegacyHit } from './legacy-behavior-keys.js';
+import { checkBehaviorName } from './behavior-refs.js';
+import type { BehaviorLookupData } from './behavior-refs.js';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -71,6 +74,7 @@ export async function validateProjectIntegrity(
   checkRequiredFieldsLayouts(layouts, errors);
   checkNameConsistency(objects, eventSheets, layouts, errors);
   checkSubfolderStructure(project, errors);
+  await checkLegacyBehaviorKeys(reader, eventSheets, objects, families, errors, warnings);
 
   // Warning checks
   checkDuplicateSids(objects, eventSheets, layouts, families, warnings);
@@ -85,7 +89,7 @@ export async function validateProjectIntegrity(
   await checkBackupFiles(reader, info);
   await checkOrphanedObjects(reader, info);
 
-  const checksRun = 13;
+  const checksRun = 14;
 
   return {
     valid: errors.length === 0,
@@ -306,6 +310,112 @@ function validateSubfolders(
       validateSubfolders(sf.subfolders as Array<Record<string, unknown>>, childPath, errors);
     }
   }
+}
+
+// ─── Check 3c: Legacy "behavior-type" Keys ──────────────────
+
+/**
+ * Behavior conditions/actions must carry "behaviorType". Older versions of
+ * this server wrote "behavior-type", which Construct 3 does not read (issue
+ * #16). One entry per affected sheet and severity:
+ * - error: the behavior name sits only under the legacy key, so C3 looks the
+ *   ACE up on the base plugin and the project fails to open. Names that match
+ *   no behavior on the object (or its families) are called out, because
+ *   renaming the key alone does not fix them.
+ * - warning: the legacy key is a leftover next to a valid "behaviorType", or
+ *   holds no behavior name — dead data that C3 does not read.
+ */
+async function checkLegacyBehaviorKeys(
+  reader: Construct3ProjectReader,
+  sheets: Map<string, EventSheet>,
+  objects: Map<string, ObjectType>,
+  families: Map<string, Record<string, unknown>>,
+  errors: IntegrityIssue[],
+  warnings: IntegrityIssue[]
+): Promise<void> {
+  const lookup: BehaviorLookupData = {
+    objectNames: new Set(await reader.listObjectTypes()),
+    familyNames: new Set(await reader.listFamilies()),
+    objectTypes: objects,
+    families,
+  };
+  const resolve = (objectClass: string, behaviorName: string) => checkBehaviorName(objectClass, behaviorName, lookup);
+
+  for (const [name, sheet] of sheets) {
+    if (!Array.isArray(sheet.events)) continue;
+    const scan = scanLegacyBehaviorKeys(sheet.events, { resolve });
+    const entity = `eventSheets/${name}`;
+    const truncatedNote = scan.truncated
+      ? ' The scan stopped at its size limit, so there may be more.'
+      : '';
+
+    // Behavior name only under the legacy key: the issue #16 load failure.
+    const renamable = scan.fixable.filter(hasOnlyLegacyBehaviorName);
+    const manual = [...scan.unresolved, ...scan.conflicts].filter(hasOnlyLegacyBehaviorName);
+    const brokenCount = renamable.length + manual.length;
+    if (brokenCount > 0) {
+      let message =
+        `${brokenCount} condition(s)/action(s) name their behavior only under the legacy "behavior-type" key: ` +
+        `${listExamples([...renamable, ...manual].map(describeLegacyHit), ', ')}. Construct 3 reads "behaviorType", ` +
+        `so it looks these up on the base plugin and fails to open the project (e.g. "missing action id").`;
+      if (manual.length > 0) {
+        message += ` ${manual.length} of them cannot be renamed automatically — ` +
+          `${listExamples(manual.map(h => `${describeLegacyHit(h)}: ${h.reason}`), '; ')}.`;
+      }
+      const steps: string[] = [];
+      if (renamable.length > 0) {
+        steps.push(`Run fix_legacy_behavior_keys with dryRun: false to rename the key to "behaviorType" on ${renamable.length} of them (each sheet is backed up first).`);
+      }
+      if (manual.length > 0) {
+        steps.push(`For the ${manual.length} it cannot rename, set "behaviorType" to the behavior's name by hand and remove "behavior-type".`);
+      }
+      errors.push({
+        check: 'legacy-behavior-key',
+        entity,
+        message: message + truncatedNote,
+        suggestion: steps.join(' '),
+      });
+    }
+
+    // Legacy key next to a valid behaviorType, or holding no behavior name: dead data.
+    const duplicates = scan.fixable.filter(h => !hasOnlyLegacyBehaviorName(h));
+    const others = [...scan.unresolved, ...scan.conflicts].filter(h => !hasOnlyLegacyBehaviorName(h));
+    const leftoverCount = duplicates.length + others.length;
+    if (leftoverCount > 0) {
+      const details = [
+        ...duplicates.map(h => `${describeLegacyHit(h)}: same value as "behaviorType"`),
+        ...others.map(h => `${describeLegacyHit(h)}: ${h.reason}`),
+      ];
+      const steps: string[] = [];
+      if (duplicates.length > 0) {
+        steps.push('Run fix_legacy_behavior_keys with dryRun: false to drop the leftover keys that repeat "behaviorType".');
+      }
+      if (others.length > 0) {
+        steps.push(`Remove the other ${others.length} "behavior-type" key(s) by hand; if the condition/action belongs to a behavior, make sure "behaviorType" holds the behavior's name.`);
+      }
+      warnings.push({
+        check: 'legacy-behavior-key',
+        entity,
+        message:
+          `${leftoverCount} condition(s)/action(s) carry a leftover "behavior-type" key, which Construct 3 does not read: ` +
+          `${listExamples(details, '; ')}.${brokenCount === 0 ? truncatedNote : ''}`,
+        suggestion: steps.join(' '),
+      });
+    }
+
+    if (scan.truncated && brokenCount === 0 && leftoverCount === 0) {
+      warnings.push({
+        check: 'legacy-behavior-key',
+        entity,
+        message: 'The legacy "behavior-type" scan stopped at its size limit (100,000 events or nesting depth 50); part of this sheet was not checked.',
+      });
+    }
+  }
+}
+
+function listExamples(items: string[], separator: string, max = 3): string {
+  const shown = items.slice(0, max).join(separator);
+  return items.length > max ? `${shown}${separator}and ${items.length - max} more` : shown;
 }
 
 // ─── Check 4: Duplicate SIDs ─────────────────────────────────
