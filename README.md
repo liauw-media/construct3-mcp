@@ -104,6 +104,8 @@ node dist/index.js /path/to/your/project.c3proj
 | `analyze_performance` | Heuristic performance audit with categorized issues |
 | `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). `valid` can be false on projects that load fine (known false positives in [API.md](docs/API.md#validate_project)) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
+| `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
+| `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
 
 ### Mutation Tools (Safe Write Operations)
 
@@ -385,6 +387,7 @@ construct3-mcp/
 │   │       ├── event-flow.ts       # Event sheet flow and function map
 │   │       ├── object-deps.ts      # Object dependencies and orphaned objects
 │   │       ├── asset-usage.ts      # Asset usage tracking
+│   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
 │   │       ├── performance.ts      # Performance heuristics
 │   │       ├── integrity.ts        # Project integrity checks (validate_project)
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
@@ -399,11 +402,11 @@ construct3-mcp/
 │   │   └── zip-writer.ts           # Zero-dep ZIP writer for .c3p packing
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
-│   │   ├── analysis.ts             # 8 analysis tools
+│   │   ├── analysis.ts             # 10 analysis tools
 │   │   ├── mutations.ts            # Registers the domain tool modules below
 │   │   ├── shared.ts               # Shared validation, result/error helpers, editor reload note
 │   │   ├── object-tools.ts         # Object and family tools (6)
-│   │   ├── event-tools.ts          # Event sheet tools (10)
+│   │   ├── event-tools.ts          # Event sheet tools (11)
 │   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators
 │   │   ├── layout-tools.ts         # Layout, layer and instance tools (9)
 │   │   ├── animation-tools.ts      # Sprite animation and frame tools (8)

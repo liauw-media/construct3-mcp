@@ -11,6 +11,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 - Every response that reports a completed project write carries an `editorNote`: the Construct 3 editor keeps the open project in memory, so close and reopen it there before saving, or it overwrites the change (#21).
 - `validate_project` checks rules the Construct 3 editor enforces when it opens a project: expression syntax, empty parameters, trigger placement, duplicate object/family names, family plugin mismatches and object class SID clashes (#18).
 - Event sheet writes (`add_event_block`, `update_event_block`, `add_event_to_sheet`, `update_event_block_action`, `move_events_between_sheets`) are refused when they add a new load-time error; new warnings are returned, existing problems do not block edits (#18).
+- `locate_event` tool: maps an editor location such as "sheet, event N, action M" to the event's JSON path, SID, enclosing group/function, summary and neighbouring events (#19).
+- `get_eventsheet_outline` tool: paged, readable outline of an event sheet with the editor's event numbers; rows that still use the legacy `"behavior-type"` key are marked (#19).
 
 ### Changed
 
