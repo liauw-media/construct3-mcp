@@ -102,7 +102,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `find_orphaned_objects` | Find objects not referenced in any event sheet or layout |
 | `get_asset_usage` | Track sound, image, font, and video asset usage |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
-| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, orphaned and backup files. `valid` can be false on projects that load fine (known false positives in [API.md](docs/API.md#validate_project)) |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). `valid` can be false on projects that load fine (known false positives in [API.md](docs/API.md#validate_project)) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 
 ### Mutation Tools (Safe Write Operations)
@@ -111,11 +111,11 @@ node dist/index.js /path/to/your/project.c3proj
 
 | Tool | Description |
 |------|-------------|
-| `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.) |
+| `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.); refuses names that clash with an object type or family, ignoring case |
 | `update_object_properties` | Add/remove instance variables and behaviors, change global status |
 | `delete_object` | Delete an object (with reference checking and optional force) |
-| `create_family` | Create a family for one plugin type with optional initial members |
-| `update_family` | Add/remove family members and shared instance variables |
+| `create_family` | Create a family; refuses name clashes and members of mixed plugins (load-time checked) |
+| `update_family` | Add/remove members and shared instance variables; refuses member changes that mix plugins (load-time checked) |
 | `delete_family` | Delete a family |
 
 **Event sheets**
@@ -123,12 +123,12 @@ node dist/index.js /path/to/your/project.c3proj
 | Tool | Description |
 |------|-------------|
 | `create_event_sheet` | Create a new event sheet with optional includes |
-| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet |
-| `add_event_block` | Add a block event with conditions + actions (gameplay logic) |
-| `update_event_block` | Update an existing block: modify/add/remove actions and conditions |
-| `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index) |
+| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked) |
+| `add_event_block` | Add a block event with conditions + actions (gameplay logic); refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) |
+| `update_event_block` | Update an existing block: modify/add/remove actions and conditions (load-time checked) |
+| `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; load-time checked) |
 | `update_event_variable` | Rename a variable or change its type, initial value, static or constant flag |
-| `move_events_between_sheets` | Copy or move top-level events between sheets by SID (optionally into a group) |
+| `move_events_between_sheets` | Copy or move top-level events between sheets by SID (optionally into a group); load-time checked, so copying an event that breaks a load-time rule is refused |
 | `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
 | `remove_event_from_sheet` | Remove an include from a sheet by included sheet name |
 | `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
@@ -387,6 +387,9 @@ construct3-mcp/
 │   │       ├── asset-usage.ts      # Asset usage tracking
 │   │       ├── performance.ts      # Performance heuristics
 │   │       ├── integrity.ts        # Project integrity checks (validate_project)
+│   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
+│   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
+│   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
 │   │       └── group-settings.ts   # Event group settings (get_group_settings)
 │   ├── resources/
 │   │   ├── project.ts              # 6 project resources
@@ -525,7 +528,7 @@ We welcome contributions! Here's how to get started:
 - **Editor Holds the Project in Memory**: Close and reopen the project in Construct 3 after MCP edits and before saving there, or the editor can overwrite them
 - **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned, see Phase 7)
 - **Runtime Bridge Requires Browser Automation**: The runtime tools inject a bridge script but need an external tool (Playwright, curl, or any CDP-capable tool) to drive the browser and interact with the running game
-- **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs)
+- **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs). Only the editor load-time rules listed under `validate_project` are checked; triggers are recognised by the `on-` id convention, which third-party addons do not always follow, so their trigger problems are warnings only. OR blocks cannot be created: conditions are always AND-combined
 
 ## License
 

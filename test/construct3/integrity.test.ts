@@ -54,7 +54,7 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(14);
+    expect(result.summary.checksRun).toBe(19);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 
@@ -328,7 +328,7 @@ describe('validateProjectIntegrity', () => {
 
   // ─── Check 4: duplicate-sid ──────────────────────────────
 
-  it('detects duplicate SIDs', async () => {
+  it('reports duplicate object type SIDs as errors (object class sid already in use)', async () => {
     const reader = createReader({
       objects: new Map([
         ['Obj1', { name: 'Obj1', 'plugin-id': 'Sprite', sid: 999 }],
@@ -342,13 +342,17 @@ describe('validateProjectIntegrity', () => {
       ]),
     });
     const result = await validateProjectIntegrity(reader);
-    const warn = result.warnings.find(w => w.check === 'duplicate-sid');
-    expect(warn).toBeDefined();
-    expect(warn!.message).toContain('999');
-    expect(warn!.message).toContain('2 times');
+    expect(result.valid).toBe(false);
+    const err = result.errors.find(e => e.check === 'duplicate-sid');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('999');
+    expect(err!.message).toContain('2 times');
+    expect(err!.message).toContain('"object class sid already in use"');
+    expect(err!.message).not.toContain('wrong plugin');
+    expect(result.warnings.find(w => w.check === 'duplicate-sid')).toBeUndefined();
   });
 
-  it('detects duplicate SIDs in behavior types', async () => {
+  it('reports duplicate SIDs in behavior types as warnings (no load failure on record)', async () => {
     const reader = createReader({
       objects: new Map([
         ['Sprite', {
@@ -368,8 +372,207 @@ describe('validateProjectIntegrity', () => {
       ],
     });
     const result = await validateProjectIntegrity(reader);
+    // The editor's loader checks only object class SIDs; the "wrong plugin"
+    // failure once blamed on such clashes came from family plugins.
+    expect(result.valid).toBe(true);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
     const warn = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('500'));
     expect(warn).toBeDefined();
+    expect(warn!.message).toContain('No load failure is on record');
+    expect(warn!.message).not.toContain('wrong plugin');
+    expect(warn!.message).not.toContain('fail to open');
+  });
+
+  it('reports duplicate SIDs between an instance variable and a family variable as warnings', async () => {
+    const reader = createReader({
+      objects: new Map([
+        ['Enemy', {
+          name: 'Enemy', 'plugin-id': 'Sprite', sid: 100,
+          instanceVariables: [{ name: 'hp', type: 'number', sid: 777 }],
+        }],
+      ]),
+      families: new Map([
+        ['Enemies', {
+          name: 'Enemies', 'plugin-id': 'Sprite', sid: 400, members: ['Enemy'],
+          instanceVariables: [{ name: 'speed', type: 'number', sid: 777 }],
+        }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(true);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
+    const warn = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('777'));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain('families/Enemies/var:speed');
+    expect(warn!.message).toContain('No load failure is on record');
+  });
+
+  it('reports an object type SID reused by a family behavior as a warning', async () => {
+    const reader = createReader({
+      objects: new Map([['Enemy', { name: 'Enemy', 'plugin-id': 'Sprite', sid: 100 }]]),
+      families: new Map([
+        ['Enemies', {
+          name: 'Enemies', 'plugin-id': 'Sprite', sid: 400, members: ['Enemy'],
+          behaviorTypes: [{ behaviorId: 'solid', name: 'Solid', sid: 100 }],
+        }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
+    const warn = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('SID 100 '));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain('families/Enemies/behavior:Solid');
+  });
+
+  it('keeps duplicate SIDs outside object type files as warnings', async () => {
+    const reader = createReader({
+      objects: new Map([['Sprite', { name: 'Sprite', 'plugin-id': 'Sprite', sid: 100 }]]),
+      eventSheets: new Map([['MainSheet', {
+        name: 'MainSheet', sid: 200,
+        events: [{ eventType: 'block', sid: 100, conditions: [], actions: [] }],
+      }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
+    const warn = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('100'));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain('eventSheets/MainSheet > block (sid 100)');
+    expect(warn!.message).toContain('No load failure is on record');
+    expect(warn!.suggestion).not.toMatch(/regenerate|Re-save the project/);
+  });
+
+  it('keeps duplicate animation SIDs across object types as warnings (as in Scirra\'s persistent-layouts example)', async () => {
+    const anim = (sid: number) => ({ items: [{ name: 'Default', sid, frames: [] }], subfolders: [] });
+    const reader = createReader({
+      objects: new Map([
+        ['NonPersistPickup', { name: 'NonPersistPickup', 'plugin-id': 'Sprite', sid: 16, animations: anim(17) }],
+        ['PersistPickup', { name: 'PersistPickup', 'plugin-id': 'Sprite', sid: 36, animations: anim(17) }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('17'))).toBeDefined();
+  });
+
+  it('does not flag layout instanceFolderItem SIDs that repeat the instance SID', async () => {
+    const reader = createReader({
+      objects: new Map([['Sprite', { name: 'Sprite', 'plugin-id': 'Sprite', sid: 100 }]]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', {
+        name: 'Layout 1', sid: 300,
+        layers: [{
+          name: 'Main', sid: 301,
+          instances: [{ type: 'Sprite', uid: 0, sid: 302, properties: {}, instanceFolderItem: { sid: 302 } }],
+        }],
+      }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'duplicate-sid')).toBeUndefined();
+  });
+
+  // Editor-saved projects carry duplicate action/condition/event and layout
+  // instance SIDs across many saves and still open: the warning must say so,
+  // must not advise re-saving, and must say where each duplicate is.
+  const sheetProject = (events: unknown[], extra: Record<string, unknown> = {}) => createReader({
+    objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 100 }]]),
+    eventSheets: new Map([['Sheet1', { name: 'Sheet1', sid: 200, events }]]),
+    layouts: new Map([['Layout1', { name: 'Layout1', sid: 300, layers: [{ name: 'Layer1', sid: 301, instances: [] }] }]]),
+    usedAddons: [{ type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false }],
+    ...extra,
+  });
+  const wait = (sid: number) => ({ id: 'wait', objectClass: 'System', sid, parameters: { seconds: '1' } });
+
+  it('locates duplicate action SIDs in the sheet and does not advise re-saving', async () => {
+    const reader = sheetProject([
+      { eventType: 'block', sid: 400000000000001, conditions: [], actions: [wait(400000000000002)] },
+      { eventType: 'block', sid: 400000000000003, conditions: [], actions: [wait(400000000000002)] },
+    ]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'duplicate-sid')).toBeUndefined();
+    const dupes = result.warnings.filter(w => w.check === 'duplicate-sid');
+    expect(dupes).toHaveLength(1);
+    const warn = dupes[0];
+    expect(warn.entity).toBe('eventSheets/Sheet1 > block (sid 400000000000001) > action 0 "wait" (System)');
+    expect(warn.message).toContain('SID 400000000000002 is used 2 times');
+    expect(warn.message).toContain('eventSheets/Sheet1 > block (sid 400000000000003) > action 0 "wait" (System)');
+    expect(warn.message).toContain('No load failure is on record');
+    expect(warn.message).toContain('the editor keeps them when it saves');
+    expect(warn.suggestion).toContain('new project-unique SID');
+    expect(warn.suggestion).not.toMatch(/regenerate|Re-save the project/);
+  });
+
+  it('names the enclosing group and the condition index of a duplicate condition SID', async () => {
+    const onStart = (sid: number) => ({ id: 'on-start-of-layout', objectClass: 'System', sid });
+    const reader = sheetProject([
+      { eventType: 'group', sid: 410, title: 'Group1', children: [
+        { eventType: 'block', sid: 411, conditions: [onStart(412)], actions: [] },
+      ] },
+      { eventType: 'block', sid: 413, conditions: [onStart(412)], actions: [] },
+    ]);
+    const result = await validateProjectIntegrity(reader);
+    const warn = result.warnings.find(w => w.check === 'duplicate-sid');
+    expect(warn!.message).toContain('eventSheets/Sheet1 > group "Group1" (sid 410) > block (sid 411) > condition 0 "on-start-of-layout" (System)');
+    expect(warn!.message).toContain('eventSheets/Sheet1 > block (sid 413) > condition 0');
+  });
+
+  it('collapses a SID repeated many times into a bounded message with a summary', async () => {
+    const events = Array.from({ length: 41 }, (_, i) => (
+      { eventType: 'block', sid: 5000 + i, conditions: [], actions: [wait(900)] }
+    ));
+    const result = await validateProjectIntegrity(sheetProject(events));
+    const dupes = result.warnings.filter(w => w.check === 'duplicate-sid');
+    expect(dupes).toHaveLength(1);
+    const msg = dupes[0].message;
+    expect(msg).toContain('SID 900 is used 41 times (41 actions in eventSheets/Sheet1)');
+    expect(msg).toContain('and 36 more');
+    expect(msg.split('action 0 "wait"')).toHaveLength(6); // five locations listed
+    expect(msg.length).toBeLessThan(1000);
+    expect(dupes[0].entity).toBe('eventSheets/Sheet1 > block (sid 5000) > action 0 "wait" (System)');
+  });
+
+  it('reports two layout instances sharing a SID once, not counting their instanceFolderItem copies', async () => {
+    const inst = (uid: number) => ({ type: 'Sprite1', uid, sid: 302, properties: {}, instanceFolderItem: { sid: 302 } });
+    const reader = sheetProject([], {
+      layouts: new Map([['Layout1', {
+        name: 'Layout1', sid: 300,
+        layers: [{ name: 'Layer1', sid: 301, instances: [inst(1), inst(2)] }],
+      }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    const dupes = result.warnings.filter(w => w.check === 'duplicate-sid');
+    expect(dupes).toHaveLength(1);
+    expect(dupes[0].message).toContain('SID 302 is used 2 times');
+    expect(dupes[0].message).toContain('layouts/Layout1/layer:Layer1/inst:Sprite1:1');
+    expect(dupes[0].message).toContain('layouts/Layout1/layer:Layer1/inst:Sprite1:2');
+    expect(dupes[0].message).toContain('No load failure is on record');
+    expect(dupes[0].suggestion).not.toMatch(/regenerate|Re-save the project/);
+  });
+
+  it('does not call duplicate function parameter SIDs harmless (the loader checks them)', async () => {
+    const reader = sheetProject([{
+      eventType: 'function-block', sid: 600, functionName: 'Func1', functionReturnType: 'none',
+      functionParameters: [
+        { name: 'a', type: 'number', initialValue: '0', sid: 601 },
+        { name: 'b', type: 'number', initialValue: '0', sid: 601 },
+      ],
+      conditions: [], actions: [],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    const warn = result.warnings.find(w => w.check === 'duplicate-sid');
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain('eventSheets/Sheet1 > function "Func1" (sid 600) > parameter 0 "a"');
+    expect(warn!.message).toContain('parameter 1 "b"');
+    expect(warn!.message).not.toContain('No load failure');
+    expect(warn!.message).toContain('may stop the project from opening');
+    expect(warn!.suggestion).not.toMatch(/regenerate|Re-save the project/);
   });
 
   // ─── Check 5: duplicate-uid ──────────────────────────────
@@ -636,5 +839,186 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     const orphanInfo = result.info.find(i => i.check === 'orphaned-object' && i.entity.includes('UnusedSprite'));
     expect(orphanInfo).toBeDefined();
+  });
+
+  // ─── Editor load-time rules ──────────────────────────────
+
+  /** Project with Keyboard + Sprite objects and one event sheet holding `events`. */
+  function projectWithEvents(events: unknown[], extra: Partial<ConstructorParameters<typeof MockReader>[0]> = {}) {
+    return createReader({
+      objects: new Map([
+        ['Keyboard', { name: 'Keyboard', 'plugin-id': 'Keyboard', sid: 100 }],
+        ['Player', { name: 'Player', 'plugin-id': 'Sprite', sid: 101 }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', sid: 200, events }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+      usedAddons: [
+        { type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false },
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+      ],
+      ...extra,
+    });
+  }
+
+  it('reports a nested trigger as a trigger-placement error', async () => {
+    const reader = projectWithEvents([{
+      eventType: 'block', sid: 400,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 401 }],
+      actions: [],
+      children: [{
+        eventType: 'block', sid: 402,
+        conditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', sid: 403, parameters: { key: 32 } }],
+        actions: [],
+      }],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(false);
+    const err = result.errors.find(e => e.check === 'trigger-placement');
+    expect(err).toBeDefined();
+    expect(err!.entity).toContain('eventSheets/MainSheet');
+    expect(err!.message).toContain('cannot add another trigger to event branch');
+  });
+
+  it('accepts several triggers in an OR block', async () => {
+    const reader = projectWithEvents([{
+      eventType: 'block', sid: 400, isOrBlock: true,
+      conditions: [
+        { id: 'on-key-pressed', objectClass: 'Keyboard', sid: 401, parameters: { key: 32 } },
+        { id: 'on-start-of-layout', objectClass: 'System', sid: 402 },
+      ],
+      actions: [],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.filter(e => e.check === 'trigger-placement')).toEqual([]);
+    expect(result.warnings.filter(w => w.check === 'trigger-placement')).toEqual([]);
+  });
+
+  it('reports third-party trigger problems as warnings only', async () => {
+    const reader = projectWithEvents([{
+      eventType: 'block', sid: 400,
+      conditions: [
+        { id: 'compare-eventvar', objectClass: 'System', sid: 401 },
+        { id: 'on-login-success', objectClass: 'NGIO', sid: 402 },
+      ],
+      actions: [],
+    }], {
+      objects: new Map([['NGIO', { name: 'NGIO', 'plugin-id': 'ppstudio_ngio', sid: 100 }]]),
+      usedAddons: [{ type: 'plugin', id: 'ppstudio_ngio', name: 'NGIO', author: 'Pixel Perfect Studio', bundled: false }],
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'trigger-placement')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'trigger-placement')).toBeDefined();
+  });
+
+  it('reports expression problems as errors and accepts backslashes inside strings', async () => {
+    const reader = projectWithEvents([{
+      eventType: 'block', sid: 400,
+      conditions: [{ id: 'every-tick', objectClass: 'System', sid: 401 }],
+      actions: [
+        { id: 'set-text', objectClass: 'Player', sid: 402, parameters: { text: '"{\\"a\\":1}"' } },
+        { id: 'set-text', objectClass: 'Player', sid: 403, parameters: { text: '' } },
+        { id: 'set-text', objectClass: 'Player', sid: 404, parameters: { text: '"C:\\folder\\" & Player.UID' } },
+      ],
+    }]);
+    const result = await validateProjectIntegrity(reader);
+    const syntax = result.errors.filter(e => e.check === 'expression-syntax');
+    const empty = result.errors.filter(e => e.check === 'empty-expression');
+    expect(syntax).toHaveLength(1);
+    expect(syntax[0].entity).toContain('action 0');
+    expect(empty).toHaveLength(1);
+    expect(empty[0].entity).toContain('action 1');
+  });
+
+  it('reports duplicate object type names in the c3proj tree as errors', async () => {
+    const reader = validProject();
+    const origGetProject = reader.getProject.bind(reader);
+    reader.getProject = () => {
+      const proj = origGetProject();
+      proj.objectTypes = {
+        items: ['Sprite'],
+        subfolders: [{ name: 'Moved', items: ['Sprite'], subfolders: [] }],
+      };
+      return proj;
+    };
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(false);
+    const err = result.errors.find(e => e.check === 'duplicate-object-name');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain("object class name 'Sprite' already used");
+  });
+
+  it('reports a family named like an object type (ignoring case) as an error', async () => {
+    const reader = createReader({
+      objects: new Map([['Enemy', { name: 'Enemy', 'plugin-id': 'Sprite', sid: 100 }]]),
+      families: new Map([['enemy', { name: 'enemy', 'plugin-id': 'Sprite', sid: 400, members: ['Enemy'] }]]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    const err = result.errors.find(e => e.check === 'duplicate-object-name');
+    expect(err).toBeDefined();
+    expect(err!.entity).toContain('object type "Enemy"');
+    expect(err!.entity).toContain('family "enemy"');
+  });
+
+  it('reports a family member with a different plugin as an error', async () => {
+    const reader = createReader({
+      objects: new Map([
+        ['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 100 }],
+        ['Label', { name: 'Label', 'plugin-id': 'Text', sid: 101 }],
+      ]),
+      families: new Map([
+        ['Actors', { name: 'Actors', 'plugin-id': 'Sprite', sid: 400, members: ['Hero', 'Label'] }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    const err = result.errors.find(e => e.check === 'family-plugin-mismatch');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('"Label"');
+    expect(err!.message).toContain('"Text"');
+    expect(err!.message).toContain('"wrong plugin"');
+  });
+
+  it('accepts a family whose members share its plugin', async () => {
+    const reader = createReader({
+      objects: new Map([
+        ['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 100 }],
+        ['Villain', { name: 'Villain', 'plugin-id': 'Sprite', sid: 101 }],
+      ]),
+      families: new Map([
+        ['Actors', { name: 'Actors', 'plugin-id': 'Sprite', sid: 400, members: ['Hero', 'Villain'] }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.check === 'family-plugin-mismatch')).toBeUndefined();
+  });
+});
+
+// ─── Real fixtures ─────────────────────────────────────────
+
+describe('validateProjectIntegrity on real fixtures', () => {
+  beforeEach(() => {
+    resetProjectIndex();
+  });
+
+  it('stays clean on the editor-verified c3-loadable-minimal fixture', async () => {
+    const reader = new Construct3ProjectReader(join(__dirname, '..', 'fixtures', 'c3-loadable-minimal', 'project.c3proj'));
+    await reader.loadProject();
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+    const loadRuleChecks = ['expression-syntax', 'empty-expression', 'trigger-placement', 'duplicate-object-name', 'family-plugin-mismatch', 'duplicate-sid'];
+    expect(result.warnings.filter(w => loadRuleChecks.includes(w.check))).toEqual([]);
+  });
+
+  it('finds no load-time errors in the minimal-project fixture', async () => {
+    const reader = new Construct3ProjectReader(join(__dirname, '..', 'fixtures', 'minimal-project', 'project.c3proj'));
+    await reader.loadProject();
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors).toEqual([]);
   });
 });

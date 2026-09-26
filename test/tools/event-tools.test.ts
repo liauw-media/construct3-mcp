@@ -1925,3 +1925,554 @@ describe('fix_legacy_behavior_keys', () => {
     expect(data.message).toContain('The scan stopped at its size limit in MainSheet');
   });
 });
+
+describe('editor load-time rules (pre-write)', () => {
+  /** Keyboard + Player (Sprite) objects, both Scirra addons, and the given sheet events. */
+  function setupSheet(events: unknown[], extra: Record<string, unknown> = {}) {
+    return setup({
+      objects: new Map([
+        ['Keyboard', { name: 'Keyboard', 'plugin-id': 'Keyboard', sid: 1 }],
+        ['Player', { name: 'Player', 'plugin-id': 'Sprite', sid: 2 }],
+      ]),
+      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events, sid: 10 }]]),
+      usedAddons: [
+        { type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false },
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+      ],
+      ...extra,
+    });
+  }
+
+  /** A top-level "On start of layout" event with one non-trigger sub-event (sid 110). */
+  function triggeredParent() {
+    return [{
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }],
+      actions: [],
+      children: [{
+        eventType: 'block', sid: 110,
+        conditions: [{ id: 'compare-eventvar', objectClass: 'System', sid: 111 }],
+        actions: [],
+      }],
+    }];
+  }
+
+  it('add_event_block rejects a backslash-escaped quote and writes nothing', async () => {
+    const { server, writer } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [{ id: 'set-text', objectClass: 'Player', parameters: { text: '"{\\"a\\":1}"' } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('load-time check failed');
+    expect(result.content[0].text).toContain('Syntax error: Unknown character');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('add_event_block accepts a backslash inside a string literal', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [{ id: 'set-text', objectClass: 'Player', parameters: { text: '"C:\\folder\\" & Player.UID' } }],
+    });
+    expect(parseResult(result).success).toBe(true);
+  });
+
+  it('add_event_block rejects an empty parameter but accepts the empty string literal', async () => {
+    const { server } = setupSheet([]);
+    const bad = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [{ id: 'set-text', objectClass: 'Player', parameters: { text: '' } }],
+    });
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0].text).toContain('Empty expression');
+
+    const good = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [{ id: 'set-text', objectClass: 'Player', parameters: { text: '""' } }],
+    });
+    expect(parseResult(good).success).toBe(true);
+  });
+
+  it('add_event_block checks condition parameters too', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'compare-two-values', objectClass: 'System', parameters: { 'first-value': '"unterminated', comparison: 0, 'second-value': '1' } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('unterminated string literal');
+  });
+
+  it('add_event_block rejects two triggers in one event', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [
+        { id: 'on-start-of-layout', objectClass: 'System' },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cannot add another trigger to event branch');
+  });
+
+  it('add_event_block warns (does not block) when a trigger is not the first condition', async () => {
+    const { server, writer } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [
+        { id: 'compare-eventvar', objectClass: 'System', parameters: { variable: 'score', comparison: 0, value: '1' } },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } },
+      ],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('must be the first condition') && w.includes('moves it to the top'))).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('add_event_block writes a fake trigger (On collision) after another condition, with a warning', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [
+        { id: 'is-overlapping-another-object', objectClass: 'Player', parameters: { object: 'Player' } },
+        { id: 'on-collision-with-another-object', objectClass: 'Player', parameters: { object: 'Player' } },
+      ],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('on-collision-with-another-object'))).toBe(true);
+  });
+
+  it('add_event_block rejects triggers combined with isOr and says what to do instead', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [
+        { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 38 }, isOr: true },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('separate events');
+    expect(text).not.toContain('"isOrBlock": true');
+  });
+
+  it('add_event_block rejects a trigger sub-event under a trigger', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      children: [{ conditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } }] }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cannot add another trigger to event branch');
+  });
+
+  it('add_event_block allows a trigger sub-event under a non-trigger event', async () => {
+    const { server } = setupSheet([]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      children: [{ conditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } }] }],
+    });
+    expect(parseResult(result).success).toBe(true);
+  });
+
+  it('add_event_block only warns for third-party trigger problems', async () => {
+    const { server } = setupSheet([], {
+      objects: new Map([['NGIO', { name: 'NGIO', 'plugin-id': 'ppstudio_ngio', sid: 1 }]]),
+      usedAddons: [{ type: 'plugin', id: 'ppstudio_ngio', name: 'NGIO', author: 'Pixel Perfect Studio', bundled: false }],
+    });
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [
+        { id: 'every-tick', objectClass: 'System' },
+        { id: 'on-login-success', objectClass: 'NGIO' },
+      ],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('must be the first condition'))).toBe(true);
+  });
+
+  it('add_event_block ignores problems that already exist in the sheet', async () => {
+    const { server } = setupSheet([{
+      eventType: 'block', sid: 100,
+      conditions: [
+        { id: 'compare-eventvar', objectClass: 'System', sid: 101 },
+        { id: 'on-start-of-layout', objectClass: 'System', sid: 102 },
+      ],
+      actions: [{ id: 'set-text', objectClass: 'Player', sid: 103, parameters: { text: '' } }],
+    }]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'every-tick', objectClass: 'System' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+  });
+
+  it('update_event_block rejects a trigger added to a sub-event of a triggered event', async () => {
+    const { server, writer, reader } = setupSheet(triggeredParent());
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 110,
+      addConditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cannot add another trigger to event branch');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    // In-memory sheet restored
+    const sheet = await reader.readEventSheet('MainSheet');
+    const child = ((sheet.events[0] as Record<string, unknown>).children as Array<Record<string, unknown>>)[0];
+    expect(child.conditions as unknown[]).toHaveLength(1);
+  });
+
+  it('update_event_block rejects a trigger added inside a function block', async () => {
+    const { server } = setupSheet([{
+      eventType: 'function-block', functionName: 'DoIt', sid: 100, conditions: [], actions: [],
+      children: [{ eventType: 'block', sid: 110, conditions: [], actions: [] }],
+    }]);
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 110,
+      addConditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('function "DoIt"');
+  });
+
+  it('update_event_block allows another trigger in an OR block', async () => {
+    const { server } = setupSheet([{
+      eventType: 'block', sid: 100, isOrBlock: true,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }],
+      actions: [],
+    }]);
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      addConditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } }],
+    });
+    expect(parseResult(result).success).toBe(true);
+  });
+
+  it('update_event_block rejects a bad expression in updated action parameters', async () => {
+    const { server } = setupSheet([{
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'every-tick', objectClass: 'System', sid: 101 }],
+      actions: [{ id: 'set-text', objectClass: 'Player', sid: 102, parameters: { text: '"ok"' } }],
+    }]);
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 100,
+      updateActions: [{ index: 0, parameters: { text: '"say \\"hi\\""' } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('backslash outside a string literal');
+  });
+
+  it('update_event_block_action rejects an empty parameter', async () => {
+    const { server, writer } = setupSheet([{
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'every-tick', objectClass: 'System', sid: 101 }],
+      actions: [{ id: 'set-text', objectClass: 'Player', sid: 102, parameters: { text: '"ok"' } }],
+    }]);
+    const result = await server.callTool('update_event_block_action', {
+      sheetName: 'MainSheet',
+      blockSid: 100,
+      actionIndex: 0,
+      parameters: { text: '' },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Empty expression');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('add_event_to_sheet still writes to a sheet with pre-existing problems', async () => {
+    const { server, writer } = setupSheet([{
+      eventType: 'block', sid: 100,
+      conditions: [
+        { id: 'on-start-of-layout', objectClass: 'System', sid: 101 },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', sid: 102 },
+      ],
+      actions: [],
+    }]);
+    const result = await server.callTool('add_event_to_sheet', {
+      sheetName: 'MainSheet',
+      eventType: 'function',
+      functionName: 'Helper',
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('add_event_to_sheet at the start does not treat problems on SID-less events as new', async () => {
+    const { server, writer } = setupSheet([{
+      eventType: 'block',
+      conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      actions: [{ id: 'set-text', objectClass: 'Player', parameters: { text: '' } }],
+    }]);
+    const result = await server.callTool('add_event_to_sheet', {
+      sheetName: 'MainSheet',
+      eventType: 'comment',
+      commentText: 'Header',
+      position: 'start',
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('update_event_block rejects a nested trigger whose warning becomes an error', async () => {
+    // Block 70 is nested under a third-party trigger (a warning). Adding a built-in
+    // trigger to block 60 in between makes block 60 the branch root of block 70.
+    const { server, writer } = setupSheet([{
+      eventType: 'block', sid: 40,
+      conditions: [{ id: 'on-login-success', objectClass: 'NGIO', sid: 41 }],
+      actions: [],
+      children: [{
+        eventType: 'block', sid: 60, conditions: [], actions: [],
+        children: [{
+          eventType: 'block', sid: 70,
+          conditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', sid: 71, parameters: { key: 32 } }],
+          actions: [],
+        }],
+      }],
+    }], {
+      objects: new Map([
+        ['Keyboard', { name: 'Keyboard', 'plugin-id': 'Keyboard', sid: 1 }],
+        ['NGIO', { name: 'NGIO', 'plugin-id': 'ppstudio_ngio', sid: 3 }],
+      ]),
+      usedAddons: [
+        { type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false },
+        { type: 'plugin', id: 'ppstudio_ngio', name: 'NGIO', author: 'Pixel Perfect Studio', bundled: false },
+      ],
+    });
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 60,
+      addConditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('block (sid 70)');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('update_event_block allows removing one of several triggers (a partial fix)', async () => {
+    const { server, writer } = setupSheet([{
+      eventType: 'block', sid: 60,
+      conditions: [
+        { id: 'on-start-of-layout', objectClass: 'System', sid: 61 },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', sid: 62, parameters: { key: 32 } },
+        { id: 'on-key-released', objectClass: 'Keyboard', sid: 63, parameters: { key: 32 } },
+      ],
+      actions: [],
+    }]);
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 60,
+      removeConditionIndices: [2],
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('update_event_block rejects a trigger added inside a custom action block', async () => {
+    const { server } = setupSheet([{
+      eventType: 'custom-ace-block', aceType: 'action', aceName: 'Jump', objectClass: 'Player', sid: 100,
+      conditions: [], actions: [],
+      children: [{ eventType: 'block', sid: 110, conditions: [], actions: [] }],
+    }]);
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'MainSheet',
+      sid: 110,
+      addConditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('custom action Player.Jump');
+  });
+
+  it('write tools do not crash on a malformed (null) condition already in the sheet', async () => {
+    const { server } = setupSheet([{
+      eventType: 'block', sid: 100,
+      conditions: [null, { id: 'every-tick', objectClass: 'System', sid: 101 }],
+      actions: [],
+    }]);
+    const added = await server.callTool('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'every-tick', objectClass: 'System' }],
+    });
+    expect(parseResult(added).success).toBe(true);
+    const updated = await server.callTool('add_event_to_sheet', {
+      sheetName: 'MainSheet',
+      eventType: 'comment',
+      commentText: 'note',
+    });
+    expect(parseResult(updated).success).toBe(true);
+  });
+});
+
+describe('move_events_between_sheets load-time gate', () => {
+  /** SheetA (source) and SheetB (target) with Keyboard + Player objects from Scirra addons. */
+  function setupPair(sourceEvents: unknown[], targetEvents: unknown[] = []) {
+    return setup({
+      objects: new Map([
+        ['Keyboard', { name: 'Keyboard', 'plugin-id': 'Keyboard', sid: 1 }],
+        ['Player', { name: 'Player', 'plugin-id': 'Sprite', sid: 2 }],
+      ]),
+      eventSheets: new Map([
+        ['SheetA', { name: 'SheetA', events: sourceEvents, sid: 10 }],
+        ['SheetB', { name: 'SheetB', events: targetEvents, sid: 20 }],
+      ]),
+      usedAddons: [
+        { type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false },
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+      ],
+    });
+  }
+
+  /** A hand-written block the editor refuses to load: an empty expression parameter. */
+  function brokenBlock() {
+    return {
+      eventType: 'block', sid: 100,
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }],
+      actions: [{ id: 'set-text', objectClass: 'Player', sid: 102, parameters: { text: '' } }],
+    };
+  }
+
+  async function sheetJson(reader: MockReader, name: string): Promise<string> {
+    return JSON.stringify(await reader.readEventSheet(name));
+  }
+
+  it('refuses to copy an event that breaks a load-time rule and leaves both sheets unchanged', async () => {
+    const { server, reader, writer } = setupPair([brokenBlock()]);
+    const sourceBefore = await sheetJson(reader, 'SheetA');
+    const targetBefore = await sheetJson(reader, 'SheetB');
+
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100], deleteSource: false,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('load-time check failed');
+    expect(result.content[0].text).toContain('Empty expression');
+    expect(result.content[0].text).toContain('eventSheets/SheetB');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(await sheetJson(reader, 'SheetA')).toBe(sourceBefore);
+    expect(await sheetJson(reader, 'SheetB')).toBe(targetBefore);
+  });
+
+  it('refuses to copy an event with two triggers', async () => {
+    const { server, writer } = setupPair([{
+      eventType: 'block', sid: 100,
+      conditions: [
+        { id: 'on-start-of-layout', objectClass: 'System', sid: 101 },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', sid: 102, parameters: { key: 32 } },
+      ],
+      actions: [],
+    }]);
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cannot add another trigger to event branch');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('allows moving (deleteSource) an event that already breaks a rule: the problem moves, none is added', async () => {
+    const { server, writer } = setupPair([brokenBlock()]);
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100], deleteSource: true,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(2);
+  });
+
+  it('allows moving a broken sub-event without a SID into a group', async () => {
+    // A SID-less event is keyed by its location, which gains the target groups;
+    // the move is still only a relocation.
+    const { server, writer } = setupPair(
+      [{
+        eventType: 'block', sid: 100,
+        conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 101 }],
+        actions: [],
+        children: [{ eventType: 'block', conditions: [], actions: [{ id: 'set-text', objectClass: 'Player', parameters: { text: '' } }] }],
+      }],
+      [{ eventType: 'group', sid: 200, title: 'G1', children: [{ eventType: 'group', sid: 210, title: 'G2', children: [] }] }],
+    );
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100], deleteSource: true, targetGroupPath: 'G1 > G2',
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(2);
+  });
+
+  it('moves a clean trigger block into nested groups without warnings', async () => {
+    const { server, writer } = setupPair(
+      [{
+        eventType: 'block', sid: 100,
+        conditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', sid: 101, parameters: { key: 32 } }],
+        actions: [{ id: 'set-text', objectClass: 'Player', sid: 102, parameters: { text: '"jump"' } }],
+      }],
+      [{ eventType: 'group', sid: 200, title: 'G1', children: [{ eventType: 'group', sid: 210, title: 'G2', children: [] }] }],
+    );
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100], deleteSource: true, targetGroupPath: 'G1 > G2',
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+    const targetWrite = writer.callsFor('writeEntityFile').find((c: any) => c.args[1] === 'SheetB');
+    const targetEvents = (targetWrite!.args[2] as any).events;
+    expect(targetEvents[0].children[0].children[0].sid).toBe(100);
+  });
+
+  it('returns the warnings a copy adds and still writes', async () => {
+    const { server, writer } = setupPair([{
+      eventType: 'block', sid: 100,
+      conditions: [
+        { id: 'compare-eventvar', objectClass: 'System', sid: 101, parameters: { variable: 'score', comparison: 0, value: '1' } },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', sid: 102, parameters: { key: 32 } },
+      ],
+      actions: [],
+    }]);
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toHaveLength(1);
+    expect(data.warnings[0]).toContain('eventSheets/SheetB');
+    expect(data.warnings[0]).toContain('must be the first condition');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
+  });
+
+  it('cannot target a group under a triggered block (group paths start at the top level)', async () => {
+    const { server, writer } = setupPair(
+      [{
+        eventType: 'block', sid: 100,
+        conditions: [{ id: 'on-key-pressed', objectClass: 'Keyboard', sid: 101, parameters: { key: 32 } }],
+        actions: [],
+      }],
+      [{
+        eventType: 'block', sid: 200,
+        conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 201 }],
+        actions: [],
+        children: [{ eventType: 'group', sid: 210, title: 'G', children: [] }],
+      }],
+    );
+    const result = await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100], targetGroupPath: 'G',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Group path "G" not found');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+});

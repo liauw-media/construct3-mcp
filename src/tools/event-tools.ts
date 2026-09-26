@@ -21,6 +21,10 @@ import {
   summarizeEvents,
   loadBehaviorLookup,
   normalizeLegacyBehaviorKeys,
+  snapshotEvents,
+  checkLoadRulesBeforeWrite,
+  checkLoadRulesBeforeSheetPairWrite,
+  loadRuleErrorMessage,
 } from './event-helpers.js';
 import type { ObjectRef } from './event-helpers.js';
 import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/index-builder.js';
@@ -129,6 +133,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         } catch {
           return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
+        const beforeEvents = snapshotEvents(sheet.events);
 
         let event: C3Event;
 
@@ -184,6 +189,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sheet.events.push(event);
         }
 
+        // Editor load-time rules: block the write if it introduces an error
+        const loadCheck = await checkLoadRulesBeforeWrite(reader, args.sheetName, beforeEvents, sheet.events);
+        if (loadCheck.errors.length > 0) {
+          sheet.events = beforeEvents;
+          return toolError(loadRuleErrorMessage(loadCheck.errors));
+        }
+
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
         resetProjectIndex();
@@ -193,6 +205,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           entity: args.sheetName,
           category: 'eventsheet',
           action: 'updated',
+          warnings: loadCheck.warnings.length > 0 ? loadCheck.warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
@@ -206,7 +219,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'add_event_block',
-    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, OR conditions, and per-action disabling.',
+    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, and per-action disabling. Conditions are AND-combined; C3 OR blocks cannot be created, so give each trigger its own event. Writes that would break a checked editor load-time rule (expression syntax, empty expressions, trigger placement) are refused.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       conditions: z.array(conditionSchema).optional().default([]).describe('Conditions array (at least one required, unless isElse is true)'),
@@ -231,6 +244,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         } catch {
           return notFoundError('Event sheet', args.sheetName, reader.findNearestName(args.sheetName, 'eventsheets'), 'list_eventsheets');
         }
+        const beforeEvents = snapshotEvents(sheet.events);
 
         // Collect all objectClass references from entire tree (parent + descendants)
         const allRefs: ObjectRef[] = [];
@@ -290,6 +304,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         } else {
           targetEvents.push(blockEvent);
         }
+
+        // Editor load-time rules, checked on the whole sheet so the insertion
+        // context (the new block's ancestors) counts too
+        const loadCheck = await checkLoadRulesBeforeWrite(reader, args.sheetName, beforeEvents, sheet.events);
+        if (loadCheck.errors.length > 0) {
+          sheet.events = beforeEvents;
+          return toolError(loadRuleErrorMessage(loadCheck.errors));
+        }
+        warnings.push(...loadCheck.warnings);
 
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
@@ -606,7 +629,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'update_event_block_action',
-    'Replace parameters on a single action within an existing event block. Identify the block by SID and the action by its 0-based index. Use get_eventsheet_details to find SIDs and action indices.',
+    'Replace parameters on a single action within an existing event block. Identify the block by SID and the action by its 0-based index. Use get_eventsheet_details to find SIDs and action indices. Parameters that would break a checked editor load-time rule (expression syntax, empty expressions) are refused.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       blockSid: z.number().int().positive().describe('SID of the block event containing the action'),
@@ -649,10 +672,19 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           );
         }
 
+        const beforeEvents = snapshotEvents(sheet.events);
         const action = actions[args.actionIndex];
         action.parameters = args.parameters;
         // Don't re-emit a legacy "behavior-type" key on the edited action (issue #16)
         const warnings = await normalizeLegacyBehaviorKeys(reader, [{ ace: action, kind: 'action' }]);
+
+        // Editor load-time rules (expression syntax, empty expressions)
+        const loadCheck = await checkLoadRulesBeforeWrite(reader, args.sheetName, beforeEvents, sheet.events);
+        if (loadCheck.errors.length > 0) {
+          sheet.events = beforeEvents;
+          return toolError(loadRuleErrorMessage(loadCheck.errors));
+        }
+        warnings.push(...loadCheck.warnings);
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
@@ -680,7 +712,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'move_events_between_sheets',
-    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved.',
+    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet.',
     {
       sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
       targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
@@ -736,6 +768,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           );
         }
 
+        // Source events are only replaced (never mutated), the target is edited in place
+        const targetBefore = snapshotEvents(targetSheetData.events);
+
         // Determine target insertion array
         let insertTarget: Record<string, unknown>[];
         if (args.targetGroupPath) {
@@ -770,6 +805,18 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sourceSheetData.events = sourceEvents.filter(e => !sidSet.has(e.sid as number)) as unknown as C3Event[];
         }
 
+        // Editor load-time rules over both sheets: a copy of an event that
+        // breaks a rule adds the problem to the target, a move only relocates it
+        const loadCheck = await checkLoadRulesBeforeSheetPairWrite(reader, [
+          { name: args.sourceSheet, before: sourceEvents as unknown as C3Event[], after: sourceSheetData.events },
+          { name: args.targetSheet, before: targetBefore, after: targetSheetData.events },
+        ]);
+        if (loadCheck.errors.length > 0) {
+          sourceSheetData.events = sourceEvents as unknown as C3Event[];
+          targetSheetData.events = targetBefore;
+          return toolError(loadRuleErrorMessage(loadCheck.errors));
+        }
+
         // Write target sheet first, then source (if modified)
         const targetSubfolder = writer.getSubfolderForEntity('eventSheets', args.targetSheet);
         const targetBackup = await writer.writeEntityFile('eventSheets', args.targetSheet, targetSheetData, targetSubfolder);
@@ -790,6 +837,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           movedCount: eventsToMove.length,
           deleteSource: args.deleteSource,
           backupFiles: [targetBackup, ...(sourceBackup ? [sourceBackup] : [])].filter(Boolean),
+          warnings: loadCheck.warnings.length > 0 ? loadCheck.warnings : undefined,
         });
       } catch (error) {
         console.error('[move_events_between_sheets] failed:', error);
@@ -846,6 +894,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         const events = sheet.events as Record<string, unknown>[];
+        const beforeEvents = snapshotEvents(sheet.events);
         const found = findEventBySid(events, args.sid);
 
         if (!found) {
@@ -1001,6 +1050,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           reader,
           touched.filter(t => (t.kind === 'condition' ? conditions : actions).includes(t.ace)),
         ));
+
+        // Editor load-time rules, checked on the whole sheet so the block's
+        // ancestors (an enclosing trigger or function) count too
+        const loadCheck = await checkLoadRulesBeforeWrite(reader, args.sheetName, beforeEvents, sheet.events);
+        if (loadCheck.errors.length > 0) {
+          sheet.events = beforeEvents;
+          return toolError(loadRuleErrorMessage(loadCheck.errors));
+        }
+        warnings.push(...loadCheck.warnings);
 
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);

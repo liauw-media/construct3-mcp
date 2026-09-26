@@ -1,7 +1,7 @@
 /**
  * Project integrity validation for Construct 3 projects.
  * Checks file existence, required fields, duplicate IDs, broken references,
- * orphaned files, and more.
+ * orphaned files, editor load-time rules, and more.
  */
 
 import { readdir } from 'fs/promises';
@@ -13,6 +13,16 @@ import { findOrphanedObjects } from './object-deps.js';
 import { scanLegacyBehaviorKeys, hasOnlyLegacyBehaviorName, describeLegacyHit } from './legacy-behavior-keys.js';
 import { checkBehaviorName } from './behavior-refs.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
+import {
+  checkEventLoadRules,
+  checkFamilyPlugins,
+  checkObjectClassNames,
+  createAceOriginResolver,
+  classifySidDuplicate,
+  describeAce,
+  describeEvent,
+  type LoadRuleIssue,
+} from './load-rules.js';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -76,8 +86,23 @@ export async function validateProjectIntegrity(
   checkSubfolderStructure(project, errors);
   await checkLegacyBehaviorKeys(reader, eventSheets, objects, families, errors, warnings);
 
+  // Editor load-time rules (errors, or warnings where only partly verified)
+  const aceOrigin = createAceOriginResolver({
+    objects: objects as Map<string, Record<string, unknown>>,
+    families,
+    usedAddons: reader.getUsedAddons(),
+  });
+  for (const [name, sheet] of eventSheets) {
+    if (!Array.isArray(sheet.events)) continue;
+    addLoadRuleIssues(checkEventLoadRules(sheet.events, { sheet: `eventSheets/${name}`, aceOrigin }), errors, warnings);
+  }
+  addLoadRuleIssues(checkObjectClassNames(project), errors, warnings);
+  addLoadRuleIssues(checkFamilyPlugins(families, objects as Map<string, Record<string, unknown>>), errors, warnings);
+
+  // Duplicate SIDs: errors for object type/family SIDs, warnings otherwise
+  checkDuplicateSids(objects, eventSheets, layouts, families, errors, warnings);
+
   // Warning checks
-  checkDuplicateSids(objects, eventSheets, layouts, families, warnings);
   checkDuplicateUids(layouts, objects, warnings);
   await checkBrokenObjectReferences(reader, families, warnings);
   checkBrokenEventSheetReferences(layouts, eventSheets, warnings);
@@ -89,7 +114,10 @@ export async function validateProjectIntegrity(
   await checkBackupFiles(reader, info);
   await checkOrphanedObjects(reader, info);
 
-  const checksRun = 14;
+  // 13 original checks + legacy-behavior-key + expression-syntax,
+  // empty-expression, trigger-placement, duplicate-object-name,
+  // family-plugin-mismatch
+  const checksRun = 19;
 
   return {
     valid: errors.length === 0,
@@ -120,6 +148,22 @@ function flattenContainer(container: { items: string[]; subfolders: Array<{ item
   };
   walk(container.subfolders);
   return result;
+}
+
+function addLoadRuleIssues(
+  issues: LoadRuleIssue[],
+  errors: IntegrityIssue[],
+  warnings: IntegrityIssue[]
+): void {
+  for (const issue of issues) {
+    const entry: IntegrityIssue = {
+      check: issue.rule,
+      entity: issue.location,
+      message: issue.message,
+      suggestion: issue.suggestion,
+    };
+    (issue.severity === 'error' ? errors : warnings).push(entry);
+  }
 }
 
 // ─── Check 1: File Existence ─────────────────────────────────
@@ -420,103 +464,194 @@ function listExamples(items: string[], separator: string, max = 3): string {
 
 // ─── Check 4: Duplicate SIDs ─────────────────────────────────
 
+/**
+ * Records one SID occurrence. `location` is what the report shows; `container`
+ * is the file it lives in (e.g. `eventSheets/Sheet1`), used to summarise long
+ * lists; `kind` feeds classifySidDuplicate.
+ */
+type SidTracker = (sid: unknown, location: string, kind: string, container: string) => void;
+
+interface SidLocation {
+  location: string;
+  kind: string;
+  container: string;
+}
+
+/** Locations listed in full in a duplicate-sid message; the rest are counted. */
+const MAX_LISTED_SID_LOCATIONS = 5;
+
 function checkDuplicateSids(
   objects: Map<string, ObjectType>,
   sheets: Map<string, EventSheet>,
   layouts: Map<string, Layout>,
   families: Map<string, Record<string, unknown>>,
+  errors: IntegrityIssue[],
   warnings: IntegrityIssue[]
 ): void {
-  const sidMap = new Map<number, string[]>(); // sid → [locations]
+  const sidMap = new Map<number, SidLocation[]>(); // sid → locations
 
-  const track = (sid: unknown, location: string) => {
+  const track: SidTracker = (sid, location, kind, container) => {
     if (typeof sid !== 'number' || sid <= 0) return;
     const locations = sidMap.get(sid) || [];
-    locations.push(location);
+    locations.push({ location, kind, container });
     sidMap.set(sid, locations);
   };
 
   // Objects
   for (const [name, obj] of objects) {
-    track(obj.sid, `objectTypes/${name}`);
+    const file = `objectTypes/${name}`;
+    track(obj.sid, file, 'object', file);
     // Behavior SIDs
     if (Array.isArray(obj.behaviorTypes)) {
       for (const b of obj.behaviorTypes) {
-        track(b.sid, `objectTypes/${name}/behavior:${b.name}`);
+        track(b.sid, `${file}/behavior:${b.name}`, 'behavior', file);
       }
     }
     // Instance variable SIDs
     if (Array.isArray(obj.instanceVariables)) {
       for (const v of obj.instanceVariables) {
-        track(v.sid, `objectTypes/${name}/var:${v.name}`);
+        track(v.sid, `${file}/var:${v.name}`, 'instance-variable', file);
       }
     }
     // Animation SIDs
     if (obj.animations && typeof obj.animations === 'object') {
-      scanAnimationSidsForDupes(obj.animations as Record<string, unknown>, `objectTypes/${name}`, track);
+      scanAnimationSidsForDupes(obj.animations as Record<string, unknown>, file, track);
     }
     // Singleglobal instance
     const sgi = obj['singleglobal-inst'];
     if (sgi) {
-      track(sgi.sid, `objectTypes/${name}/singleglobal-inst`);
+      track(sgi.sid, `${file}/singleglobal-inst`, 'singleglobal-inst', file);
     }
   }
 
   // Event sheets
   for (const [name, sheet] of sheets) {
-    track(sheet.sid, `eventSheets/${name}`);
+    const file = `eventSheets/${name}`;
+    track(sheet.sid, file, 'event-sheet', file);
     if (Array.isArray(sheet.events)) {
-      scanEventSidsForDupes(sheet.events, `eventSheets/${name}`, track);
+      scanEventSidsForDupes(sheet.events, file, track);
     }
   }
 
   // Layouts
   for (const [name, layout] of layouts) {
-    track(layout.sid, `layouts/${name}`);
+    const file = `layouts/${name}`;
+    track(layout.sid, file, 'layout', file);
     if (Array.isArray(layout.layers)) {
       for (const layer of layout.layers) {
-        track(layer.sid, `layouts/${name}/layer:${layer.name}`);
+        track(layer.sid, `${file}/layer:${layer.name}`, 'layer', file);
         if (Array.isArray(layer.instances)) {
           for (const inst of layer.instances) {
-            track(inst.sid, `layouts/${name}/layer:${layer.name}/inst:${inst.type}:${inst.uid}`);
+            track(inst.sid, `${file}/layer:${layer.name}/inst:${inst.type}:${inst.uid}`, 'layout-instance', file);
           }
         }
       }
     }
   }
 
-  // Families
+  // Families (members do not repeat the family's behavior/variable SIDs in real projects)
   for (const [name, family] of families) {
-    track((family as Record<string, unknown>).sid, `families/${name}`);
+    const file = `families/${name}`;
+    track(family.sid, file, 'family', file);
+    if (Array.isArray(family.behaviorTypes)) {
+      for (const b of family.behaviorTypes as Array<Record<string, unknown>>) {
+        track(b.sid, `${file}/behavior:${b.name}`, 'family-behavior', file);
+      }
+    }
+    if (Array.isArray(family.instanceVariables)) {
+      for (const v of family.instanceVariables as Array<Record<string, unknown>>) {
+        track(v.sid, `${file}/var:${v.name}`, 'family-instance-variable', file);
+      }
+    }
   }
 
-  // Report duplicates
+  // Report duplicates. Two object types/families sharing a SID are an error
+  // (the editor refuses to open the project); every other duplicate is a
+  // warning, worded by what is known about its load impact (see
+  // classifySidDuplicate). None of them advise re-saving: the editor keeps
+  // existing SIDs when it saves. Layout instanceFolderItem SIDs are not
+  // tracked: they legitimately repeat the instance SID.
   for (const [sid, locations] of sidMap) {
-    if (locations.length > 1) {
+    if (locations.length < 2) continue;
+    const used = describeSidUse(sid, locations);
+    const entity = locations[0].location;
+    const impact = classifySidDuplicate(locations.map(l => l.kind));
+    if (impact === 'object-class') {
+      errors.push({
+        check: 'duplicate-sid',
+        entity,
+        message: `${used}. Object types and families need project-unique SIDs; Construct 3 fails to open the project with "object class sid already in use".`,
+        suggestion: 'Give each object type and family its own project-unique SID.',
+      });
+    } else if (impact === 'parameter') {
       warnings.push({
         check: 'duplicate-sid',
-        entity: locations[0],
-        message: `SID ${sid} is used ${locations.length} times: ${locations.join(', ')}`,
-        suggestion: 'Each entity must have a unique SID. Re-save the project in C3 to regenerate IDs.',
+        entity,
+        message: `${used}. Parameter SIDs should be unique across the project: the editor's loader checks function parameter SIDs for uniqueness, so this clash may stop the project from opening.`,
+        suggestion: 'Give each function and custom action parameter its own project-unique SID.',
+      });
+    } else if (impact === 'object-file') {
+      warnings.push({
+        check: 'duplicate-sid',
+        entity,
+        message: `${used}. SIDs in object type and family files should be unique across the project. No load failure is on record for this clash: the editor's loader checks only object type and family SIDs.`,
+        suggestion: 'Give each behavior and instance variable its own project-unique SID.',
+      });
+    } else if (impact === 'event-or-instance') {
+      warnings.push({
+        check: 'duplicate-sid',
+        entity,
+        message: `${used}. No load failure is on record for duplicate event, condition, action or layout instance SIDs, and the editor keeps them when it saves the project.`,
+        suggestion: 'Give all but one of these nodes a new project-unique SID. Re-saving in Construct 3 does not change them.',
+      });
+    } else {
+      warnings.push({
+        check: 'duplicate-sid',
+        entity,
+        message: `${used}. SIDs should be unique across the project. No load failure is on record for this clash: the editor's loader checks only object type, family and function parameter SIDs.`,
+        suggestion: 'Give all but one of these a new project-unique SID. Re-saving in Construct 3 does not change existing SIDs.',
       });
     }
   }
 }
 
+/**
+ * "SID 5 is used 2 times: a; b". Long lists show the first few locations, a
+ * count of the rest and a summary per file and kind, e.g.
+ * "SID 5 is used 41 times (41 actions in eventSheets/Sheet1): a; b; …; and 36 more".
+ */
+function describeSidUse(sid: number, locations: SidLocation[]): string {
+  const listed = locations.slice(0, MAX_LISTED_SID_LOCATIONS).map(l => l.location);
+  const rest = locations.length - listed.length;
+  if (rest <= 0) return `SID ${sid} is used ${locations.length} times: ${listed.join('; ')}`;
+
+  const groups = new Map<string, { kind: string; container: string; count: number }>();
+  for (const l of locations) {
+    const key = `${l.kind}\u0000${l.container}`;
+    const group = groups.get(key) ?? { kind: l.kind, container: l.container, count: 0 };
+    group.count++;
+    groups.set(key, group);
+  }
+  const summary = [...groups.values()]
+    .map(g => `${g.count} ${g.kind.replace(/-/g, ' ')}${g.count === 1 ? '' : 's'} in ${g.container}`)
+    .join(', ');
+  return `SID ${sid} is used ${locations.length} times (${summary}): ${listed.join('; ')}; and ${rest} more`;
+}
+
 function scanAnimationSidsForDupes(
   animations: Record<string, unknown>,
   prefix: string,
-  track: (sid: unknown, location: string) => void
+  track: SidTracker
 ): void {
   const items = animations.items as Array<Record<string, unknown>> | undefined;
   if (Array.isArray(items)) {
     for (const anim of items) {
       const animName = anim.name || 'unnamed';
-      track(anim.sid, `${prefix}/anim:${animName}`);
+      track(anim.sid, `${prefix}/anim:${animName}`, 'animation', prefix);
       const frames = anim.frames as Array<Record<string, unknown>> | undefined;
       if (Array.isArray(frames)) {
         for (let i = 0; i < frames.length; i++) {
-          track(frames[i].sid, `${prefix}/anim:${animName}/frame:${i}`);
+          track(frames[i].sid, `${prefix}/anim:${animName}/frame:${i}`, 'frame', prefix);
         }
       }
     }
@@ -529,57 +664,61 @@ function scanAnimationSidsForDupes(
   }
 }
 
+/**
+ * Track the SIDs of events, conditions, actions and parameters in one sheet.
+ * Locations use the same path format as the load-rule checks, e.g.
+ * `eventSheets/Sheet1 > group "UI" (sid 3) > block (sid 12) > action 0 "wait" (System)`.
+ */
 function scanEventSidsForDupes(
   events: C3Event[],
-  prefix: string,
-  track: (sid: unknown, location: string) => void
+  sheet: string,
+  track: SidTracker
 ): void {
-  const stack: Array<{ event: C3Event; depth: number }> = [];
+  const stack: Array<{ event: Record<string, unknown>; location: string; depth: number }> = [];
+  const push = (list: unknown, parentLocation: string, depth: number) => {
+    if (!Array.isArray(list)) return;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const event = list[i];
+      if (!isRecord(event)) continue;
+      stack.push({ event, location: `${parentLocation} > ${describeEvent(event)}`, depth });
+    }
+  };
+  push(events, sheet, 0);
+
   let nodeCount = 0;
-
-  for (let i = events.length - 1; i >= 0; i--) {
-    stack.push({ event: events[i], depth: 0 });
-  }
-
   while (stack.length > 0) {
     if (nodeCount++ > MAX_SID_NODES) break;
-    const { event, depth } = stack.pop()!;
+    const { event, location, depth } = stack.pop()!;
     if (depth > MAX_SID_DEPTH) continue;
 
-    const rec = event as Record<string, unknown>;
-    track(rec.sid, `${prefix}/event`);
+    track(event.sid, location, 'event', sheet);
 
     // Conditions & actions
-    if ('conditions' in event && Array.isArray(event.conditions)) {
-      for (const c of event.conditions) {
-        track(c.sid, `${prefix}/condition`);
-      }
-    }
-    if ('actions' in event && Array.isArray(event.actions)) {
-      for (const a of event.actions) {
-        track((a as Record<string, unknown>).sid, `${prefix}/action`);
-      }
-    }
+    const aces = (list: unknown, kind: 'condition' | 'action') => {
+      if (!Array.isArray(list)) return;
+      list.forEach((ace, i) => {
+        if (isRecord(ace)) track(ace.sid, `${location} > ${describeAce(ace, kind, i)}`, kind, sheet);
+      });
+    };
+    aces(event.conditions, 'condition');
+    aces(event.actions, 'action');
 
-    // Function parameters
-    if ('functionParameters' in event && Array.isArray(rec.functionParameters)) {
-      for (const p of rec.functionParameters as Array<Record<string, unknown>>) {
-        track(p.sid, `${prefix}/funcParam`);
-      }
-    }
-    if ('parameters' in event && Array.isArray(rec.parameters)) {
-      for (const p of rec.parameters as Array<Record<string, unknown>>) {
-        track(p.sid, `${prefix}/param`);
-      }
-    }
+    // Parameters of function blocks and custom action blocks
+    const params = (list: unknown, kind: string) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((p, i) => {
+        if (isRecord(p)) track(p.sid, `${location} > parameter ${i} "${String(p.name)}"`, kind, sheet);
+      });
+    };
+    params(event.functionParameters, 'function-parameter');
+    params(event.parameters, 'parameter');
 
-    // Children
-    if ('children' in event && Array.isArray(event.children)) {
-      for (let i = event.children.length - 1; i >= 0; i--) {
-        stack.push({ event: event.children[i], depth: depth + 1 });
-      }
-    }
+    push(event.children, location, depth + 1);
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // ─── Check 5: Duplicate UIDs ─────────────────────────────────

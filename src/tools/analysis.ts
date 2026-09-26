@@ -172,7 +172,7 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
   // Tool: Project integrity validation
   server.tool(
     'validate_project',
-    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files.',
+    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files, and the rules the Construct 3 editor enforces when opening a project (trigger placement, expression syntax, empty expressions, duplicate object names, family plugins).',
     {},
     async () => {
       try {

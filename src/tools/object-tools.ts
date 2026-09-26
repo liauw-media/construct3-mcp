@@ -11,6 +11,14 @@ import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
 import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
+  checkFamilyPlugins,
+  findObjectClassNameClash,
+  formatLoadRuleIssue,
+  loadRuleErrorMessage,
+  newLoadRuleIssues,
+  objectClassNameClashMessage,
+} from '../construct3/analyzers/load-rules.js';
+import {
   GLOBAL_PLUGINS,
   NONWORLD_GLOBAL_PLUGINS,
   createSpriteObject,
@@ -29,7 +37,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
     'create_object',
     'Create a new object type in the Construct3 project',
     {
-      name: z.string().max(200).describe('Object name (must be unique, alphanumeric + underscore)'),
+      name: z.string().max(200).describe('Object name (alphanumeric + underscore; must not match an existing object type or family name, ignoring case)'),
       pluginId: z.string().max(100).describe('Plugin ID — "Sprite", "Text", "TiledBg", "NinePatch", "Audio", etc.'),
       isGlobal: z.boolean().optional().default(false).describe('Whether object is global (auto-detected for known global plugins)'),
       subfolder: z.string().max(500).optional().describe('Subfolder path in project (e.g., "UI/Buttons")'),
@@ -43,6 +51,11 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const existing = await reader.listObjectTypes();
         if (existing.includes(args.name)) {
           return toolError(`Object "${args.name}" already exists. Use update_object_properties to modify it.`);
+        }
+        // Editor load-time rule: object types and families share one name namespace that ignores case
+        const nameClash = findObjectClassNameClash(args.name, existing, await reader.listFamilies());
+        if (nameClash) {
+          return toolError(objectClassNameClashMessage(args.name, nameClash));
         }
 
         // Ensure the plugin is registered in usedAddons
@@ -328,8 +341,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
     'create_family',
     'Create a new family in the project. Families let you group object types and share instance variables and behaviors across them.',
     {
-      name: z.string().max(200).describe('Family name (must be unique)'),
-      pluginId: z.string().max(100).describe('Plugin ID all members must share (e.g. "Sprite", "Text")'),
+      name: z.string().max(200).describe('Family name (must not match an existing object type or family name, ignoring case)'),
+      pluginId: z.string().max(100).describe('Plugin ID all members must share (e.g. "Sprite", "Text"); members of another plugin are refused'),
       members: z.array(z.string().max(200)).optional().default([]).describe('Object type names to add as initial members'),
       subfolder: z.string().max(500).optional().describe('Subfolder path in project (e.g. "UI")'),
     },
@@ -343,16 +356,31 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (existing.includes(args.name)) {
           return toolError(`Family "${args.name}" already exists.`);
         }
+        // Editor load-time rule: object types and families share one name namespace that ignores case
+        const nameClash = findObjectClassNameClash(args.name, await reader.listObjectTypes(), existing);
+        if (nameClash) {
+          return toolError(objectClassNameClashMessage(args.name, nameClash));
+        }
 
         // Validate members exist
         const warnings: string[] = [];
+        const memberObjects = await readMemberObjects(reader, args.members);
         for (const memberName of args.members) {
-          try {
-            await reader.readObjectType(memberName);
-          } catch {
+          if (!memberObjects.has(memberName)) {
             warnings.push(`Member "${memberName}" does not exist as an object type. It will be listed but C3 may warn.`);
           }
         }
+
+        // Editor load-time rule: all members of a family must use one plugin
+        const pluginIssues = checkFamilyPlugins(
+          new Map([[args.name, { 'plugin-id': args.pluginId, members: args.members }]]),
+          memberObjects,
+        );
+        const pluginErrors = pluginIssues.filter(i => i.severity === 'error');
+        if (pluginErrors.length > 0) {
+          return toolError(loadRuleErrorMessage(pluginErrors.map(formatLoadRuleIssue)));
+        }
+        warnings.push(...pluginIssues.filter(i => i.severity === 'warning').map(formatLoadRuleIssue));
 
         const sid = await idGen.generateSid(reader);
 
@@ -420,6 +448,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         // Manage members
         if (!Array.isArray(family.members)) family.members = [];
         const members = family.members as string[];
+        const membersBefore = [...members];
 
         if (args.addMembers) {
           for (const m of args.addMembers) {
@@ -440,6 +469,22 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
               warnings.push(`Member "${m}" not in family, skipping`);
             }
           }
+        }
+
+        // Editor load-time rule: all members of a family must use one plugin.
+        // Only problems this update introduces block it.
+        if (args.addMembers || args.removeMembers) {
+          const memberObjects = await readMemberObjects(reader, [...membersBefore, ...members]);
+          const pluginIssues = newLoadRuleIssues(
+            checkFamilyPlugins(new Map([[args.name, { ...family, members: membersBefore }]]), memberObjects),
+            checkFamilyPlugins(new Map([[args.name, family]]), memberObjects),
+          );
+          const pluginErrors = pluginIssues.filter(i => i.severity === 'error');
+          if (pluginErrors.length > 0) {
+            family.members = membersBefore;
+            return toolError(loadRuleErrorMessage(pluginErrors.map(formatLoadRuleIssue)));
+          }
+          warnings.push(...pluginIssues.filter(i => i.severity === 'warning').map(formatLoadRuleIssue));
         }
 
         // Manage instance variables
@@ -587,4 +632,20 @@ function ensureInstanceFields(instance: Instance): boolean {
   }
 
   return modified;
+}
+
+/** The given object types that exist, by name (missing ones are left out). */
+async function readMemberObjects(
+  reader: Construct3ProjectReader,
+  names: Iterable<string>,
+): Promise<Map<string, Record<string, unknown>>> {
+  const objects = new Map<string, Record<string, unknown>>();
+  for (const name of new Set(names)) {
+    try {
+      objects.set(name, await reader.readObjectType(name) as unknown as Record<string, unknown>);
+    } catch {
+      // Missing member: reported separately where it matters
+    }
+  }
+  return objects;
 }

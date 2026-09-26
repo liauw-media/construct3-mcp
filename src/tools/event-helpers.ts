@@ -7,7 +7,7 @@
 import { z } from 'zod';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { IdGenerator } from '../construct3/id-generator.js';
-import type { Condition, Action, BlockEvent, StandardAction } from '../construct3/types.js';
+import type { Condition, Action, BlockEvent, StandardAction, C3Event } from '../construct3/types.js';
 import { createBlockEvent } from '../construct3/templates.js';
 import { checkBehaviorName } from '../construct3/analyzers/behavior-refs.js';
 import type { BehaviorLookupData } from '../construct3/analyzers/behavior-refs.js';
@@ -19,6 +19,16 @@ import {
   scanLegacyBehaviorKeysInAces,
 } from '../construct3/analyzers/legacy-behavior-keys.js';
 import { boundedRecord } from './shared.js';
+import {
+  checkEventLoadRules,
+  collectTriggerObjectClasses,
+  createAceOriginResolver,
+  formatLoadRuleIssue,
+  loadRuleErrorMessage,
+  newLoadRuleIssues,
+  systemOnlyAceOrigin,
+  type AceOriginResolver,
+} from '../construct3/analyzers/load-rules.js';
 
 // ─── Zod Schemas ────────────────────────────────────────────
 
@@ -42,7 +52,7 @@ export const conditionSchema = z.object({
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
     .optional().describe('Condition parameters as key-value pairs (max 100 keys, depth 6)'),
   isInverted: z.boolean().optional().describe('Negate the condition'),
-  isOr: z.boolean().optional().describe('OR-combine with previous condition (default: AND)'),
+  isOr: z.boolean().optional().describe('Legacy flag, written as given. It does NOT make a Construct 3 OR: C3 ORs a whole event (an OR block), which these tools cannot create, and conditions stay AND-combined. Do not use it to combine triggers: put each trigger in its own event.'),
 });
 
 /** Standard action schema */
@@ -419,6 +429,141 @@ export async function normalizeLegacyBehaviorKeys(
   warnings.push('Other conditions/actions in this project may carry the legacy "behavior-type" key too — run fix_legacy_behavior_keys to find them.');
   return warnings;
 }
+
+// ─── Editor Load-Time Rules (pre-write gate) ────────────────
+
+/** Deep copy of a sheet's events, taken before a mutation for checkLoadRulesBeforeWrite. */
+export function snapshotEvents(events: C3Event[]): C3Event[] {
+  return JSON.parse(JSON.stringify(events)) as C3Event[];
+}
+
+/** Build an ACE origin resolver, reading only the object types that trigger-like conditions use. */
+async function loadAceOriginResolver(
+  reader: Construct3ProjectReader,
+  eventLists: C3Event[][],
+): Promise<AceOriginResolver> {
+  const names = new Set<string>();
+  for (const events of eventLists) {
+    for (const name of collectTriggerObjectClasses(events)) names.add(name);
+  }
+
+  const objects = new Map<string, Record<string, unknown>>();
+  let families = new Map<string, Record<string, unknown>>();
+  if (names.size > 0) {
+    const objectNames = new Set(await reader.listObjectTypes());
+    for (const name of names) {
+      if (!objectNames.has(name)) continue;
+      try {
+        objects.set(name, await reader.readObjectType(name) as Record<string, unknown>);
+      } catch {
+        // Unreadable object: its ACEs resolve as 'unknown' (warnings only)
+      }
+    }
+    try {
+      families = await reader.readAllFamilies();
+    } catch {
+      // No families available: family behaviors resolve as 'unknown'
+    }
+  }
+
+  return createAceOriginResolver({ objects, families, usedAddons: reader.getUsedAddons() });
+}
+
+/**
+ * Check the editor load-time rules (expression syntax, empty expressions,
+ * trigger placement) for a pending event sheet write. Only issues the write
+ * introduces are reported, so edits to a sheet with pre-existing problems
+ * still go through. Errors must block the write; warnings go in the result.
+ */
+export async function checkLoadRulesBeforeWrite(
+  reader: Construct3ProjectReader,
+  sheetName: string,
+  beforeEvents: C3Event[],
+  afterEvents: C3Event[],
+): Promise<{ errors: string[]; warnings: string[] }> {
+  const sheet = `eventSheets/${sheetName}`;
+
+  // Which issues exist does not depend on ACE origin, only their severity does,
+  // so a sheet that is clean after the write needs no object type reads.
+  if (checkEventLoadRules(afterEvents, { sheet, aceOrigin: systemOnlyAceOrigin }).length === 0) {
+    return { errors: [], warnings: [] };
+  }
+
+  // Otherwise compare with real origins: an edit can raise the severity of an
+  // issue that already existed (e.g. a nested trigger gets a built-in root).
+  const aceOrigin = await loadAceOriginResolver(reader, [beforeEvents, afterEvents]);
+  const issues = newLoadRuleIssues(
+    checkEventLoadRules(beforeEvents, { sheet, aceOrigin }),
+    checkEventLoadRules(afterEvents, { sheet, aceOrigin }),
+  );
+  return {
+    errors: issues.filter(i => i.severity === 'error').map(formatLoadRuleIssue),
+    warnings: issues.filter(i => i.severity === 'warning').map(formatLoadRuleIssue),
+  };
+}
+
+/**
+ * An issue key that no longer names its sheet, so issues can be matched across
+ * sheets. Events without a SID are keyed by location (checkEventLoadRules); for
+ * them the leading groups are dropped as well, since a moved event may land in
+ * a group. Groups are transparent to the rules, so this loses nothing the
+ * rules depend on.
+ */
+function sheetIndependentKey(key: string, sheet: string): string {
+  const ruleEnd = key.indexOf('|') + 1;
+  let rest = key.slice(ruleEnd);
+  if (!rest.startsWith(`${sheet}|`)) return key;
+  rest = rest.slice(sheet.length + 1);
+
+  const locationPrefix = `~${sheet}`;
+  if (rest.startsWith(`${locationPrefix} > `)) {
+    let location = rest.slice(locationPrefix.length);
+    while (location.startsWith(' > group "')) {
+      const next = location.indexOf(' > ', 3);
+      if (next === -1) break;
+      location = location.slice(next);
+    }
+    rest = `~${location}`;
+  }
+  return `${key.slice(0, ruleEnd)}|${rest}`;
+}
+
+/**
+ * The load-time gate for a write that changes two sheets at once
+ * (move_events_between_sheets). Both sheets are compared together, with keys
+ * that ignore the sheet: an event moved from one sheet to the other keeps its
+ * issues, so relocating an event that already breaks a rule is allowed, while
+ * copying it adds a second instance of the issue and is reported as new.
+ * Moved events are top-level events in the source and land at the top level or
+ * in a group chain starting at the top level of the target, so their trigger
+ * ancestry does not change. Errors must block the write; warnings go in the result.
+ */
+export async function checkLoadRulesBeforeSheetPairWrite(
+  reader: Construct3ProjectReader,
+  sheets: Array<{ name: string; before: C3Event[]; after: C3Event[] }>,
+): Promise<{ errors: string[]; warnings: string[] }> {
+  const label = (name: string) => `eventSheets/${name}`;
+
+  // As in checkLoadRulesBeforeWrite: clean sheets after the write need no origin lookups.
+  if (sheets.every(s => checkEventLoadRules(s.after, { sheet: label(s.name), aceOrigin: systemOnlyAceOrigin }).length === 0)) {
+    return { errors: [], warnings: [] };
+  }
+
+  const aceOrigin = await loadAceOriginResolver(reader, sheets.flatMap(s => [s.before, s.after]));
+  const collect = (state: 'before' | 'after') => sheets.flatMap(s => {
+    const sheet = label(s.name);
+    return checkEventLoadRules(s[state], { sheet, aceOrigin })
+      .map(issue => ({ ...issue, key: sheetIndependentKey(issue.key, sheet) }));
+  });
+  const issues = newLoadRuleIssues(collect('before'), collect('after'));
+  return {
+    errors: issues.filter(i => i.severity === 'error').map(formatLoadRuleIssue),
+    warnings: issues.filter(i => i.severity === 'warning').map(formatLoadRuleIssue),
+  };
+}
+
+/** Error text for a write blocked by checkLoadRulesBeforeWrite. */
+export { loadRuleErrorMessage };
 
 // ─── Object Reference Collection ────────────────────────────
 

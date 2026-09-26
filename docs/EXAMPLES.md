@@ -509,18 +509,19 @@ Returns success with a warning that references were NOT cleaned up.
 }
 ```
 
-### OR Condition
+### Either of Two Triggers
 
 **Query:**
 > "When the player presses Space OR presses the up arrow, jump"
 
-**Claude uses**: `add_event_block` with:
+Construct 3 allows one trigger per event, except in an OR block, and the event tools cannot create OR blocks (the per-condition `isOr` flag does not make one). So each trigger gets its own event.
+
+**Claude uses**: `add_event_block` twice, once per key:
 ```json
 {
   "sheetName": "PlayerControls",
   "conditions": [
-    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": "32" } },
-    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": "38" }, "isOr": true }
+    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": 32 } }
   ],
   "actions": [
     {
@@ -532,6 +533,7 @@ Returns success with a warning that references were NOT cleaned up.
   ]
 }
 ```
+and the same call with `"key": 38` for the up arrow. When the shared actions grow, move them into a function (`add_event_to_sheet` with `eventType: "function"`) and call it from both events.
 
 ### Disabled Action
 

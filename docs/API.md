@@ -206,9 +206,20 @@ Run integrity checks over the whole project. No parameters.
 
 Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `entity`, `message` and an optional `suggestion`. `valid` is true when there are no errors.
 
-- **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries
-- **Warnings:** duplicate SIDs and UIDs, broken object references, layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`
+- **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries, conditions/actions that name their behavior only under the legacy `"behavior-type"` key (`legacy-behavior-key`, see [`fix_legacy_behavior_keys`](#fix_legacy_behavior_keys)), and the editor load-time rules below
+- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references, layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, and the partly verified load-time rules below
 - **Info:** JSON files not registered in `project.c3proj`, leftover `.bak` files, orphaned objects
+
+**Editor load-time rules.** The Construct 3 editor enforces these only when it opens a project, and breaking one can make the whole project fail to open. The rules come from [komabear/c3-skill](https://github.com/komabear/c3-skill) (MIT) and were checked against the Construct 3 manual, real editor-saved projects, and the error messages of the editor's project loader (release r495.2). Where only part of a rule could be verified, it is reported as a warning.
+
+| Check | Severity | Rule |
+|-------|----------|------|
+| `expression-syntax` | error | A backslash outside a string literal, or an unterminated string literal, in any condition/action parameter (function and custom action call arguments included). C3 expressions have no escape sequences: a quote inside a string is written as two quotes (`"He said ""hi"""`), so `"{\"a\":1}"` fails with *Syntax error: Unknown character*. A backslash inside a string literal is fine. |
+| `empty-expression` | error | A parameter whose value is `""` fails with *Empty expression: You must enter an expression*. Write an empty string literal as `"\"\""`. |
+| `trigger-placement` | error / warning | Only one trigger per event, unless it is an OR block (`"isOrBlock": true` on the event), which may hold several. A branch holds one trigger: no trigger in a sub-event of a triggered event, of a function block or of a custom action block. Both fail with *cannot add another trigger to event branch*. Groups are transparent. A trigger that is not the first condition of its event is a warning: the editor moves it to the top when it opens the project. Triggers are conditions whose id starts with `on-`; the editor counts fake triggers (*On collision*, Timer *On timer*, Gamepad buttons) as triggers too. Problems involving third-party addon triggers are warnings, since those addons do not always follow the `on-` convention. |
+| `duplicate-object-name` | error | Object types and families share one name namespace that ignores case. A name listed twice in the `project.c3proj` objectTypes or families tree, two names that differ only in case, and a family named like an object type all fail with *object class name 'X' already used*. |
+| `family-plugin-mismatch` | error / warning | Every member of a family must use the same plugin; a mixed family fails with *wrong plugin* (error). Members that agree with each other but not with the family's `plugin-id` are a warning. |
+| `duplicate-sid` | error / warning | Two object types or families sharing a SID fail with *object class sid already in use* (error). A SID shared by behaviors or instance variables of object type or family files is a warning: SIDs should be unique, but no load failure is on record for this clash, and the editor's loader checks only object type and family SIDs. Animation and frame SIDs repeated across object types are warnings: a Scirra example project does this and opens. SIDs shared by events, conditions, actions or layout instances are warnings: editor-saved projects contain such duplicates and open, and the editor keeps them when it saves, so re-saving does not fix them. A clash involving a function or custom action parameter is a warning that may break loading, since the loader checks function parameter SIDs. Event sheet locations name the event path and the condition/action index (e.g. `eventSheets/Sheet1 > block (sid 12) > action 0 "wait" (System)`); a SID used more than five times lists the first five locations and a count per file. Layout `instanceFolderItem` SIDs legitimately repeat the instance SID and are not checked. |
 
 **Known false positives.** Projects that open fine in Construct 3 can still get these reports; the first one makes `valid` false:
 - Construct 3 itself writes a subfolder without a `name` into `timelines` (its Transitions folder, see [`list_timelines`](#list_timelines)), which is reported as a `subfolder-structure` error.
@@ -247,7 +258,7 @@ Create a new object type in the project.
 | `subfolder` | string | No | Subfolder path (e.g., `"UI/Buttons"`) |
 
 **What it does:**
-1. Validates name (uniqueness, reserved names, format)
+1. Validates name (uniqueness, reserved names, format). A name equal to an existing object type or family name, ignoring case, is refused: the editor would fail to open the project (load-time rule `duplicate-object-name`, see [`validate_project`](#validate_project)).
 2. Ensures plugin is registered in `usedAddons` (auto-adds known Scirra plugins)
 3. Generates SID (+ UID for global plugins, + animation SID for Sprite)
 4. Builds from plugin-specific template
@@ -299,6 +310,8 @@ Create a new family. Families group object types of one plugin and share instanc
 | `members` | string[] | No | Initial member object names (default: `[]`); unknown names produce a warning |
 | `subfolder` | string | No | Subfolder path (e.g. `"UI"`) |
 
+**Load-time checks** (see [`validate_project`](#validate_project)): a name equal to an existing object type or family name, ignoring case, is refused (`duplicate-object-name`). Members must all use one plugin: a member whose plugin differs from the others is refused (`family-plugin-mismatch`, *wrong plugin*). Members that agree with each other but not with `pluginId` only produce a warning. Members that do not exist produce a warning.
+
 ### `update_family`
 
 Add or remove family members and shared instance variables.
@@ -312,6 +325,8 @@ Add or remove family members and shared instance variables.
 | `removeVariables` | string[] | No | Variable names to remove |
 
 At least one parameter besides `name` must be provided. Duplicates and missing entries are skipped with a warning.
+
+**Load-time check:** a member change that makes the family mix plugins is refused and nothing is written (`family-plugin-mismatch`, *wrong plugin*). A mix that was already there does not block other updates, and removing the odd member is allowed.
 
 ### `delete_family`
 
@@ -349,9 +364,11 @@ Add a structural event to an existing event sheet.
 | `commentText` | string | For comments | Comment text |
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 
+Runs the same load-time gate as `add_event_block` before writing.
+
 ### `add_event_block`
 
-Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, OR conditions, and per-action disabling.
+Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, else blocks, and per-action disabling. Conditions are AND-combined: C3 OR blocks cannot be created with these tools, so give each trigger its own event.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -367,7 +384,7 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 **Condition fields:**
 - `behaviorType` — For behavior conditions/actions: the behavior's *name* as defined on the object type or one of its families (e.g. `"Platform"`, `"8Direction"` — not the behaviorId `"EightDir"`). Omit for plugin and System ACEs. Written to the event sheet as `"behaviorType"`, the key Construct 3 reads.
 - `"behavior-type"` — **Deprecated** alias for `behaviorType`, still accepted and written as `behaviorType` (with a warning). Passing both with different values is an error.
-- `isOr` — OR-combine with the previous condition (default is AND). The first condition's `isOr` is ignored by C3.
+- `isOr` — legacy flag, written as given. It does **not** make a C3 OR: Construct 3 ORs a whole event (an OR block, `"isOrBlock": true` on the event), never single conditions, and the editor ignores a per-condition `isOr`. The conditions stay AND-combined. The event tools cannot create OR blocks.
 - `isInverted` — Negate the condition.
 
 **Action fields:**
@@ -385,6 +402,10 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 - `id` (ACE identifier) is **not** validated — Claude knows the hundreds of C3 ACE IDs
 - Script actions (`type: "script"`) skip objectClass validation and SID generation
 
+**Load-time gate:** before writing, the sheet is checked against the editor load-time rules `expression-syntax`, `empty-expression` and `trigger-placement` (see [`validate_project`](#validate_project)). The check covers the whole sheet, so the new block's position counts, and it compares the sheet before and after the change. A new error blocks the write with an explanation and nothing is written. New warnings are returned in `warnings`. Problems that were already in the sheet do not block the write, unless the change makes one of them worse (a warning that becomes an error); fixing part of an existing problem is allowed. The same gate runs in `add_event_to_sheet`, `update_event_block` and `update_event_block_action`. `move_events_between_sheets` runs it over the source and target sheets together: moving an event that already breaks a rule (`deleteSource: true`) is allowed, while copying it is refused, since the copy adds the problem to a second sheet.
+
+Two triggers in one block are rejected even with `isOr` set (see `isOr` above). For "Space OR Up pressed", add one event per trigger.
+
 **What it does:**
 1. Reads the target event sheet
 2. Validates all `objectClass` references across the entire event tree
@@ -393,7 +414,8 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 5. Recursively builds child sub-events with `isElse` support
 6. If `groupPath`: resolves nested group path (error with available groups on miss)
 7. Inserts at position (`start`/`end`)
-8. Writes sheet back with backup
+8. Runs the load-time gate (blocks on new errors)
+9. Writes sheet back with backup
 
 ### `delete_event_sheet`
 
@@ -462,6 +484,7 @@ At least one update parameter must be provided.
 - Existing conditions/actions edited through `updateConditions`/`updateActions` that still carry the legacy `"behavior-type"` key are normalized to `"behaviorType"` with the same rules as `fix_legacy_behavior_keys`, and each one is reported in `warnings`. `update_event_block_action` does the same for the action it edits.
 - Duplicate removal indices are automatically deduplicated
 - Warns when all conditions are removed (block becomes unconditional)
+- Runs the load-time gate (see `add_event_block`) on the whole sheet, so a trigger added to a sub-event of a triggered event, of a function block or of a custom action block is rejected, as is a second trigger in one event. New conditions are appended, so a trigger added to a block that already has conditions ends up after them; that only warns, since the editor moves it to the top when it opens the project.
 
 ### `update_event_block_action`
 
@@ -473,6 +496,8 @@ Replace the parameters of a single action. The block is found by SID anywhere in
 | `blockSid` | number | Yes | SID of the `block` or `function-block` holding the action |
 | `actionIndex` | number | Yes | 0-based action index |
 | `parameters` | object | Yes | New parameter values; replaces the existing `parameters` entirely (max 100 keys, depth 6) |
+
+Runs the load-time gate (see [`add_event_block`](#add_event_block)): parameters that break `expression-syntax` or `empty-expression` are refused and nothing is written. A legacy `"behavior-type"` key on the edited action is normalized as in `update_event_block` and reported in `warnings`.
 
 ### `update_event_variable`
 
@@ -503,7 +528,9 @@ Copy top-level events from one sheet to another by SID; with `deleteSource` they
 | `targetGroupPath` | string | No | Insert into a group by title path (e.g. `"Movement > Collision"`) |
 | `position` | `"start"` \| `"end"` | No | Insert position (default: end) |
 
-Returns `movedSids`, `movedCount` and `backupFiles` (target first, then source when modified).
+Runs the load-time gate (see [`add_event_block`](#add_event_block)) over the source and target sheets together, before anything is written. Moving an event that already breaks a load-time rule only relocates the problem and is allowed; copying it (`deleteSource: false`) adds the problem to a second sheet, so a copied error is refused and a copied warning is returned in `warnings`.
+
+Returns `movedSids`, `movedCount`, `backupFiles` (target first, then source when modified) and new load-time `warnings`, if any.
 
 ### `remove_event_from_sheet`
 

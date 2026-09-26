@@ -9,12 +9,16 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `fix_legacy_behavior_keys` tool: renames legacy `"behavior-type"` keys to `"behaviorType"` in all event sheets, checking each value against the object's behaviors first (dry-run by default) (#16).
 - `validate_project` check `legacy-behavior-key`: error when a condition/action names its behavior only under the legacy key, warning for leftover keys (#16).
 - Every response that reports a completed project write carries an `editorNote`: the Construct 3 editor keeps the open project in memory, so close and reopen it there before saving, or it overwrites the change (#21).
+- `validate_project` checks rules the Construct 3 editor enforces when it opens a project: expression syntax, empty parameters, trigger placement, duplicate object/family names, family plugin mismatches and object class SID clashes (#18).
+- Event sheet writes (`add_event_block`, `update_event_block`, `add_event_to_sheet`, `update_event_block_action`, `move_events_between_sheets`) are refused when they add a new load-time error; new warnings are returned, existing problems do not block edits (#18).
 
 ### Changed
 
 - `update_event_block` and `update_event_block_action` normalize the legacy `"behavior-type"` key on the conditions/actions they edit and report it in `warnings`; `update_event_block` validates all additions before changing anything (#16).
 - Runtime tools that change the open project report `success: true`; README and `docs/API.md` now document every registered tool and the real source tree (#21).
 - `list_timelines` returns the editor's transitions separately in `transitions`; the timeline tools refuse to read, change or delete transitions. `create_timeline` rejects unsafe `subfolder` paths and `"transitions"`, and writes new folders in the editor's key order (#22).
+- `create_object`, `create_family` and `update_family` refuse names that clash with another object type or family, and family members that mix plugins (#18).
+- Duplicate-SID reports locate event sheet entries by event path and index and no longer advise re-saving the project; behavior and instance variable SID clashes are warnings (#18).
 
 ### Fixed
 

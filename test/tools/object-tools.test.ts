@@ -113,6 +113,21 @@ describe('create_object', () => {
     expect(result.content[0].text).toContain('already exists');
   });
 
+  it('rejects a name that clashes with an object type or family, ignoring case', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 1 }]]),
+      families: new Map([['Enemies', { name: 'Enemies', 'plugin-id': 'Sprite', sid: 2, members: [] }]]),
+    });
+    const caseOnly = await server.callTool('create_object', { name: 'hero', pluginId: 'Sprite' });
+    expect(caseOnly.isError).toBe(true);
+    expect(caseOnly.content[0].text).toContain("object class name 'hero' already used");
+
+    const family = await server.callTool('create_object', { name: 'Enemies', pluginId: 'Sprite' });
+    expect(family.isError).toBe(true);
+    expect(family.content[0].text).toContain('A family named "Enemies" already exists');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
   it('rejects invalid name', async () => {
     const { server } = setup();
     const result = await server.callTool('create_object', { name: '123bad', pluginId: 'Sprite' });
@@ -359,24 +374,24 @@ describe('create_family', () => {
   it('creates a family with members', async () => {
     const { server, writer } = setup({
       objects: new Map([
-        ['btn_spin', { name: 'btn_spin', 'plugin-id': 'Sprite', sid: 1 }],
-        ['btn_menu', { name: 'btn_menu', 'plugin-id': 'Sprite', sid: 2 }],
+        ['MemberA', { name: 'MemberA', 'plugin-id': 'Sprite', sid: 1 }],
+        ['MemberB', { name: 'MemberB', 'plugin-id': 'Sprite', sid: 2 }],
       ]),
     });
     const result = await server.callTool('create_family', {
-      name: 'btn_fam',
+      name: 'TestFamily',
       pluginId: 'Sprite',
-      members: ['btn_spin', 'btn_menu'],
+      members: ['MemberA', 'MemberB'],
     });
     const data = parseResult(result);
     expect(data.success).toBe(true);
-    expect(data.entity).toBe('btn_fam');
+    expect(data.entity).toBe('TestFamily');
     expect(data.category).toBe('family');
     expect(data.generatedSid).toBeDefined();
     expect(writer.callsFor('writeEntityFile')).toHaveLength(1);
     expect(writer.callsFor('addToProject')).toHaveLength(1);
     const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
-    expect(written.members).toEqual(['btn_spin', 'btn_menu']);
+    expect(written.members).toEqual(['MemberA', 'MemberB']);
     expect(written['plugin-id']).toBe('Sprite');
   });
 
@@ -393,10 +408,10 @@ describe('create_family', () => {
 
   it('rejects duplicate family name', async () => {
     const { server } = setup({
-      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
     });
     const result = await server.callTool('create_family', {
-      name: 'btn_fam',
+      name: 'TestFamily',
       pluginId: 'Sprite',
     });
     expect(result.isError).toBe(true);
@@ -415,6 +430,44 @@ describe('create_family', () => {
     expect(data.warnings).toBeDefined();
     expect(data.warnings[0]).toContain('does not exist');
   });
+
+  it('rejects a name that clashes with an object type, ignoring case', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Enemy', { name: 'Enemy', 'plugin-id': 'Sprite', sid: 1 }]]),
+    });
+    const result = await server.callTool('create_family', { name: 'ENEMY', pluginId: 'Sprite' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('object type "Enemy"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('rejects members of another plugin (wrong plugin at load)', async () => {
+    const { server, writer } = setup({
+      objects: new Map([
+        ['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 1 }],
+        ['Label', { name: 'Label', 'plugin-id': 'Text', sid: 2 }],
+      ]),
+    });
+    const result = await server.callTool('create_family', {
+      name: 'Actors',
+      pluginId: 'Sprite',
+      members: ['Hero', 'Label'],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('member "Label"');
+    expect(result.content[0].text).toContain('"wrong plugin"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('warns when all members use a different plugin than the family', async () => {
+    const { server } = setup({
+      objects: new Map([['Label', { name: 'Label', 'plugin-id': 'Text', sid: 2 }]]),
+    });
+    const result = await server.callTool('create_family', { name: 'Labels', pluginId: 'Sprite', members: ['Label'] });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('all its members are "Text" objects'))).toBe(true);
+  });
 });
 
 // ─── update_family ────────────────────────────────────────
@@ -427,35 +480,35 @@ describe('update_family', () => {
 
   it('adds members to a family', async () => {
     const { server, writer } = setup({
-      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: ['btn_spin'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: ['MemberA'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
     });
     const result = await server.callTool('update_family', {
-      name: 'btn_fam',
-      addMembers: ['btn_menu'],
+      name: 'TestFamily',
+      addMembers: ['MemberB'],
     });
     expect(parseResult(result).success).toBe(true);
     const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
-    expect(written.members).toEqual(['btn_spin', 'btn_menu']);
+    expect(written.members).toEqual(['MemberA', 'MemberB']);
   });
 
   it('removes members from a family', async () => {
     const { server, writer } = setup({
-      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: ['btn_spin', 'btn_menu'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: ['MemberA', 'MemberB'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
     });
     await server.callTool('update_family', {
-      name: 'btn_fam',
-      removeMembers: ['btn_spin'],
+      name: 'TestFamily',
+      removeMembers: ['MemberA'],
     });
     const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
-    expect(written.members).toEqual(['btn_menu']);
+    expect(written.members).toEqual(['MemberB']);
   });
 
   it('adds instance variables', async () => {
     const { server, writer } = setup({
-      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: [], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
     });
     await server.callTool('update_family', {
-      name: 'btn_fam',
+      name: 'TestFamily',
       addVariables: [{ name: 'score', type: 'number' }],
     });
     const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
@@ -465,9 +518,9 @@ describe('update_family', () => {
 
   it('errors with no updates', async () => {
     const { server } = setup({
-      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: [], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
     });
-    const result = await server.callTool('update_family', { name: 'btn_fam' });
+    const result = await server.callTool('update_family', { name: 'TestFamily' });
     expect(result.isError).toBe(true);
   });
 
@@ -475,9 +528,37 @@ describe('update_family', () => {
     const { server } = setup();
     const result = await server.callTool('update_family', {
       name: 'Ghost',
-      addMembers: ['btn_spin'],
+      addMembers: ['MemberA'],
     });
     expect(result.isError).toBe(true);
+  });
+
+  const mixedObjects = () => new Map<string, Record<string, unknown>>([
+    ['MemberA', { name: 'MemberA', 'plugin-id': 'Sprite', sid: 2 }],
+    ['MemberB', { name: 'MemberB', 'plugin-id': 'Sprite', sid: 3 }],
+    ['TextMember', { name: 'TextMember', 'plugin-id': 'Text', sid: 4 }],
+  ]);
+
+  it('rejects adding a member of another plugin and leaves the family unchanged', async () => {
+    const { server, writer, reader } = setup({
+      objects: mixedObjects(),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: ['MemberA'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]),
+    });
+    const result = await server.callTool('update_family', { name: 'TestFamily', addMembers: ['MemberB', 'TextMember'] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('member "TextMember"');
+    expect(result.content[0].text).toContain('"wrong plugin"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect((await reader.readFamily('TestFamily')).members).toEqual(['MemberA']);
+  });
+
+  it('allows removing a mismatching member, and other updates, on an already mixed family', async () => {
+    const family = () => new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: ['MemberA', 'TextMember'], instanceVariables: [], behaviorTypes: [], effectTypes: [] }]]);
+    const fix = setup({ objects: mixedObjects(), families: family() });
+    expect(parseResult(await fix.server.callTool('update_family', { name: 'TestFamily', removeMembers: ['TextMember'] })).success).toBe(true);
+
+    const other = setup({ objects: mixedObjects(), families: family() });
+    expect(parseResult(await other.server.callTool('update_family', { name: 'TestFamily', addMembers: ['MemberB'] })).success).toBe(true);
   });
 });
 
@@ -491,9 +572,9 @@ describe('delete_family', () => {
 
   it('deletes an existing family', async () => {
     const { server, writer } = setup({
-      families: new Map([['btn_fam', { name: 'btn_fam', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
+      families: new Map([['TestFamily', { name: 'TestFamily', 'plugin-id': 'Sprite', sid: 1, members: [] }]]),
     });
-    const result = await server.callTool('delete_family', { name: 'btn_fam' });
+    const result = await server.callTool('delete_family', { name: 'TestFamily' });
     expect(parseResult(result).success).toBe(true);
     expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
     expect(writer.callsFor('removeFromProject')).toHaveLength(1);
