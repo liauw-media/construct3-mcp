@@ -1,0 +1,235 @@
+{
+	"name": "dialogue",
+	"events": [
+		{
+			"eventType": "variable",
+			"name": "audio_text",
+			"type": "string",
+			"initialValue": "",
+			"comment": "",
+			"isStatic": false,
+			"isConstant": false,
+			"sid": 815122905145570
+		},
+		{
+			"functionName": "dialogue",
+			"functionDescription": "",
+			"functionCategory": "",
+			"functionReturnType": "none",
+			"functionCopyPicked": false,
+			"functionIsAsync": false,
+			"functionParameters": [
+				{
+					"name": "txt",
+					"type": "string",
+					"initialValue": "",
+					"comment": "",
+					"sid": 908609892015014
+				},
+				{
+					"name": "speed",
+					"type": "number",
+					"initialValue": "2",
+					"comment": "",
+					"sid": 832117079633275
+				},
+				{
+					"name": "speech",
+					"type": "string",
+					"initialValue": "",
+					"comment": "",
+					"sid": 117558206429960
+				}
+			],
+			"eventType": "function-block",
+			"conditions": [],
+			"actions": [
+				{
+					"id": "set-visible",
+					"objectClass": "cursor",
+					"sid": 353375532235823,
+					"parameters": {
+						"visibility": "invisible"
+					}
+				},
+				{
+					"id": "set-text",
+					"objectClass": "text",
+					"sid": 524242550669125,
+					"parameters": {
+						"text": "\"\""
+					}
+				},
+				{
+					"id": "stop",
+					"objectClass": "Audio",
+					"sid": 526836353823288,
+					"parameters": {
+						"tag": "\"speech\""
+					}
+				},
+				{
+					"id": "set-visible",
+					"objectClass": "text",
+					"sid": 875533655816442,
+					"parameters": {
+						"visibility": "visible"
+					}
+				},
+				{
+					"id": "typewriter-text",
+					"objectClass": "text",
+					"sid": 288389650294329,
+					"parameters": {
+						"text": "txt",
+						"duration": "speed"
+					}
+				},
+				{
+					"id": "set-eventvar-value",
+					"objectClass": "System",
+					"sid": 328110655501971,
+					"parameters": {
+						"variable": "audio_text",
+						"value": "speech"
+					}
+				},
+				{
+					"id": "play-by-name",
+					"objectClass": "Audio",
+					"sid": 893223408903453,
+					"parameters": {
+						"folder": "sounds",
+						"audio-file-name": "audio_text",
+						"loop": "not-looping",
+						"volume": "5",
+						"stereo-pan": "0",
+						"tag-optional": "\"speech\""
+					}
+				}
+			],
+			"sid": 960142086768481
+		},
+		{
+			"functionName": "destroyDialogue",
+			"functionDescription": "",
+			"functionCategory": "",
+			"functionReturnType": "none",
+			"functionCopyPicked": false,
+			"functionIsAsync": false,
+			"functionParameters": [],
+			"eventType": "function-block",
+			"conditions": [],
+			"actions": [
+				{
+					"id": "set-visible",
+					"objectClass": "text",
+					"sid": 967195826227016,
+					"parameters": {
+						"visibility": "invisible"
+					}
+				},
+				{
+					"id": "set-text",
+					"objectClass": "text",
+					"sid": 463123053761791,
+					"parameters": {
+						"text": "\"\""
+					}
+				},
+				{
+					"id": "stop",
+					"objectClass": "Audio",
+					"sid": 706162101977136,
+					"parameters": {
+						"tag": "audio_text"
+					}
+				}
+			],
+			"sid": 620680355307844
+		},
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-typewriter-text-finished",
+					"objectClass": "text",
+					"sid": 163815980825151
+				}
+			],
+			"actions": [
+				{
+					"id": "set-visible",
+					"objectClass": "cursor",
+					"sid": 552106558442951,
+					"parameters": {
+						"visibility": "visible"
+					}
+				}
+			],
+			"sid": 658157287464031
+		},
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-any-key-pressed",
+					"objectClass": "Keyboard",
+					"sid": 615692112891408
+				}
+			],
+			"actions": [],
+			"sid": 149906433496809,
+			"children": [
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "is-running-typewriter-text",
+							"objectClass": "text",
+							"sid": 244982826899518
+						}
+					],
+					"actions": [
+						{
+							"id": "typewriter-finish",
+							"objectClass": "text",
+							"sid": 970727915023953
+						}
+					],
+					"sid": 313775212533724
+				},
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "else",
+							"objectClass": "System",
+							"sid": 510387575891815
+						}
+					],
+					"actions": [
+						{
+							"id": "stop",
+							"objectClass": "Audio",
+							"sid": 883482836184876,
+							"parameters": {
+								"tag": "\"speech\""
+							}
+						},
+						{
+							"id": "signal",
+							"objectClass": "System",
+							"sid": 771640488872526,
+							"parameters": {
+								"tag": "\"next\""
+							}
+						}
+					],
+					"sid": 891898090003918
+				}
+			]
+		}
+	],
+	"sid": 268081455291287
+}

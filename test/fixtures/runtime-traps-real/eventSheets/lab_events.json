@@ -1,0 +1,126 @@
+{
+	"name": "lab_events",
+	"events": [
+		{
+			"eventType": "include",
+			"includeSheet": "dialogue"
+		},
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-start-of-layout",
+					"objectClass": "System",
+					"sid": 137705608752636
+				}
+			],
+			"actions": [
+				{
+					"id": "play",
+					"objectClass": "Audio",
+					"sid": 267552354684809,
+					"parameters": {
+						"audio-file": "found_lab_music",
+						"loop": "looping",
+						"volume": "-15",
+						"stereo-pan": "0",
+						"tag-optional": "\"music-lab\""
+					}
+				},
+				{
+					"id": "preload",
+					"objectClass": "Audio",
+					"sid": 726255562756281,
+					"parameters": {
+						"audio-file": "labclandestino-text1"
+					}
+				},
+				{
+					"id": "preload",
+					"objectClass": "Audio",
+					"sid": 951240618881316,
+					"parameters": {
+						"audio-file": "labclandestino-text2"
+					}
+				},
+				{
+					"id": "preload",
+					"objectClass": "Audio",
+					"sid": 450723766151257,
+					"parameters": {
+						"audio-file": "labclandestino-text3"
+					}
+				},
+				{
+					"callFunction": "dialogue",
+					"sid": 337956130365588,
+					"parameters": [
+						"\"The last combined coordinate reveals the location of an abandoned Q-Net office.\r\nThere, Nova finds a clandestine teleportation lab.\"",
+						"10",
+						"\"story/labclandestino-text1\""
+					]
+				},
+				{
+					"id": "wait-for-signal",
+					"objectClass": "System",
+					"sid": 103571847655560,
+					"parameters": {
+						"tag": "\"next\""
+					}
+				},
+				{
+					"callFunction": "dialogue",
+					"sid": 765698373365366,
+					"parameters": [
+						"\"The androids had been synchronized as nodes in an experiment to transmit information through entanglement.\"",
+						"5",
+						"\"story/labclandestino-text2\""
+					]
+				},
+				{
+					"id": "wait-for-signal",
+					"objectClass": "System",
+					"sid": 398606797171827,
+					"parameters": {
+						"tag": "\"next\""
+					}
+				},
+				{
+					"callFunction": "dialogue",
+					"sid": 995478746289812,
+					"parameters": [
+						"\"Those responsible fled, but left a trail: the digital signature of a secret government program.\r\nCodename: Project Δt.\"",
+						"12",
+						"\"story/labclandestino-text3\""
+					]
+				},
+				{
+					"id": "wait-for-signal",
+					"objectClass": "System",
+					"sid": 363119730041736,
+					"parameters": {
+						"tag": "\"next\""
+					}
+				},
+				{
+					"id": "stop",
+					"objectClass": "Audio",
+					"sid": 499547362082084,
+					"parameters": {
+						"tag": "\"music-lab\""
+					}
+				},
+				{
+					"id": "go-to-layout",
+					"objectClass": "System",
+					"sid": 968532624822929,
+					"parameters": {
+						"layout": "case_conclusion_layout"
+					}
+				}
+			],
+			"sid": 543349956017238
+		}
+	],
+	"sid": 698339261004458
+}

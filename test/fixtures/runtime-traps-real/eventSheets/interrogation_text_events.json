@@ -1,0 +1,77 @@
+{
+	"name": "interrogation_text_events",
+	"events": [
+		{
+			"eventType": "include",
+			"includeSheet": "dialogue"
+		},
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-start-of-layout",
+					"objectClass": "System",
+					"sid": 178703481641679
+				}
+			],
+			"actions": [
+				{
+					"id": "play",
+					"objectClass": "Audio",
+					"sid": 651592972142420,
+					"parameters": {
+						"audio-file": "interrogation_music",
+						"loop": "looping",
+						"volume": "-8",
+						"stereo-pan": "0",
+						"tag-optional": "\"music-interrogation\""
+					}
+				},
+				{
+					"id": "preload",
+					"objectClass": "Audio",
+					"sid": 829861513637233,
+					"parameters": {
+						"audio-file": "Interrogation"
+					}
+				},
+				{
+					"callFunction": "dialogue",
+					"sid": 734936497761933,
+					"parameters": [
+						"\"Nova connects her diagnostic interface: Q-Trace v3.2. To start the interrogation, she knows she must be careful when performing the tomography, as it can cause the robots to crash without obtaining the necessary information.\"",
+						"15",
+						"\"story/Interrogation\""
+					]
+				},
+				{
+					"id": "wait-for-signal",
+					"objectClass": "System",
+					"sid": 801943698280321,
+					"parameters": {
+						"tag": "\"next\""
+					}
+				},
+				{
+					"id": "stop",
+					"objectClass": "Audio",
+					"sid": 307419596614915,
+					"disabled": true,
+					"parameters": {
+						"tag": "\"music-interrogation\""
+					}
+				},
+				{
+					"id": "go-to-layout",
+					"objectClass": "System",
+					"sid": 465174701896195,
+					"parameters": {
+						"layout": "interrogation_layout"
+					}
+				}
+			],
+			"sid": 661441930562210
+		}
+	],
+	"sid": 560983116081801
+}

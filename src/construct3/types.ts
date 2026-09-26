@@ -112,6 +112,10 @@ export interface FileItem {
   'file-info'?: {
     purpose: string;
   };
+  /** Script files: purpose "main", "imports-for-events" or "none" */
+  'script-info'?: {
+    purpose: string;
+  };
   'icon-info'?: {
     purpose: string;
   };

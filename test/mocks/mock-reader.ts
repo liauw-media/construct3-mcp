@@ -3,7 +3,7 @@
  * No filesystem I/O — all data supplied via constructor.
  */
 
-import type { Construct3Project, EventSheet, ObjectType, Layout } from '../../src/construct3/types.js';
+import type { Construct3Project, EventSheet, ObjectType, Layout, FileItem } from '../../src/construct3/types.js';
 
 export interface MockReaderData {
   objects?: Map<string, Record<string, unknown>>;
@@ -21,7 +21,15 @@ export interface MockReaderData {
     firstLayout?: string;
   };
   usedAddons?: Array<{ type: string; id: string; name: string; author: string; bundled: boolean }>;
+  /**
+   * Project script files, listed under rootFileFolders.script. `path` is
+   * relative to scripts/ ("importsForEvents.js" or "sub/x.ts"); `purpose` goes
+   * into `script-info` (default "none").
+   */
+  scriptFiles?: Array<{ path: string; source: string; purpose?: string; type?: string }>;
 }
+
+type MockScriptFolder = { items: FileItem[]; subfolders: Array<MockScriptFolder & { name: string }> };
 
 export class MockReader {
   private objects: Map<string, Record<string, unknown>>;
@@ -30,6 +38,7 @@ export class MockReader {
   private families: Map<string, Record<string, unknown>>;
   private meta: NonNullable<MockReaderData['metadata']>;
   private addons: NonNullable<MockReaderData['usedAddons']>;
+  private scriptFiles: NonNullable<MockReaderData['scriptFiles']>;
   // Names registered in c3proj but without corresponding data (for file-existence testing)
   private registeredOnly: { objects: string[]; eventSheets: string[]; layouts: string[] } = {
     objects: [], eventSheets: [], layouts: [],
@@ -51,6 +60,7 @@ export class MockReader {
       firstLayout: 'Layout 1',
       ...data.metadata,
     };
+    this.scriptFiles = data.scriptFiles ?? [];
     this.addons = data.usedAddons ?? [
       { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
     ];
@@ -135,7 +145,7 @@ export class MockReader {
       layouts: { items: [...Array.from(this.layouts.keys()), ...this.registeredOnly.layouts], subfolders: [] },
       eventSheets: { items: [...Array.from(this.eventSheets.keys()), ...this.registeredOnly.eventSheets], subfolders: [] },
       rootFileFolders: {
-        script: { items: [], subfolders: [] },
+        script: this.scriptFolder(),
         sound: { items: [], subfolders: [] },
         music: { items: [], subfolders: [] },
         video: { items: [], subfolders: [] },
@@ -195,6 +205,37 @@ export class MockReader {
 
   getProjectPath(): string {
     return '/mock/project/project.c3proj';
+  }
+
+  async readScriptFile(relativePath: string): Promise<string> {
+    const file = this.scriptFiles.find(f => f.path === relativePath);
+    if (!file) throw new Error(`Failed to read script "${relativePath}"`);
+    return file.source;
+  }
+
+  /** rootFileFolders.script built from `scriptFiles` (subfolders from the path). */
+  private scriptFolder(): MockScriptFolder {
+    const root: MockScriptFolder = { items: [], subfolders: [] };
+    for (const [i, file] of this.scriptFiles.entries()) {
+      const parts = file.path.split('/');
+      const name = parts.pop()!;
+      let folder = root;
+      for (const part of parts) {
+        let sub = folder.subfolders.find(s => s.name === part);
+        if (!sub) {
+          sub = { name: part, items: [], subfolders: [] };
+          folder.subfolders.push(sub);
+        }
+        folder = sub;
+      }
+      folder.items.push({
+        name,
+        type: file.type ?? (name.endsWith('.ts') ? 'application/typescript' : 'application/javascript'),
+        sid: 900_000_000_000_000 + i,
+        'script-info': { purpose: file.purpose ?? 'none' },
+      });
+    }
+    return root;
   }
 
   findNearestName(_name: string, _category: 'objects' | 'eventsheets' | 'layouts'): string[] {

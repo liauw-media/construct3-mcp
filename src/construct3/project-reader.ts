@@ -198,6 +198,23 @@ export class Construct3ProjectReader {
   }
 
   /**
+   * Read a project script file as text.
+   * @param relativePath  Path inside the project's scripts/ folder, e.g. "importsForEvents.js" or "base/utils.ts"
+   */
+  async readScriptFile(relativePath: string): Promise<string> {
+    const scriptsDir = resolveProjectPath(this.getProjectDir(), 'scripts');
+    const scriptPath = resolveProjectPath(scriptsDir, ...relativePath.split('/'));
+    try {
+      return await this.readProjectFile(scriptPath);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Path traversal')) throw error;
+      throw new Error(
+        `Failed to read script "${relativePath}": ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
    * List all event sheets (from all subfolders)
    */
   async listEventSheets(): Promise<string[]> {

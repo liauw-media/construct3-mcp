@@ -4,6 +4,7 @@
 
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { PITFALLS_URI, PITFALLS_MARKDOWN } from './pitfalls.js';
 
 export function registerDocsResources(server: McpServer) {
   server.resource(
@@ -27,6 +28,9 @@ export function registerDocsResources(server: McpServer) {
           'audio', 'ajax', 'array', 'dictionary', 'json', 'localstorage',
           'browser', 'platforminfo',
         ],
+        curated: {
+          pitfalls: PITFALLS_URI,
+        },
       };
       return {
         contents: [{
@@ -36,6 +40,22 @@ export function registerDocsResources(server: McpServer) {
         }],
       };
     }
+  );
+
+  server.resource(
+    'docs-pitfalls',
+    PITFALLS_URI,
+    {
+      description: 'Curated Construct 3 pitfalls that break game logic quietly (signals, scripts, picking, expressions), each tagged with its source',
+      mimeType: 'text/markdown',
+    },
+    async (uri) => ({
+      contents: [{
+        uri: uri.href,
+        mimeType: 'text/markdown',
+        text: PITFALLS_MARKDOWN,
+      }],
+    })
   );
 
   server.resource(

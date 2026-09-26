@@ -13,6 +13,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 - Event sheet writes (`add_event_block`, `update_event_block`, `add_event_to_sheet`, `update_event_block_action`, `move_events_between_sheets`) are refused when they add a new load-time error; new warnings are returned, existing problems do not block edits (#18).
 - `locate_event` tool: maps an editor location such as "sheet, event N, action M" to the event's JSON path, SID, enclosing group/function, summary and neighbouring events (#19).
 - `get_eventsheet_outline` tool: paged, readable outline of an event sheet with the editor's event numbers; rows that still use the legacy `"behavior-type"` key are marked (#19).
+- `find_runtime_traps` tool: finds event logic that loads but hangs or fails at runtime, such as waits for signals nothing raises, waits that start after their signal was raised, and scripts that use function parameters without `localVars` (#20).
+- `construct3://docs/pitfalls` resource with curated Construct 3 pitfalls, and a `debug_stuck_game` prompt that embeds the current trap scan (#20).
 
 ### Changed
 
@@ -21,6 +23,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `list_timelines` returns the editor's transitions separately in `transitions`; the timeline tools refuse to read, change or delete transitions. `create_timeline` rejects unsafe `subfolder` paths and `"transitions"`, and writes new folders in the editor's key order (#22).
 - `create_object`, `create_family` and `update_family` refuse names that clash with another object type or family, and family members that mix plugins (#18).
 - Duplicate-SID reports locate event sheet entries by event path and index and no longer advise re-saving the project; behavior and instance variable SID clashes are warnings (#18).
+- The `review_game_logic` and `explain_eventsheet` prompts point to `find_runtime_traps` and the pitfalls resource (#20).
 
 ### Fixed
 

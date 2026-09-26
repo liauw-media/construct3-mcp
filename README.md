@@ -74,6 +74,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `construct3://layouts/{name}` | Specific layout details |
 | `construct3://docs/index` | Index of documentation categories and popular topics |
 | `construct3://docs/manual/{topic}` | Official Construct 3 documentation |
+| `construct3://docs/pitfalls` | Curated Construct 3 pitfalls (signals, scripts, picking, expressions), each tagged with its source |
 
 ### Query Tools (Read-Only)
 
@@ -106,6 +107,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 | `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
 | `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
+| `find_runtime_traps` | Runtime traps: Wait for signal tags nothing signals, waits that start after a call already raised their tag, unused/dynamic signal tags, scripts using function parameters without `localVars` |
 
 ### Mutation Tools (Safe Write Operations)
 
@@ -210,6 +212,7 @@ globalThis.__c3bridge.submit("getObjectState", { objectName: "Player" });
 | `review_game_logic` | Review overall game logic architecture |
 | `document_object` | Generate documentation for an object |
 | `optimize_project` | Get optimization suggestions |
+| `debug_stuck_game` | Diagnose soft-locks and silently dead features (runs `find_runtime_traps`, uses the pitfalls doc) |
 
 ## Safety Model
 
@@ -393,16 +396,19 @@ construct3-mcp/
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
 │   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
-│   │       └── group-settings.ts   # Event group settings (get_group_settings)
+│   │       ├── group-settings.ts   # Event group settings (get_group_settings)
+│   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
+│   │       └── script-scan.ts      # Lightweight JS/TS scanner for script actions
 │   ├── resources/
 │   │   ├── project.ts              # 6 project resources
-│   │   └── docs.ts                 # 2 Construct 3 documentation resources
+│   │   ├── docs.ts                 # 3 Construct 3 documentation resources
+│   │   └── pitfalls.ts             # Curated pitfalls doc (construct3://docs/pitfalls)
 │   ├── runtime/
 │   │   ├── bridge.ts               # Injectable C3 runtime bridge script generator
 │   │   └── zip-writer.ts           # Zero-dep ZIP writer for .c3p packing
 │   ├── tools/
 │   │   ├── query.ts                # 9 query tools
-│   │   ├── analysis.ts             # 10 analysis tools
+│   │   ├── analysis.ts             # 11 analysis tools
 │   │   ├── mutations.ts            # Registers the domain tool modules below
 │   │   ├── shared.ts               # Shared validation, result/error helpers, editor reload note
 │   │   ├── object-tools.ts         # Object and family tools (6)
@@ -414,7 +420,7 @@ construct3-mcp/
 │   │   ├── project-tools.ts        # Project metadata and addon tools (4)
 │   │   └── runtime-tools.ts        # 7 runtime control tools
 │   └── prompts/
-│       └── workflows.ts            # 6 workflow prompts
+│       └── workflows.ts            # 7 workflow prompts
 ├── test/                           # Vitest suites, mocks and fixtures
 ├── dist/                           # Compiled JavaScript (generated)
 ├── package.json

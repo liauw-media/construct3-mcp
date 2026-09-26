@@ -1,0 +1,367 @@
+{
+	"name": "tomography_control",
+	"events": [
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-start-of-layout",
+					"objectClass": "System",
+					"sid": 968892706680088
+				}
+			],
+			"actions": [
+				{
+					"id": "wait",
+					"objectClass": "System",
+					"sid": 141320817927450,
+					"parameters": {
+						"seconds": "0.3",
+						"use-timescale": true
+					}
+				},
+				{
+					"id": "set-eventvar-value",
+					"objectClass": "System",
+					"sid": 123810591011981,
+					"parameters": {
+						"variable": "theta_guess",
+						"value": "slider_theta.Value"
+					}
+				},
+				{
+					"id": "set-eventvar-value",
+					"objectClass": "System",
+					"sid": 978097569406529,
+					"parameters": {
+						"variable": "phi_guess",
+						"value": "slider_phi.Value"
+					}
+				},
+				{
+					"id": "set-eventvar-value",
+					"objectClass": "System",
+					"sid": 912633822421092,
+					"parameters": {
+						"variable": "max_shots",
+						"value": "shots_max_txt.Text"
+					}
+				},
+				{
+					"id": "set-width",
+					"objectClass": "shots_blocker",
+					"sid": 735126113946772,
+					"parameters": {
+						"width": "0"
+					}
+				},
+				{
+					"type": "script",
+					"language": "javascript",
+					"script": [
+						"drawBlochSphere(runtime);",
+						"",
+						"if(!runtime.globalVars.draw_tetra) {",
+						"    drawQubit(runtime);",
+						"    if(!runtime.globalVars.mode_tutorial){",
+						"        getLevelConfig(runtime);",
+						"    }",
+						"} else {",
+						"    drawTetrahedron(runtime, SIC_STATES);",
+						"}"
+					]
+				}
+			],
+			"sid": 212366006368115
+		},
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-changing",
+					"objectClass": "slider_theta",
+					"sid": 280929282882718
+				}
+			],
+			"actions": [
+				{
+					"id": "set-eventvar-value",
+					"objectClass": "System",
+					"sid": 370335225848554,
+					"parameters": {
+						"variable": "theta_guess",
+						"value": "slider_theta.Value"
+					}
+				},
+				{
+					"id": "set-text",
+					"objectClass": "theta_val_txt",
+					"sid": 777129741563503,
+					"parameters": {
+						"text": "str(slider_theta.Value) & \"°=\" & str(round((slider_theta.Value/180)*100)/100) & \"π\""
+					}
+				},
+				{
+					"type": "script",
+					"language": "javascript",
+					"script": [
+						"drawQubit(runtime);"
+					]
+				}
+			],
+			"sid": 863545019380384
+		},
+		{
+			"eventType": "block",
+			"conditions": [
+				{
+					"id": "on-object-clicked",
+					"objectClass": "Mouse",
+					"sid": 741986298998264,
+					"parameters": {
+						"mouse-button": "left",
+						"click-type": "clicked",
+						"object-clicked": "accept_button"
+					}
+				}
+			],
+			"actions": [
+				{
+					"callFunction": "hideDialogConfirmation",
+					"sid": 270020007530404
+				},
+				{
+					"callFunction": "tomoControlsEnable",
+					"sid": 653164908123107
+				}
+			],
+			"sid": 414001298448265,
+			"children": [
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "compare-two-values",
+							"objectClass": "System",
+							"sid": 371701151269731,
+							"parameters": {
+								"first-value": "dialog_type",
+								"comparison": 0,
+								"second-value": "\"measX\""
+							}
+						}
+					],
+					"actions": [
+						{
+							"id": "set-eventvar-value",
+							"objectClass": "System",
+							"sid": 297291577482226,
+							"parameters": {
+								"variable": "dialog_type",
+								"value": "\"\""
+							}
+						},
+						{
+							"type": "script",
+							"language": "javascript",
+							"script": [
+								"if(runtime.globalVars.mode_tutorial) {",
+								"    tomography(runtime, \"X\", TUTORIAL_STATES);",
+								"} else {",
+								"    tomography(runtime, \"X\", SIC_STATES);",
+								"}"
+							]
+						}
+					],
+					"sid": 338698786274267
+				},
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "compare-two-values",
+							"objectClass": "System",
+							"sid": 340298395190976,
+							"parameters": {
+								"first-value": "dialog_type",
+								"comparison": 0,
+								"second-value": "\"measY\""
+							}
+						}
+					],
+					"actions": [
+						{
+							"id": "set-eventvar-value",
+							"objectClass": "System",
+							"sid": 621538122670844,
+							"parameters": {
+								"variable": "dialog_type",
+								"value": "\"\""
+							}
+						},
+						{
+							"type": "script",
+							"language": "javascript",
+							"script": [
+								"if(runtime.globalVars.mode_tutorial) {",
+								"    tomography(runtime, \"Y\", TUTORIAL_STATES);",
+								"} else {",
+								"    tomography(runtime, \"Y\", SIC_STATES);",
+								"}"
+							]
+						}
+					],
+					"sid": 890111844667957
+				},
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "compare-two-values",
+							"objectClass": "System",
+							"sid": 418615738439413,
+							"parameters": {
+								"first-value": "dialog_type",
+								"comparison": 0,
+								"second-value": "\"measZ\""
+							}
+						}
+					],
+					"actions": [
+						{
+							"id": "set-eventvar-value",
+							"objectClass": "System",
+							"sid": 461379441653407,
+							"parameters": {
+								"variable": "dialog_type",
+								"value": "\"\""
+							}
+						},
+						{
+							"type": "script",
+							"language": "javascript",
+							"script": [
+								"if(runtime.globalVars.mode_tutorial) {",
+								"    tomography(runtime, \"Z\", TUTORIAL_STATES);",
+								"} else {",
+								"    tomography(runtime, \"Z\", SIC_STATES);",
+								"}"
+							]
+						}
+					],
+					"sid": 899142623567761
+				},
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "compare-two-values",
+							"objectClass": "System",
+							"sid": 142393729294792,
+							"parameters": {
+								"first-value": "dialog_type",
+								"comparison": 0,
+								"second-value": "\"levelComplete\""
+							}
+						}
+					],
+					"actions": [
+						{
+							"id": "set-eventvar-value",
+							"objectClass": "System",
+							"sid": 986126714554774,
+							"parameters": {
+								"variable": "dialog_type",
+								"value": "\"\""
+							}
+						},
+						{
+							"id": "go-to-layout",
+							"objectClass": "System",
+							"sid": 472564201281505,
+							"parameters": {
+								"layout": "interrogation_layout2"
+							}
+						}
+					],
+					"sid": 144522976418830
+				},
+				{
+					"eventType": "block",
+					"conditions": [
+						{
+							"id": "compare-two-values",
+							"objectClass": "System",
+							"sid": 947368214964943,
+							"parameters": {
+								"first-value": "dialog_type",
+								"comparison": 0,
+								"second-value": "\"verify\""
+							}
+						}
+					],
+					"actions": [
+						{
+							"id": "set-eventvar-value",
+							"objectClass": "System",
+							"sid": 508251304145021,
+							"parameters": {
+								"variable": "dialog_type",
+								"value": "\"\""
+							}
+						},
+						{
+							"type": "script",
+							"language": "javascript",
+							"script": [
+								"if(runtime.globalVars.mode_tutorial) {",
+								"    checkFidelity(runtime, TUTORIAL_STATES);",
+								"} else {",
+								"    checkFidelity(runtime, SIC_STATES);",
+								"}"
+							]
+						}
+					],
+					"sid": 320519867037056,
+					"children": [
+						{
+							"eventType": "block",
+							"conditions": [
+								{
+									"id": "evaluate-expression",
+									"objectClass": "System",
+									"sid": 977873180438330,
+									"parameters": {
+										"value": "level_completed"
+									}
+								}
+							],
+							"actions": [
+								{
+									"callFunction": "showDialogConfirmation",
+									"sid": 166436417979685,
+									"parameters": [
+										"\"You've decoded <K\" & level & \">'s information, and now you know one more quantum state. Continue with the next interrogation.\"",
+										true,
+										false
+									]
+								},
+								{
+									"id": "set-eventvar-value",
+									"objectClass": "System",
+									"sid": 673836268545369,
+									"parameters": {
+										"variable": "dialog_type",
+										"value": "\"levelComplete\""
+									}
+								}
+							],
+							"sid": 302814474417232
+						}
+					]
+				}
+			]
+		}
+	],
+	"sid": 559278733045594
+}

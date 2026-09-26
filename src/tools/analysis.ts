@@ -14,6 +14,7 @@ import { getGroupSettings } from '../construct3/analyzers/group-settings.js';
 import { buildEventOutline, locateEvent, renderOutline } from '../construct3/analyzers/event-outline.js';
 import type { EventSheet } from '../construct3/types.js';
 import { notFoundError, toolError, toolResult } from './shared.js';
+import { findRuntimeTraps } from '../construct3/analyzers/runtime-traps.js';
 
 const detailSchema = z.enum(['summary', 'standard', 'full']).optional().default('standard')
   .describe('Level of detail: summary (<2K tokens), standard, or full');
@@ -301,6 +302,32 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
         return { content: [{ type: 'text' as const, text: page.text }] };
       } catch (error) {
         return toolError(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  // Tool: Runtime trap detection
+  server.tool(
+    'find_runtime_traps',
+    'Find event logic that hangs or throws at runtime: Wait for signal tags nothing signals, unused or non-literal signal tags, and script actions that use function parameters as bare JS identifiers (need localVars.<name>). Read-only; see construct3://docs/pitfalls.',
+    {
+      eventsheet: z.string().max(200).optional().describe('Only report issues located in this event sheet (signal tags are still matched across all sheets)'),
+      detail: detailSchema,
+    },
+    async (args) => {
+      try {
+        const result = await findRuntimeTraps(reader, {
+          eventsheet: args.eventsheet,
+          detail: args.detail,
+        });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
       }
     }
   );
