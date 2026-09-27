@@ -893,9 +893,9 @@ describe('delete_family', () => {
     expect(data.references.events).toEqual([]);
     expect(data.references.eventSheets).toEqual(['Sheet1']);
     expect(data.references.memberUses).toEqual([
-      { eventSheet: 'Sheet1', path: 'block > condition:0', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition' },
-      { eventSheet: 'Sheet1', path: 'block > action:0', member: 'Sprite1', kind: 'behavior', name: 'Fade', context: 'action' },
-      { eventSheet: 'Sheet1', path: 'block > action:1', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > condition:0', eventPath: 'events[0]', sid: 202, member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', eventPath: 'events[0]', sid: 203, member: 'Sprite1', kind: 'behavior', name: 'Fade', context: 'action' },
+      { eventSheet: 'Sheet1', path: 'block > action:1', eventPath: 'events[0]', sid: 204, member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
     ]);
     expect(data.message).toContain('its instance variables or behaviors used 3 time(s) through members in events of "Sheet1" ' +
       '(instance variable "hp" of "Sprite1", behavior "Fade" of "Sprite1")');
@@ -912,8 +912,8 @@ describe('delete_family', () => {
     const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
     expect(data.action).toBe('delete_blocked');
     expect(data.references.memberUses).toEqual([
-      { eventSheet: 'Sheet1', path: 'block > condition:0', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
-      { eventSheet: 'Sheet1', path: 'block > action:0', member: 'Sprite1', kind: 'behavior', name: 'Fade', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > condition:0', eventPath: 'events[0]', sid: 202, member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', eventPath: 'events[0]', sid: 203, member: 'Sprite1', kind: 'behavior', name: 'Fade', context: 'expression' },
     ]);
     expect(data.message).toContain('(instance variable "hp" of "Sprite1", behavior "Fade" of "Sprite1")');
     expect(writer.callsFor('deleteEntityFile')).toHaveLength(0);

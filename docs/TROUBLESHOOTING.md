@@ -125,11 +125,17 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "Events still use what this update removes"
 
-**Cause**: `update_object_properties` (`removeVariables`, `removeBehaviors`) or `update_family` (`removeVariables`, `removeMembers`) would take away an instance variable or behavior that conditions, actions or expressions still use (`references.uses`, with the event paths). Nothing was changed.
+**Cause**: `update_object_properties` (`removeVariables`, `removeBehaviors`) or `update_family` (`removeVariables`, `removeMembers`) would take away an instance variable or behavior that conditions, actions or expressions still use (`references.uses`, each with its event path, the JSON path of its event as `eventPath` and the condition's or action's `sid`). Nothing was changed.
 
 **Solutions**:
 - Change or delete those conditions, actions and expressions first, then remove it
 - Use `force: true` to remove it anyway (the uses are NOT changed; `validate_project` then reports them as `missing-behavior-or-variable`, except `Object.name` and `Self.name` in expressions, which the force warning lists)
+
+### "... not found: names are matched with their letter case"
+
+**Cause**: `update_object_properties` or `update_family` was given a name that differs from the registered object type or family name only in letter case. On Windows and macOS such a name would open the file too, but the checks and the layout updates know the entity by its registered name only, so the call is refused.
+
+**Solution**: Use the registered name the error suggests (`list_objects`, `list_families`).
 
 ### Backup files (.bak)
 

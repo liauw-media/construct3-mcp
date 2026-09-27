@@ -66,10 +66,10 @@ describe('ProjectIndex.getFamilyMemberUses', () => {
       ]),
     });
     expect(index.getFamilyMemberUses('Family1')).toEqual([
-      { eventSheet: 'Sheet1', path: 'block > condition:0', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition' },
-      { eventSheet: 'Sheet1', path: 'block > action:0', member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'action' },
-      { eventSheet: 'Sheet1', path: 'block > action:1', member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'expression' },
-      { eventSheet: 'Sheet1', path: 'block > action:2', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > condition:0', eventPath: 'events[0]', sid: 202, member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', eventPath: 'events[0]', sid: 203, member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'action' },
+      { eventSheet: 'Sheet1', path: 'block > action:1', eventPath: 'events[0]', sid: 204, member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:2', eventPath: 'events[0]', sid: 205, member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
     ]);
   });
 
@@ -86,10 +86,10 @@ describe('ProjectIndex.getFamilyMemberUses', () => {
       ]),
     });
     expect(index.getFamilyMemberUses('Family1')).toEqual([
-      { eventSheet: 'Sheet1', path: 'block > condition:0', member: 'Sprite2', kind: 'instance variable', name: 'hp', context: 'expression' },
-      { eventSheet: 'Sheet1', path: 'block > action:0', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
-      { eventSheet: 'Sheet1', path: 'block > action:1', member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'action' },
-      { eventSheet: 'Sheet1', path: 'block > action:1', member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > condition:0', eventPath: 'events[0]', sid: 202, member: 'Sprite2', kind: 'instance variable', name: 'hp', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', eventPath: 'events[0]', sid: 203, member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:1', eventPath: 'events[0]', sid: 204, member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'action' },
+      { eventSheet: 'Sheet1', path: 'block > action:1', eventPath: 'events[0]', sid: 204, member: 'Sprite2', kind: 'behavior', name: 'Fade', context: 'expression' },
     ]);
   });
 

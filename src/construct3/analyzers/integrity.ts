@@ -1026,11 +1026,14 @@ const MEMBER_REFERENCE_FORM_LABELS: Partial<Record<MemberReferenceForm, string>>
  * family, or a family that does not have it (a family's conditions, actions
  * and expressions only reach its own): what update_object_properties and
  * update_family with force=true leave behind. Checked are the
- * "instance-variable" parameter, behaviorType and "Name.Behavior.Expression"
- * (see ProjectIndex.findUnresolvedMemberReferences); names are compared
- * ignoring case. One warning per sheet, object and name. What Construct 3
- * does with such a use when it opens the project is not verified, so these
- * are warnings. None of the editor-saved projects checked has one.
+ * "instance-variable" parameter (also as { name, objectClass }, as System
+ * "Sort Z order" saves it), behaviorType and "Name.Behavior.Expression" (see
+ * ProjectIndex.findUnresolvedMemberReferences); names are compared ignoring
+ * case. One warning per sheet, object and name, each use located by its event
+ * path and the JSON path of its event (sibling events share an event path).
+ * What Construct 3 does with such a use when it opens the project is not
+ * verified, so these are warnings. None of the editor-saved projects checked
+ * has one.
  */
 async function checkMissingBehaviorsAndVariables(
   reader: Construct3ProjectReader,
@@ -1049,7 +1052,7 @@ async function checkMissingBehaviorsAndVariables(
     const { eventSheet, objectClass, kind, name } = refs[0];
     const isFamily = families.has(objectClass);
     const available = index.memberNamesOf(objectClass, kind);
-    const where = refs.map(r => `${r.path} (${MEMBER_REFERENCE_FORM_LABELS[r.form] ?? r.form})`);
+    const where = refs.map(r => `${r.path} at ${r.eventPath} (${MEMBER_REFERENCE_FORM_LABELS[r.form] ?? r.form})`);
     warnings.push({
       check: 'missing-behavior-or-variable',
       entity: `eventSheets/${eventSheet}`,

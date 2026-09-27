@@ -12,10 +12,12 @@ import { validateName, validateSubfolder, toolResult, toolError, notFoundError, 
 import { findFolderPathClash } from '../construct3/names.js';
 import {
   getProjectIndex,
+  toFamilyMemberUse,
   type FamilyMemberUse,
   type MemberReference,
   type MemberRemoval,
   type ObjectUsage,
+  type ProjectIndex,
 } from '../construct3/analyzers/index-builder.js';
 import { forEachLayoutInstance } from '../construct3/layers.js';
 import {
@@ -168,9 +170,9 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'update_object_properties',
-    'Update properties of an existing object type (variables, behaviors, global status). Removing an instance variable or behavior that events still use is refused without force, listing the uses: the "instance-variable" parameter or behaviorType of conditions/actions on the object, and "Object.name", "Object.Behavior.Expression" or (on the object) "Self.name" in expressions. Scripts are not checked.',
+    'Update properties of an existing object type (variables, behaviors, global status). Removing an instance variable or behavior that events still use is refused without force, listing the uses: the "instance-variable" parameter or behaviorType of conditions/actions on the object (also System actions such as Sort Z order that name the object with the variable), and "Object.name", "Object.Behavior.Expression" or (on the object) "Self.name" in expressions. Scripts are not checked; a warning names scripts that read a removed name (instVars.name, behaviors.Name).',
     {
-      name: z.string().max(200).describe('Existing object name'),
+      name: z.string().max(200).describe('Existing object name, as registered (letter case included)'),
       isGlobal: z.boolean().optional().describe('Change global status'),
       addVariables: z.array(z.object({
         name: z.string().describe('Variable name'),
@@ -191,6 +193,13 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           return toolError('No updates provided. Specify at least one of: isGlobal, addVariables, removeVariables, addBehaviors, removeBehaviors.');
         }
 
+        // The registered name only: on case-insensitive file systems another
+        // spelling would open the file too, but nothing else knows it by that name
+        const objectNames = await reader.listObjectTypes();
+        if (!objectNames.includes(args.name)) {
+          return entityNotFound('Object', args.name, objectNames, reader.findNearestName(args.name, 'objects'), 'list_objects');
+        }
+
         // Read existing object — preserves ALL original fields
         let obj: ObjectType;
         try {
@@ -204,17 +213,23 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const removedBehaviors: string[] = [];
 
         // Before any change: events that use an instance variable or behavior being removed
+        const variablesToRemove = existingNames(obj.instanceVariables, args.removeVariables);
+        const behaviorsToRemove = existingNames(obj.behaviorTypes, args.removeBehaviors);
         const removal: MemberRemoval = {
-          variables: new Map([[args.name, existingNames(obj.instanceVariables, args.removeVariables)]]),
-          behaviors: new Map([[args.name, existingNames(obj.behaviorTypes, args.removeBehaviors)]]),
+          variables: new Map([[args.name, variablesToRemove]]),
+          behaviors: new Map([[args.name, behaviorsToRemove]]),
         };
-        if ([...removal.variables!.values(), ...removal.behaviors!.values()].some(names => names.length > 0)) {
+        if (variablesToRemove.length > 0 || behaviorsToRemove.length > 0) {
           const index = await getProjectIndex(reader);
           const broken = index.findReferencesBrokenBy(removal);
           if (broken.length > 0 && !args.force) {
             return toolResult(removalBlocked(args.name, 'object', broken));
           }
           warnings.push(...removalForcedWarnings(args.name, broken));
+          warnings.push(...await scriptReadWarnings(reader, index, removal, [
+            ...variablesToRemove.map(name => ({ objectClass: args.name, kind: 'instance variable' as const, name })),
+            ...behaviorsToRemove.map(name => ({ objectClass: args.name, kind: 'behavior' as const, name })),
+          ]));
         }
 
         // Update global status
@@ -485,9 +500,9 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'update_family',
-    'Update a family: add/remove members, add/remove shared instance variables. Removing an instance variable that events still use (on the family, or through a member that gets it from this family only), or a member through which events use the family\'s instance variables or behaviors, is refused without force, listing the uses. Removing a member also warns when events use the family itself, since they no longer apply to that member. Scripts are not checked.',
+    'Update a family: add/remove members, add/remove shared instance variables. Removing an instance variable that events still use (on the family, or through a member that gets it from this family only), or a member through which events use the family\'s instance variables or behaviors, is refused without force, listing the uses. Removing a member also warns when events use the family itself, since they no longer apply to that member. Scripts are not checked; a warning names scripts that read a name a member loses.',
     {
-      name: z.string().max(200).describe('Family name to update'),
+      name: z.string().max(200).describe('Family name to update, as registered (letter case included)'),
       addMembers: z.array(z.string().max(200)).optional().describe('Object type names to add to the family'),
       removeMembers: z.array(z.string().max(200)).optional().describe('Object type names to remove from the family'),
       addVariables: z.array(z.object({
@@ -505,6 +520,12 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           return toolError('No updates provided. Specify at least one of: addMembers, removeMembers, addVariables, removeVariables.');
         }
 
+        // The registered name only, as for update_object_properties
+        const familyNames = await reader.listFamilies();
+        if (!familyNames.includes(args.name)) {
+          return entityNotFound('Family', args.name, familyNames, [], 'list_families');
+        }
+
         let family: Record<string, unknown>;
         try {
           family = await reader.readFamily(args.name);
@@ -518,17 +539,28 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         // instance variables and behaviors through a member, being removed
         const currentMembers = Array.isArray(family.members) ? family.members.filter((m): m is string => typeof m === 'string') : [];
         const leaving = [...new Set((args.removeMembers ?? []).filter(m => currentMembers.includes(m)))];
+        const variablesToRemove = existingNames(family.instanceVariables, args.removeVariables);
         const removal: MemberRemoval = {
-          variables: new Map([[args.name, existingNames(family.instanceVariables, args.removeVariables)]]),
+          variables: new Map([[args.name, variablesToRemove]]),
           members: new Map([[args.name, leaving]]),
         };
-        if (leaving.length > 0 || removal.variables!.get(args.name)!.length > 0) {
+        if (leaving.length > 0 || variablesToRemove.length > 0) {
           const index = await getProjectIndex(reader);
           const broken = index.findReferencesBrokenBy(removal);
           if (broken.length > 0 && !args.force) {
             return toolResult(removalBlocked(args.name, 'family', broken));
           }
           warnings.push(...removalForcedWarnings(args.name, broken));
+          // What member instances lose: the removed variables, and for a leaving member
+          // all of the family's instance variables and behaviors
+          const familyVariables = entryNamesOf(family.instanceVariables);
+          const familyBehaviors = entryNamesOf(family.behaviorTypes);
+          warnings.push(...await scriptReadWarnings(reader, index, removal, [...new Set(currentMembers)].flatMap(member => [
+            ...(leaving.includes(member) ? familyVariables : variablesToRemove)
+              .map(name => ({ objectClass: member, kind: 'instance variable' as const, name })),
+            ...(leaving.includes(member) ? familyBehaviors : [])
+              .map(name => ({ objectClass: member, kind: 'behavior' as const, name })),
+          ])));
           // Not checkable: whether events that use the family itself rely on these members being in it
           const familyEvents = index.getObjectUsage(args.name).events;
           if (leaving.length > 0 && familyEvents.length > 0) {
@@ -683,10 +715,11 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const warnings: string[] = [];
         if (hasRefs && args.force) {
           warnings.push(`Family deleted but still referenced: ${description}. References were NOT cleaned up.`);
-          // validate_project reports the other member uses as missing-behavior-or-variable
+          // validate_project reports the other member uses: as missing-behavior-or-variable,
+          // and those under the legacy "behavior-type" key as legacy-behavior-key
           const unreportedMemberUses = index.getFamilyMemberReferences(args.name)
             .filter(ref => ref.form === 'member-expression')
-            .map(({ eventSheet, path, objectClass, kind, name, context }) => ({ eventSheet, path, member: objectClass, kind, name, context }));
+            .map(toFamilyMemberUse);
           const unreported = unreportedUsesWarning(events, unreportedMemberUses);
           if (unreported) warnings.push(unreported);
         }
@@ -834,7 +867,66 @@ function describeMemberReferences(entity: string, uses: MemberReference[]): stri
 
 /** Uses of instance variables and behaviors as listed in a refusal. */
 function memberUseList(uses: MemberReference[]): MemberReference[] {
-  return uses.map(({ eventSheet, path, objectClass, kind, name, context, form }) => ({ eventSheet, path, objectClass, kind, name, context, form }));
+  return uses.map(({ eventSheet, path, eventPath, sid, objectClass, kind, name, context, form }) =>
+    ({ eventSheet, path, eventPath, ...(sid !== undefined ? { sid } : {}), objectClass, kind, name, context, form }));
+}
+
+/**
+ * Where a use is, e.g. '"Sheet1" block > action:0 at events[3]' (the event's
+ * JSON path tells apart sibling events whose event path is the same), or
+ * 'scripts/main.js' for a script file.
+ */
+function useLocation(use: { eventSheet?: string; path: string; eventPath?: string }): string {
+  if (use.eventSheet === undefined) return use.path;
+  return `"${use.eventSheet}" ${use.path}${use.eventPath !== undefined ? ` at ${use.eventPath}` : ''}`;
+}
+
+/** Names of the named entries (instance variables, behaviors) of an object type or family file. */
+function entryNamesOf(entries: unknown): string[] {
+  if (!Array.isArray(entries)) return [];
+  return entries
+    .map(e => (e && typeof e === 'object' ? (e as { name?: unknown }).name : undefined))
+    .filter((name): name is string => typeof name === 'string');
+}
+
+/**
+ * One warning per instance variable or behavior that `lost` names (an object
+ * type or family that has it now and no longer has it after `removal`) and
+ * that scripts read by name (instVars.hp, behaviors.Fade in script actions,
+ * script events and project script files). Scripts are not checked: which
+ * object's instances they read cannot be told, so this only warns.
+ */
+async function scriptReadWarnings(
+  reader: Construct3ProjectReader,
+  index: ProjectIndex,
+  removal: MemberRemoval,
+  lost: Array<{ objectClass: string; kind: MemberReference['kind']; name: string }>,
+): Promise<string[]> {
+  const losers = new Map<string, { kind: MemberReference['kind']; name: string; objects: Set<string> }>();
+  for (const { objectClass, kind, name } of lost) {
+    if (!index.hasMember(objectClass, kind, name) || index.hasMember(objectClass, kind, name, removal)) continue;
+    const key = `${kind}\0${name}`;
+    if (!losers.has(key)) losers.set(key, { kind, name, objects: new Set() });
+    losers.get(key)!.objects.add(objectClass);
+  }
+  if (losers.size === 0) return [];
+
+  const { reads, unreadable } = await index.getScriptMemberReads(reader);
+  const warnings: string[] = [];
+  for (const { kind, name, objects } of losers.values()) {
+    // Script property names are case-sensitive
+    const where = [...new Set(reads.filter(r => r.kind === kind && r.name === name).map(useLocation))];
+    if (where.length === 0) continue;
+    const access = kind === 'instance variable' ? `instVars.${name}` : `behaviors.${name}`;
+    const owners = listSome([...objects].map(o => `"${o}"`));
+    warnings.push(`Scripts read ${kind} "${name}" by name (${access}) in ${listSome(where)}, and ${owners} ` +
+      `${objects.size === 1 ? 'no longer has' : 'no longer have'} it. Scripts are not checked, so whether they read it from ` +
+      `${objects.size === 1 ? 'that object' : 'these objects'} cannot be told: review them.`);
+  }
+  if (warnings.length > 0 && unreadable.length > 0) {
+    warnings.push(`${unreadable.length} script file(s) could not be read and were not searched: ${listSome(unreadable)}.`);
+  }
+  return warnings;
 }
 
 /** The refusal of update_object_properties / update_family while events use what it removes. */
@@ -857,19 +949,40 @@ function removalBlocked(entity: string, category: 'object' | 'family', uses: Mem
  * The warnings of a forced removal that leaves uses behind: what is left, and
  * the uses validate_project cannot report afterwards ("Name.member" in
  * expressions, which reads like one of the plugin's expressions once the name
- * is gone). Empty when nothing is left behind.
+ * is gone). validate_project reports the others as missing-behavior-or-variable,
+ * except a behavior named under the legacy "behavior-type" key, which it reports
+ * as legacy-behavior-key. Empty when nothing is left behind.
  */
 function removalForcedWarnings(entity: string, uses: MemberReference[]): string[] {
   if (uses.length === 0) return [];
   const warnings = [`Removed although events still use it: ${describeMemberReferences(entity, uses)}. The uses were NOT changed.`];
   const unreported = uses.filter(u => u.form === 'member-expression');
   if (unreported.length > 0) {
-    const where = [...new Set(unreported.map(u => `"${u.eventSheet}" ${u.path}`))];
-    const others = unreported.length < uses.length ? 'reports the other uses as missing-behavior-or-variable, but ' : '';
+    const where = [...new Set(unreported.map(useLocation))];
+    const reportedAs = [
+      ...(uses.some(u => u.form !== 'member-expression' && u.form !== 'legacy-behavior-type') ? ['missing-behavior-or-variable'] : []),
+      ...(uses.some(u => u.form === 'legacy-behavior-type') ? ['legacy-behavior-key (the "behavior-type" key)'] : []),
+    ];
+    const others = reportedAs.length > 0 ? `reports the other uses as ${reportedAs.join(' or ')}, but ` : '';
     warnings.push(`validate_project ${others}will not report the ${unreported.length} use(s) written as "Name.member" or "Self.member" ` +
       `in expressions (${listSome(where)}), which it cannot tell apart from the plugin's own expressions: fix them now.`);
   }
   return warnings;
+}
+
+/**
+ * Not found, for update_object_properties / update_family: names that differ
+ * only in letter case get their own hint, since the name must be the
+ * registered one.
+ */
+function entityNotFound(
+  kind: 'Object' | 'Family', name: string, registered: string[], suggestions: string[], listTool: string,
+): ReturnType<typeof toolError> {
+  const sameIgnoringCase = registered.find(n => n.toLowerCase() === name.toLowerCase());
+  if (sameIgnoringCase !== undefined) {
+    return toolError(`${kind} "${name}" not found: names are matched with their letter case. Did you mean "${sameIgnoringCase}"?`);
+  }
+  return notFoundError(kind, name, suggestions, listTool);
 }
 
 /** Event uses as listed in a refusal: where and how. */
@@ -913,7 +1026,7 @@ function unreportedUsesWarning(events: ObjectReference[], memberUses: FamilyMemb
   if (memberUses.length > 0) {
     counts.push(`${memberUses.length} use(s) of its instance variables and behaviors through members written as "Member.name" in expressions`);
   }
-  const where = [...new Set([...inCode, ...memberUses].map(r => `"${r.eventSheet}" ${r.path}`))];
+  const where = [...new Set([...inCode, ...memberUses].map(useLocation))];
   return `validate_project will not report its ${counts.join(' and ')} (${listSome(where)}): fix them now.`;
 }
 

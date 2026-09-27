@@ -35,13 +35,17 @@
  *
  * Uses of instance variables and behaviors (memberReferences, see
  * MemberReference) go through an object type or family: the "instance-variable"
- * parameter and the behaviorType of a condition/action on it, and in any
- * parameter expression "Name.var", "Name(0).var", "Name.Behavior.Expression"
+ * parameter and the behaviorType of a condition/action on it, an
+ * "instance-variable" parameter that names the object type itself as
+ * { name, objectClass } (editor-saved System "Sort Z order" actions), and in
+ * any parameter expression "Name.var", "Name(0).var", "Name.Behavior.Expression"
  * and, in a condition/action on it, "Self.var" and "Self.Behavior.Expression".
  * An object type has its own instance variables and behaviors and those of its
- * families; a family has only its own. Expressions are matched ignoring case
- * (editor-saved projects spell object, instance variable and expression names
- * in expressions in other case, and open), and a two-part "Name.member" counts
+ * families; a family has only its own. All these names are matched ignoring
+ * case (editor-saved projects spell object, instance variable and expression
+ * names in expressions in other case, and open; the "instance-variable"
+ * parameter and behaviorType are compared the same way, which errs on the side
+ * of finding a use), and a two-part "Name.member" counts
  * only when the member names an instance variable or behavior of that object
  * type or family, since otherwise it is one of the plugin's expressions
  * ("Sprite.X"). These uses are what update_object_properties and update_family
@@ -50,7 +54,10 @@
  * longer resolve, and, through members, what delete_family checks
  * (getFamilyMemberUses): names a member gets from that family alone (not ones
  * it declares itself or also gets from another family) break when the family
- * is deleted.
+ * is deleted. Scripts that read instance variables and behaviors by name
+ * (instVars.name, behaviors.Name in script actions, script events and project
+ * script files) are listed apart (getScriptMemberReads): which object's
+ * instances they read is not known, so they only warrant a warning.
  */
 
 import type { Construct3ProjectReader } from '../project-reader.js';
@@ -65,6 +72,8 @@ import type {
   Action,
   ObjectReference,
   Layout,
+  FileFolder,
+  FileFolderSubfolder,
 } from '../types.js';
 import {
   functionsObjectName,
@@ -113,6 +122,10 @@ export interface FamilyMemberUse {
   eventSheet: string;
   /** Event path, as in ObjectReference.path */
   path: string;
+  /** JSON path of the event, as in MemberReference.eventPath */
+  eventPath: string;
+  /** SID of the condition or action, when it has one */
+  sid?: number;
   /** The member object type the use goes through */
   member: string;
   kind: 'instance variable' | 'behavior';
@@ -128,7 +141,9 @@ export interface FamilyMemberUse {
 
 /**
  * How an event names an instance variable or behavior:
- * - "instance-variable": the "instance-variable" parameter of a condition/action;
+ * - "instance-variable": the "instance-variable" parameter of a condition/action
+ *   on the object type or family, or one that names the object type itself as
+ *   { name, objectClass } (System "Sort Z order");
  * - "behaviorType": the behaviorType of a condition/action ("behavior-type",
  *   the key older versions of this server wrote, is "legacy-behavior-type");
  * - "behavior-expression": "Name.Behavior.Expression" or "Self.Behavior.Expression"
@@ -150,6 +165,15 @@ export interface MemberReference {
   eventSheet: string;
   /** Event path, as in ObjectReference.path */
   path: string;
+  /**
+   * JSON path of the event that holds the condition or action, e.g.
+   * "events[3].children[1]" (the form locate_event returns and the SID-based
+   * event tools take as eventPath): `path` names no event index, so uses in
+   * sibling events can share it
+   */
+  eventPath: string;
+  /** SID of the condition or action, when it has one */
+  sid?: number;
   /**
    * The object type or family it goes through (as spelled in the project): the
    * condition's or action's object, or the object named in the expression
@@ -173,6 +197,22 @@ export interface MemberRemoval {
   variables?: ReadonlyMap<string, readonly string[]>;
   behaviors?: ReadonlyMap<string, readonly string[]>;
   members?: ReadonlyMap<string, readonly string[]>;
+}
+
+/**
+ * A script that reads an instance variable or behavior by name
+ * (instVars.name, behaviors.Name): a script action or script event, or a
+ * project script file.
+ */
+export interface ScriptMemberRead {
+  /** Event sheet of the script action or script event; absent for a script file */
+  eventSheet?: string;
+  /** Event path (as in ObjectReference.path), or "scripts/<file path>" for a script file */
+  path: string;
+  /** JSON path of the event (as in MemberReference.eventPath); absent for a script file */
+  eventPath?: string;
+  kind: 'instance variable' | 'behavior';
+  name: string;
 }
 
 /** Instance variable and behavior names of one object type or family. */
@@ -323,6 +363,70 @@ export function scriptObjectTokens(script: string): string[] {
   return [...script.matchAll(SCRIPT_OBJECT_ACCESS)].map(m => m[1] ?? m[3]);
 }
 
+/** instVars.name, instVars?.name, instVars["name"] and the same for behaviors, in script text */
+const SCRIPT_MEMBER_ACCESS =
+  /(?<![\p{L}\p{N}_$])(instVars|behaviors)\s*(?:\?\.|\.)\s*([\p{L}_$][\p{L}\p{N}_$]*)|(?<![\p{L}\p{N}_$])(instVars|behaviors)\s*(?:\?\.)?\s*\[\s*(["'`])([^"'`\\]+)\4\s*\]/gu;
+
+/**
+ * Instance variables and behaviors that script text reads by name
+ * (inst.instVars.hp, inst.instVars["hp"], inst.behaviors.Fade), each once.
+ * Which object's instances the script reads them from is not known.
+ */
+export function scriptMemberAccesses(script: string): Array<{ kind: MemberReference['kind']; name: string }> {
+  const found = new Map<string, { kind: MemberReference['kind']; name: string }>();
+  for (const m of script.matchAll(SCRIPT_MEMBER_ACCESS)) {
+    const kind = (m[1] ?? m[3]) === 'instVars' ? 'instance variable' : 'behavior';
+    const name = m[2] ?? m[5];
+    found.set(`${kind}\0${name}`, { kind, name });
+  }
+  return [...found.values()];
+}
+
+/** The instance variables and behaviors the project script files (rootFileFolders.script) read by name. */
+async function readScriptFileMemberReads(
+  reader: Construct3ProjectReader,
+): Promise<{ reads: ScriptMemberRead[]; unreadable: string[] }> {
+  const reads: ScriptMemberRead[] = [];
+  const unreadable: string[] = [];
+  let folder: FileFolder | undefined;
+  try {
+    folder = typeof reader.getProject === 'function' ? reader.getProject().rootFileFolders?.script : undefined;
+  } catch {
+    return { reads, unreadable };
+  }
+  if (!folder || typeof reader.readScriptFile !== 'function') return { reads, unreadable };
+
+  const paths: string[] = [];
+  const walk = (f: FileFolder | FileFolderSubfolder, prefix: string, depth: number) => {
+    if (depth > MAX_DEPTH) return;
+    for (const item of Array.isArray(f.items) ? f.items : []) {
+      if (item && typeof item.name === 'string' && item.name !== '') paths.push(prefix + item.name);
+    }
+    for (const sub of Array.isArray(f.subfolders) ? f.subfolders : []) {
+      if (sub && typeof sub.name === 'string') walk(sub, `${prefix}${sub.name}/`, depth + 1);
+    }
+  };
+  walk(folder, '', 0);
+
+  for (const path of paths) {
+    let source: string;
+    try {
+      source = await reader.readScriptFile(path);
+    } catch {
+      unreadable.push(path);
+      continue;
+    }
+    for (const access of scriptMemberAccesses(source)) reads.push({ path: `scripts/${path}`, ...access });
+  }
+  return { reads, unreadable };
+}
+
+/** A use through a member (getFamilyMemberReferences) in the FamilyMemberUse shape delete_family lists. */
+export function toFamilyMemberUse(ref: MemberReference): FamilyMemberUse {
+  const { eventSheet, path, eventPath, sid, objectClass, kind, name, context } = ref;
+  return { eventSheet, path, eventPath, ...(sid !== undefined ? { sid } : {}), member: objectClass, kind, name, context };
+}
+
 /** Script text of a script action or script event (a string or an array of lines). */
 function scriptText(script: unknown): string {
   if (typeof script === 'string') return script;
@@ -412,6 +516,10 @@ export class ProjectIndex {
   private familiesOfObject: Map<string, string[]> = new Map();
   /** Some family file could not be read: an object type may get more names than classMembers shows */
   private unreadableFamilies = false;
+  /** Instance variables and behaviors that script actions and script events read by name */
+  private eventScriptMemberReads: ScriptMemberRead[] = [];
+  /** The same for project script files, read on first use (getScriptMemberReads) */
+  private scriptFileMemberReads: Promise<{ reads: ScriptMemberRead[]; unreadable: string[] }> | null = null;
 
   private built = false;
   /** Name of the built-in Functions object (project.c3proj functionsName) */
@@ -480,12 +588,12 @@ export class ProjectIndex {
 
   private indexEventSheet(sheetName: string, events: C3Event[]): void {
     // Iterative (stack-based) traversal to avoid stack overflow
-    const stack: Array<{ event: C3Event; path: string; depth: number }> = [];
+    const stack: Array<{ event: C3Event; path: string; eventPath: string; depth: number }> = [];
     let nodeCount = 0;
 
     // Push events in reverse so we process in order
     for (let i = events.length - 1; i >= 0; i--) {
-      stack.push({ event: events[i], path: '', depth: 0 });
+      stack.push({ event: events[i], path: '', eventPath: `events[${i}]`, depth: 0 });
     }
 
     while (stack.length > 0) {
@@ -494,7 +602,7 @@ export class ProjectIndex {
         break;
       }
 
-      const { event, path, depth } = stack.pop()!;
+      const { event, path, eventPath, depth } = stack.pop()!;
       if (depth > MAX_DEPTH) {
         this.warnings.push(`Event sheet "${sheetName}": max depth exceeded at ${path}`);
         continue;
@@ -509,21 +617,21 @@ export class ProjectIndex {
         // Index conditions
         if (block.conditions) {
           for (let i = 0; i < block.conditions.length; i++) {
-            this.indexCondition(sheetName, block.conditions[i], `${blockPath} > condition:${i}`);
+            this.indexCondition(sheetName, block.conditions[i], `${blockPath} > condition:${i}`, eventPath);
           }
         }
 
         // Index actions
         if (block.actions) {
           for (let i = 0; i < block.actions.length; i++) {
-            this.indexAction(sheetName, block.actions[i], `${blockPath} > action:${i}`);
+            this.indexAction(sheetName, block.actions[i], `${blockPath} > action:${i}`, eventPath);
           }
         }
 
         // Push children
         if (block.children) {
           for (let i = block.children.length - 1; i >= 0; i--) {
-            stack.push({ event: block.children[i], path: blockPath, depth: depth + 1 });
+            stack.push({ event: block.children[i], path: blockPath, eventPath: `${eventPath}.children[${i}]`, depth: depth + 1 });
           }
         }
       } else if (eventType === 'function-block') {
@@ -538,19 +646,19 @@ export class ProjectIndex {
         // Index conditions & actions
         if (func.conditions) {
           for (let i = 0; i < func.conditions.length; i++) {
-            this.indexCondition(sheetName, func.conditions[i], `${funcPath} > condition:${i}`);
+            this.indexCondition(sheetName, func.conditions[i], `${funcPath} > condition:${i}`, eventPath);
           }
         }
         if (func.actions) {
           for (let i = 0; i < func.actions.length; i++) {
-            this.indexAction(sheetName, func.actions[i], `${funcPath} > action:${i}`);
+            this.indexAction(sheetName, func.actions[i], `${funcPath} > action:${i}`, eventPath);
           }
         }
 
         // Push children
         if (func.children) {
           for (let i = func.children.length - 1; i >= 0; i--) {
-            stack.push({ event: func.children[i], path: funcPath, depth: depth + 1 });
+            stack.push({ event: func.children[i], path: funcPath, eventPath: `${eventPath}.children[${i}]`, depth: depth + 1 });
           }
         }
       } else if ((eventType as string) === 'custom-ace-block') {
@@ -566,17 +674,17 @@ export class ProjectIndex {
         }
         if (Array.isArray(custom.conditions)) {
           for (let i = 0; i < custom.conditions.length; i++) {
-            this.indexCondition(sheetName, custom.conditions[i], `${customPath} > condition:${i}`);
+            this.indexCondition(sheetName, custom.conditions[i], `${customPath} > condition:${i}`, eventPath);
           }
         }
         if (Array.isArray(custom.actions)) {
           for (let i = 0; i < custom.actions.length; i++) {
-            this.indexAction(sheetName, custom.actions[i], `${customPath} > action:${i}`);
+            this.indexAction(sheetName, custom.actions[i], `${customPath} > action:${i}`, eventPath);
           }
         }
         if (Array.isArray(custom.children)) {
           for (let i = custom.children.length - 1; i >= 0; i--) {
-            stack.push({ event: custom.children[i], path: customPath, depth: depth + 1 });
+            stack.push({ event: custom.children[i], path: customPath, eventPath: `${eventPath}.children[${i}]`, depth: depth + 1 });
           }
         }
       } else if (eventType === 'group') {
@@ -586,7 +694,7 @@ export class ProjectIndex {
         // Index children (even if disabled — they're part of the structure)
         if (group.children) {
           for (let i = group.children.length - 1; i >= 0; i--) {
-            stack.push({ event: group.children[i], path: groupPath, depth: depth + 1 });
+            stack.push({ event: group.children[i], path: groupPath, eventPath: `${eventPath}.children[${i}]`, depth: depth + 1 });
           }
         }
       } else if (eventType === 'include') {
@@ -597,27 +705,27 @@ export class ProjectIndex {
           this.eventSheetIncludes.set(sheetName, includes);
         }
       } else if (eventType === 'script') {
-        this.indexScript(sheetName, (event as ScriptEvent).script, path ? `${path} > script` : 'script');
+        this.indexScript(sheetName, (event as ScriptEvent).script, path ? `${path} > script` : 'script', eventPath);
       }
       // variable, comment — no object references to index
     }
   }
 
-  private indexCondition(sheetName: string, condition: Condition, path: string): void {
+  private indexCondition(sheetName: string, condition: Condition, path: string, eventPath: string): void {
     if (!condition || typeof condition !== 'object') return;
     this.indexExpressionCalls(condition as unknown as Record<string, unknown>, sheetName, path);
     if (condition.objectClass) {
       this.addObjectReference(condition.objectClass, sheetName, path, 'condition');
     }
     this.indexParameters(sheetName, condition.parameters, path, condition.objectClass);
-    this.indexMemberReferences(sheetName, condition as unknown as Record<string, unknown>, path, 'condition');
+    this.indexMemberReferences(sheetName, condition as unknown as Record<string, unknown>, path, eventPath, 'condition');
   }
 
-  private indexAction(sheetName: string, action: Action, path: string): void {
+  private indexAction(sheetName: string, action: Action, path: string, eventPath: string): void {
     if (!action || typeof action !== 'object') return;
     // Script actions have type: 'script' instead of objectClass
     if ('type' in action && action.type === 'script') {
-      this.indexScript(sheetName, action.script, path);
+      this.indexScript(sheetName, action.script, path, eventPath);
       return;
     }
 
@@ -627,7 +735,7 @@ export class ProjectIndex {
       this.addObjectReference(stdAction.objectClass, sheetName, path, 'action');
     }
     this.indexParameters(sheetName, stdAction.parameters, path, stdAction.objectClass);
-    this.indexMemberReferences(sheetName, action as unknown as Record<string, unknown>, path, 'action');
+    this.indexMemberReferences(sheetName, action as unknown as Record<string, unknown>, path, eventPath, 'action');
 
     // Check for function calls
     if (typeof stdAction.callFunction === 'string' && stdAction.callFunction) {
@@ -727,7 +835,7 @@ export class ProjectIndex {
    * this name (ignoring case) after `removal`: its own, or for an object type
    * one of a family it stays a member of.
    */
-  private hasMember(
+  hasMember(
     objectClass: string, kind: MemberReference['kind'], name: string, removal: MemberRemoval = {},
   ): boolean {
     const key = name.toLowerCase();
@@ -747,31 +855,48 @@ export class ProjectIndex {
   /**
    * Uses of instance variables and behaviors in one condition/action (see
    * MemberReference): its "instance-variable" parameter and behaviorType when
-   * its objectClass is an object type or family, and "Name.member" /
-   * "Name.Behavior.Expression" in its parameter expressions, "Self" being its
-   * objectClass. One entry per object, kind, name and context.
+   * its objectClass is an object type or family, an "instance-variable"
+   * parameter that names its object type itself (System "Sort Z order"), and
+   * "Name.member" / "Name.Behavior.Expression" in its parameter expressions,
+   * "Self" being its objectClass. One entry per object, kind, name and context.
    */
   private indexMemberReferences(
-    sheetName: string, ace: Record<string, unknown>, path: string, context: 'condition' | 'action',
+    sheetName: string, ace: Record<string, unknown>, path: string, eventPath: string, context: 'condition' | 'action',
   ): void {
     if (this.classMembers.size === 0) return;
     const found = new Map<string, MemberReference>();
+    const sid = typeof ace.sid === 'number' ? { sid: ace.sid } : {};
     const record = (
       objectClass: string, kind: MemberReference['kind'], name: string,
       useContext: MemberReference['context'], form: MemberReferenceForm,
     ) => {
       const key = [objectClass, kind, name.toLowerCase(), useContext].join('\0');
-      if (!found.has(key)) found.set(key, { eventSheet: sheetName, path, objectClass, kind, name, context: useContext, form });
+      if (!found.has(key)) {
+        found.set(key, { eventSheet: sheetName, path, eventPath, ...sid, objectClass, kind, name, context: useContext, form });
+      }
     };
 
     const parameters = ace.parameters;
+    const keyed = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
+      ? parameters as Record<string, unknown>
+      : undefined;
     // The condition's or action's own object type or family, as spelled in the project
     const own = typeof ace.objectClass === 'string' && this.classMembers.has(ace.objectClass) ? ace.objectClass : undefined;
+    const variable = keyed?.['instance-variable'];
+    if (typeof variable === 'string') {
+      if (own !== undefined && variable !== '') record(own, 'instance variable', variable, context, 'instance-variable');
+    } else if (variable && typeof variable === 'object' && !Array.isArray(variable)) {
+      // Editor-saved System actions such as "Sort Z order" name the object type
+      // with the variable, whatever their own object: {"name": "hp",
+      // "objectClass": "Sprite"}, next to "object": "Sprite"
+      const { name, objectClass } = variable as Record<string, unknown>;
+      const through = [objectClass, keyed?.object]
+        .find((c): c is string => typeof c === 'string' && this.classMembers.has(c));
+      if (typeof name === 'string' && name !== '' && through !== undefined) {
+        record(through, 'instance variable', name, context, 'instance-variable');
+      }
+    }
     if (own !== undefined) {
-      const variable = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
-        ? (parameters as Record<string, unknown>)['instance-variable']
-        : undefined;
-      if (typeof variable === 'string' && variable !== '') record(own, 'instance variable', variable, context, 'instance-variable');
       if (typeof ace.behaviorType === 'string' && ace.behaviorType !== '') {
         record(own, 'behavior', ace.behaviorType, context, 'behaviorType');
       } else if (typeof ace['behavior-type'] === 'string' && ace['behavior-type'] !== '') {
@@ -802,10 +927,18 @@ export class ProjectIndex {
     this.memberReferences.push(...found.values());
   }
 
-  /** Objects a script action or script event accesses through runtime.objects. */
-  private indexScript(sheetName: string, script: unknown, path: string): void {
-    const names = new Set(scriptObjectTokens(scriptText(script)).filter(n => this.referableNames.has(n)));
+  /**
+   * Objects a script action or script event accesses through runtime.objects,
+   * and the instance variables and behaviors it reads by name (instVars.name,
+   * behaviors.Name).
+   */
+  private indexScript(sheetName: string, script: unknown, path: string, eventPath: string): void {
+    const text = scriptText(script);
+    const names = new Set(scriptObjectTokens(text).filter(n => this.referableNames.has(n)));
     for (const name of names) this.addObjectReference(name, sheetName, path, 'script');
+    for (const access of scriptMemberAccesses(text)) {
+      this.eventScriptMemberReads.push({ eventSheet: sheetName, path, eventPath, ...access });
+    }
   }
 
   private addFunctionCall(functionName: string, sheetName: string, path: string, via: FunctionCallVia): void {
@@ -927,8 +1060,7 @@ export class ProjectIndex {
    * object types (see FamilyMemberUse); these break when the family is deleted.
    */
   getFamilyMemberUses(familyName: string): FamilyMemberUse[] {
-    return this.getFamilyMemberReferences(familyName)
-      .map(({ eventSheet, path, objectClass, kind, name, context }) => ({ eventSheet, path, member: objectClass, kind, name, context }));
+    return this.getFamilyMemberReferences(familyName).map(toFamilyMemberUse);
   }
 
   /** The uses behind getFamilyMemberUses, as MemberReference (objectClass being the member). */
@@ -983,6 +1115,18 @@ export class ProjectIndex {
       ref.form !== 'member-expression' && ref.form !== 'legacy-behavior-type' &&
       !(this.unreadableFamilies && this.classMembers.get(ref.objectClass)?.isFamily === false) &&
       !this.hasMember(ref.objectClass, ref.kind, ref.name));
+  }
+
+  /**
+   * Instance variables and behaviors that scripts read by name (see
+   * scriptMemberAccesses): script actions and script events, then project
+   * script files (rootFileFolders.script), which are read on the first call.
+   * `unreadable` names the script files that could not be read.
+   */
+  async getScriptMemberReads(reader: Construct3ProjectReader): Promise<{ reads: ScriptMemberRead[]; unreadable: string[] }> {
+    this.scriptFileMemberReads ??= readScriptFileMemberReads(reader);
+    const files = await this.scriptFileMemberReads;
+    return { reads: [...this.eventScriptMemberReads, ...files.reads], unreadable: files.unreadable };
   }
 
   /** The object type or family with this SID, if any (for object properties that store a SID). */

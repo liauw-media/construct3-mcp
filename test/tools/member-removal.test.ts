@@ -10,7 +10,7 @@ import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerObjectTools } from '../../src/tools/object-tools.js';
-import { ProjectIndex, expressionMemberChains, resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+import { ProjectIndex, expressionMemberChains, resetProjectIndex, scriptMemberAccesses } from '../../src/construct3/analyzers/index-builder.js';
 import { validateProjectIntegrity } from '../../src/construct3/analyzers/integrity.js';
 
 type Json = Record<string, any>;
@@ -83,10 +83,10 @@ describe('update_object_properties: removing what events use', () => {
     expect(data.message).toContain('Nothing was changed');
     expect(data.references.eventSheets).toEqual(['Sheet1']);
     expect(data.references.uses).toEqual([
-      { eventSheet: 'Sheet1', path: 'block > condition:0', objectClass: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition', form: 'instance-variable' },
-      { eventSheet: 'Sheet1', path: 'block > action:0', objectClass: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression', form: 'member-expression' },
-      { eventSheet: 'Sheet1', path: 'block > action:1', objectClass: 'Sprite1', kind: 'instance variable', name: 'Hp', context: 'expression', form: 'member-expression' },
-      { eventSheet: 'Sheet1', path: 'block > action:2', objectClass: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression', form: 'member-expression' },
+      { eventSheet: 'Sheet1', path: 'block > condition:0', eventPath: 'events[0]', sid: 2, objectClass: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition', form: 'instance-variable' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', eventPath: 'events[0]', sid: 3, objectClass: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression', form: 'member-expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:1', eventPath: 'events[0]', sid: 4, objectClass: 'Sprite1', kind: 'instance variable', name: 'Hp', context: 'expression', form: 'member-expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:2', eventPath: 'events[0]', sid: 5, objectClass: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression', form: 'member-expression' },
     ]);
     expect(writer.calls.filter(c => c.method !== 'entityFileRefusal')).toEqual([]);
     expect((await reader.readObjectType('Sprite1')).instanceVariables.map((v: Json) => v.name)).toEqual(['hp', 'speed']);
@@ -141,8 +141,289 @@ describe('update_object_properties: removing what events use', () => {
     expect(data.success).toBe(true);
     expect(data.warnings[0]).toBe('Removed although events still use it: instance variable "hp" used 2 time(s) (1 condition, 1 expression) in events of "Sheet1". The uses were NOT changed.');
     expect(data.warnings[1]).toContain('validate_project reports the other uses as missing-behavior-or-variable, but will not report the 1 use(s) written as "Name.member"');
-    expect(data.warnings[1]).toContain('"Sheet1" block > action:0');
+    expect(data.warnings[1]).toContain('"Sheet1" block > action:0 at events[0]');
     expect((writer.callsFor('writeEntityFile')[0].args[2] as Json).instanceVariables.map((v: Json) => v.name)).toEqual(['speed']);
+  });
+
+  it('locates uses in sibling events by their JSON path', async () => {
+    const { server } = setup(project([
+      block(1, [], [setX('Sprite1', 'Self.hp', 2)]),
+      block(3, [], [setX('Sprite1', 'Self.hp', 4)]),
+      { eventType: 'group', title: 'G', children: [block(5, [], [setX('Sprite1', 'Self.hp', 6)])] },
+    ]));
+    const blocked = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'] }));
+    expect(blocked.references.uses.map((u: Json) => [u.path, u.eventPath, u.sid])).toEqual([
+      ['block > action:0', 'events[0]', 2],
+      ['block > action:0', 'events[1]', 4],
+      ['group:G > block > action:0', 'events[2].children[0]', 6],
+    ]);
+    resetProjectIndex();
+    const forced = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'], force: true }));
+    expect(forced.warnings[1]).toContain('will not report the 3 use(s) written as "Name.member" or "Self.member" in expressions ' +
+      '("Sheet1" block > action:0 at events[0], "Sheet1" block > action:0 at events[1], "Sheet1" group:G > block > action:0 at events[2].children[0])');
+  });
+
+  it('finds uses in function blocks, custom action blocks and their sub-events', async () => {
+    const { server } = setup(project([
+      { eventType: 'function-block', functionName: 'Fn', sid: 1, conditions: [], actions: [setX('Sprite1', 'Sprite1.hp', 2)], children: [] },
+      {
+        eventType: 'custom-ace-block', objectClass: 'Sprite1', aceName: 'Hit', sid: 3,
+        conditions: [compareVar('Sprite1', 'hp', 4)], actions: [],
+        children: [block(5, [], [{ id: 'start-fade', objectClass: 'Sprite1', behaviorType: 'Fade', sid: 6 }])],
+      },
+    ]));
+    const data = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'], removeBehaviors: ['Fade'] }));
+    expect(data.action).toBe('update_blocked');
+    expect(data.references.uses.map((u: Json) => [u.path, u.eventPath, u.kind, u.context])).toEqual([
+      ['function:Fn > action:0', 'events[0]', 'instance variable', 'expression'],
+      ['custom-action:Sprite1.Hit > condition:0', 'events[1]', 'instance variable', 'condition'],
+      ['custom-action:Sprite1.Hit > block > action:0', 'events[1].children[0]', 'behavior', 'action'],
+    ]);
+  });
+
+  it('refuses removing a behavior named under the legacy "behavior-type" key, and with force names the check that reports it', async () => {
+    const { server } = setup(project([
+      block(1, [], [
+        { id: 'start-fade', objectClass: 'Sprite1', 'behavior-type': 'Fade', sid: 2 },
+        setX('Sprite1', 'Self.hp', 3),
+      ]),
+    ]));
+    const blocked = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeBehaviors: ['Fade'] }));
+    expect(blocked.action).toBe('update_blocked');
+    expect(blocked.references.uses.map((u: Json) => [u.kind, u.name, u.context, u.form])).toEqual([
+      ['behavior', 'Fade', 'action', 'legacy-behavior-type'],
+    ]);
+
+    resetProjectIndex();
+    const forced = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'], removeBehaviors: ['Fade'], force: true }));
+    expect(forced.success).toBe(true);
+    expect(forced.warnings[1]).toContain('validate_project reports the other uses as legacy-behavior-key (the "behavior-type" key), but will not report the 1 use(s)');
+    expect(forced.warnings[1]).not.toContain('missing-behavior-or-variable');
+  });
+
+  it('lists at most 50 uses and counts the others', async () => {
+    const { server } = setup(project(Array.from({ length: 60 }, (_, i) => block(1000 + 2 * i, [compareVar('Sprite1', 'hp', 1001 + 2 * i)], []))));
+    const data = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'] }));
+    expect(data.action).toBe('update_blocked');
+    expect(data.references.uses).toHaveLength(50);
+    expect(data.references.usesNotListed).toBe(10);
+    expect(data.message).toContain('instance variable "hp" used 60 time(s) (60 condition)');
+  });
+
+  it('a refused call changes nothing, also what it would have added', async () => {
+    const data = project([block(1, [compareVar('Sprite1', 'hp', 2)], [])]);
+    const { server, reader, writer } = setup(data);
+    const result = parse(await server.callTool('update_object_properties', {
+      name: 'Sprite1', isGlobal: true, addVariables: [{ name: 'mp', type: 'number' }],
+      addBehaviors: [{ behaviorId: 'Timer', name: 'Timer' }], removeVariables: ['hp'],
+    }));
+    expect(result.action).toBe('update_blocked');
+    expect(writer.calls.filter(c => c.method !== 'entityFileRefusal')).toEqual([]);
+    const obj = await reader.readObjectType('Sprite1') as unknown as Json;
+    expect(obj.isGlobal).toBeUndefined();
+    expect(obj.instanceVariables.map((v: Json) => v.name)).toEqual(['hp', 'speed']);
+    expect(obj.behaviorTypes.map((b: Json) => b.name)).toEqual(['Fade', 'Sine']);
+  });
+});
+
+describe('update_object_properties and update_family: the registered name only', () => {
+  /** A reader that, like Windows and macOS by default, opens root-level files whatever the letter case */
+  class CaseInsensitiveReader extends MockReader {
+    async readObjectType(name: string) {
+      const registered = (await this.listObjectTypes()).find(n => n.toLowerCase() === name.toLowerCase());
+      return super.readObjectType(registered ?? name);
+    }
+    async readFamily(name: string) {
+      const registered = (await this.listFamilies()).find(n => n.toLowerCase() === name.toLowerCase());
+      return super.readFamily(registered ?? name);
+    }
+  }
+
+  function caseSetup() {
+    const data: Json = {
+      objects: new Map([sprite('Sprite1', 101, {
+        instanceVariables: [variable('hp', 111)], behaviorTypes: [behavior('Fade', 112)],
+      })]),
+      families: new Map([family('Family1', 130, ['Sprite1'], { instanceVariables: [variable('armor', 131)] })]),
+      eventSheets: sheet([block(1, [compareVar('Sprite1', 'hp', 2), compareVar('Sprite1', 'armor', 3)], [
+        { id: 'start-fade', objectClass: 'Sprite1', behaviorType: 'Fade', sid: 4 },
+      ])]),
+    };
+    const server = new MockServer();
+    const reader = new CaseInsensitiveReader(data);
+    const writer = new MockWriter();
+    registerObjectTools({ server, reader, writer, idGen: new MockIdGenerator() } as any);
+    return { server, writer, data };
+  }
+
+  it('refuses a name that differs from the registered one only in letter case, and changes nothing', async () => {
+    const { server, writer, data } = caseSetup();
+    for (const [tool, args, registered] of [
+      ['update_object_properties', { name: 'sprite1', removeVariables: ['hp'] }, 'Sprite1'],
+      ['update_object_properties', { name: 'SPRITE1', removeBehaviors: ['Fade'], force: true }, 'Sprite1'],
+      ['update_family', { name: 'family1', removeVariables: ['armor'] }, 'Family1'],
+      ['update_family', { name: 'FAMILY1', removeMembers: ['Sprite1'], force: true }, 'Family1'],
+    ] as const) {
+      const result = await server.callTool(tool, args) as any;
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(`not found: names are matched with their letter case. Did you mean "${registered}"?`);
+    }
+    expect(writer.calls.filter(c => c.method !== 'entityFileRefusal')).toEqual([]);
+    expect((data.objects.get('Sprite1') as Json).instanceVariables).toHaveLength(1);
+    expect((data.objects.get('Sprite1') as Json).behaviorTypes).toHaveLength(1);
+    expect((data.families.get('Family1') as Json).instanceVariables).toHaveLength(1);
+    expect((data.families.get('Family1') as Json).members).toEqual(['Sprite1']);
+  });
+
+  it('still refuses the removal under the registered name', async () => {
+    const { server } = caseSetup();
+    expect(parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'] })).action).toBe('update_blocked');
+    expect(parse(await server.callTool('update_family', { name: 'Family1', removeMembers: ['Sprite1'] })).action).toBe('update_blocked');
+  });
+
+  it('reports an unknown name as not found', async () => {
+    const { server } = caseSetup();
+    const object = await server.callTool('update_object_properties', { name: 'Ghost', removeVariables: ['hp'] }) as any;
+    expect(object.isError).toBe(true);
+    expect(object.content[0].text).toContain('Object "Ghost" not found.');
+    const fam = await server.callTool('update_family', { name: 'Ghosts', removeVariables: ['hp'] }) as any;
+    expect(fam.isError).toBe(true);
+    expect(fam.content[0].text).toContain('Family "Ghosts" not found.');
+  });
+});
+
+describe('System "Sort Z order": an "instance-variable" parameter that names its object type', () => {
+  /** Sprite1 gets depth from Family1; Sprite2 declares order itself */
+  function project(sortBy: Json, extra: Json[] = []): Json {
+    return {
+      objects: new Map([sprite('Sprite1', 101), sprite('Sprite2', 102, { instanceVariables: [variable('order', 121)] })]),
+      families: new Map([family('Family1', 130, ['Sprite1'], { instanceVariables: [variable('depth', 131)] })]),
+      eventSheets: sheet([block(1, [], [{ id: 'sort-z-order', objectClass: 'System', sid: 2, parameters: sortBy }, ...extra])]),
+    };
+  }
+  const sortZ = (object: string, name: string, objectClass: string | undefined = object): Json =>
+    ({ object, 'instance-variable': { name, ...(objectClass !== undefined ? { objectClass } : {}) } });
+
+  it('is a use through the object type it names', async () => {
+    const index = new ProjectIndex();
+    await index.build(new MockReader(project(sortZ('Sprite1', 'depth'))) as any);
+    expect(index.memberReferences).toEqual([{
+      eventSheet: 'Sheet1', path: 'block > action:0', eventPath: 'events[0]', sid: 2,
+      objectClass: 'Sprite1', kind: 'instance variable', name: 'depth', context: 'action', form: 'instance-variable',
+    }]);
+  });
+
+  it('falls back to the "object" parameter when the variable names no object type', async () => {
+    const index = new ProjectIndex();
+    await index.build(new MockReader(project(sortZ('Sprite2', 'order', undefined))) as any);
+    expect(index.memberReferences.map(r => [r.objectClass, r.name])).toEqual([['Sprite2', 'order']]);
+  });
+
+  it('blocks removing the variable, the member it goes through and the family', async () => {
+    const { server } = setup(project(sortZ('Sprite1', 'depth')));
+    const variableRemoval = parse(await server.callTool('update_family', { name: 'Family1', removeVariables: ['depth'] }));
+    expect(variableRemoval.action).toBe('update_blocked');
+    expect(variableRemoval.references.uses.map((u: Json) => [u.objectClass, u.name, u.context, u.form])).toEqual([
+      ['Sprite1', 'depth', 'action', 'instance-variable'],
+    ]);
+    expect(parse(await server.callTool('update_family', { name: 'Family1', removeMembers: ['Sprite1'] })).action).toBe('update_blocked');
+    expect(parse(await server.callTool('delete_family', { name: 'Family1' })).references.memberUses).toHaveLength(1);
+  });
+
+  it('blocks removing an object type\'s own variable', async () => {
+    const { server } = setup(project(sortZ('Sprite2', 'order')));
+    const data = parse(await server.callTool('update_object_properties', { name: 'Sprite2', removeVariables: ['order'] }));
+    expect(data.action).toBe('update_blocked');
+    expect(data.message).toContain('instance variable "order" used 1 time(s) (1 action)');
+  });
+
+  it('is reported by validate_project once the variable is gone', async () => {
+    const data = project(sortZ('Sprite1', 'depth'));
+    (data.families.get('Family1') as Json).instanceVariables = [];
+    const result = await validateProjectIntegrity(new MockReader(data) as any);
+    expect(result.warnings.filter(w => w.check === 'missing-behavior-or-variable').map(w => w.message)).toEqual([
+      '1 use(s) of instance variable "depth" on "Sprite1", which neither "Sprite1" nor any of its families has: ' +
+        'block > action:0 at events[0] ("instance-variable" parameter). Instance variables it has: none.',
+    ]);
+  });
+});
+
+describe('scripts that read an instance variable or behavior being removed', () => {
+  function project(extra: Json = {}): Json {
+    return {
+      objects: new Map([
+        sprite('Sprite1', 101, { instanceVariables: [variable('hp', 111), variable('speed', 112)], behaviorTypes: [behavior('Fade', 113)] }),
+        sprite('Sprite2', 102),
+      ]),
+      families: new Map([family('Family1', 130, ['Sprite1', 'Sprite2'], { instanceVariables: [variable('hp', 131), variable('armor', 132)] })]),
+      eventSheets: sheet([block(1, [], [
+        { type: 'script', language: 'javascript', script: ['const s = runtime.objects.Sprite1.getFirstInstance().instVars["speed"];'] },
+      ])]),
+      scriptFiles: [{ path: 'game/main.js', source: 'export function tick(inst) { inst.instVars.hp--; inst.behaviors.Fade.startFade(); inst.instVars?.armor; }' }],
+      ...extra,
+    };
+  }
+
+  it('finds instVars and behaviors read by name in script text', () => {
+    expect(scriptMemberAccesses('a.instVars.hp + b.instVars?.mp + c.instVars[\'x y\'] + d.behaviors["Fade"].x + e.behaviors.Sine + myinstVars.no')).toEqual([
+      { kind: 'instance variable', name: 'hp' },
+      { kind: 'instance variable', name: 'mp' },
+      { kind: 'instance variable', name: 'x y' },
+      { kind: 'behavior', name: 'Fade' },
+      { kind: 'behavior', name: 'Sine' },
+    ]);
+  });
+
+  it('warns when a removed instance variable or behavior is read by name in a script action or a script file', async () => {
+    const { server } = setup(project());
+    const data = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['speed'], removeBehaviors: ['Fade'] }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toEqual([
+      'Scripts read instance variable "speed" by name (instVars.speed) in "Sheet1" block > action:0 at events[0], and "Sprite1" no longer has it. ' +
+        'Scripts are not checked, so whether they read it from that object cannot be told: review them.',
+      'Scripts read behavior "Fade" by name (behaviors.Fade) in scripts/game/main.js, and "Sprite1" no longer has it. ' +
+        'Scripts are not checked, so whether they read it from that object cannot be told: review them.',
+    ]);
+  });
+
+  it('does not warn while the object keeps the name through a family', async () => {
+    const { server } = setup(project());
+    const data = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['hp'] }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+  });
+
+  it('warns for the family variables that removed variables and leaving members take away', async () => {
+    const { server } = setup(project());
+    const variableRemoval = parse(await server.callTool('update_family', { name: 'Family1', removeVariables: ['hp', 'armor'] }));
+    expect(variableRemoval.success).toBe(true);
+    // Sprite1 declares hp itself; both lose armor
+    expect(variableRemoval.warnings).toEqual([
+      'Scripts read instance variable "armor" by name (instVars.armor) in scripts/game/main.js, and "Sprite1", "Sprite2" no longer have it. ' +
+        'Scripts are not checked, so whether they read it from these objects cannot be told: review them.',
+      'Scripts read instance variable "hp" by name (instVars.hp) in scripts/game/main.js, and "Sprite2" no longer has it. ' +
+        'Scripts are not checked, so whether they read it from that object cannot be told: review them.',
+    ]);
+    // The mock reader hands out the objects the tool changed: start again
+    resetProjectIndex();
+    const memberRemoval = parse(await setup(project()).server.callTool('update_family', { name: 'Family1', removeMembers: ['Sprite2'] }));
+    expect(memberRemoval.success).toBe(true);
+    expect(memberRemoval.warnings.filter((w: string) => w.startsWith('Scripts read')).map((w: string) => w.split(' by name')[0])).toEqual([
+      'Scripts read instance variable "hp"',
+      'Scripts read instance variable "armor"',
+    ]);
+  });
+
+  it('says which script files could not be read', async () => {
+    const data = project();
+    const { server, reader } = setup(data);
+    (reader as any).readScriptFile = async (path: string) => {
+      if (path === 'game/main.js') throw new Error('unreadable');
+      return '';
+    };
+    const result = parse(await server.callTool('update_object_properties', { name: 'Sprite1', removeVariables: ['speed'] }));
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings[1]).toBe('1 script file(s) could not be read and were not searched: game/main.js.');
   });
 });
 
@@ -240,6 +521,32 @@ describe('update_family: removing what events use', () => {
     expect(data.warnings[0]).toContain('Removed although events still use it: instance variable "hp" through "Sprite1" used 1 time(s) (1 condition)');
     expect((writer.callsFor('writeEntityFile')[0].args[2] as Json).members).toEqual(['Sprite2']);
   });
+
+  it('with force removes a used instance variable and names the uses left behind', async () => {
+    const { server, writer } = setup(project([
+      block(1, [compareVar('Family1', 'armor', 2)], [setX('Sprite3', 'Sprite1.armor', 3)]),
+    ]));
+    const data = parse(await server.callTool('update_family', { name: 'Family1', removeVariables: ['armor'], force: true }));
+    expect(data.success).toBe(true);
+    expect(data.warnings[0]).toBe('Removed although events still use it: instance variable "armor" used 1 time(s) (1 condition); ' +
+      'instance variable "armor" through "Sprite1" used 1 time(s) (1 expression) in events of "Sheet1". The uses were NOT changed.');
+    expect(data.warnings[1]).toContain('validate_project reports the other uses as missing-behavior-or-variable, but will not report the 1 use(s) ' +
+      'written as "Name.member" or "Self.member" in expressions ("Sheet1" block > action:0 at events[0])');
+    expect((writer.callsFor('writeEntityFile')[0].args[2] as Json).instanceVariables.map((v: Json) => v.name)).toEqual(['hp']);
+  });
+
+  it('a refused call changes nothing, also what it would have added', async () => {
+    const data = project([block(1, [compareVar('Family1', 'armor', 2)], [])]);
+    const { server, reader, writer } = setup(data);
+    const result = parse(await server.callTool('update_family', {
+      name: 'Family1', addMembers: ['Sprite3'], addVariables: [{ name: 'mp', type: 'number' }], removeVariables: ['armor'],
+    }));
+    expect(result.action).toBe('update_blocked');
+    expect(writer.calls.filter(c => c.method !== 'entityFileRefusal')).toEqual([]);
+    const fam = await reader.readFamily('Family1') as Json;
+    expect(fam.members).toEqual(['Sprite1', 'Sprite2']);
+    expect(fam.instanceVariables.map((v: Json) => v.name)).toEqual(['hp', 'armor']);
+  });
 });
 
 describe('ProjectIndex.findUnresolvedMemberReferences and validate_project', () => {
@@ -286,10 +593,10 @@ describe('ProjectIndex.findUnresolvedMemberReferences and validate_project', () 
     const result = await validateProjectIntegrity(reader as any);
     const issues = result.warnings.filter(w => w.check === 'missing-behavior-or-variable');
     expect(issues.map(i => i.message)).toEqual([
-      '1 use(s) of instance variable "hp" on "Sprite2", which neither "Sprite2" nor any of its families has: block > condition:0 ("instance-variable" parameter). Instance variables it has: "armor".',
-      '2 use(s) of behavior "Fade" on "Sprite2", which neither "Sprite2" nor any of its families has: block > condition:1 (behaviorType), block > action:0 (expression). Behaviors it has: "Sine".',
-      '1 use(s) of instance variable "hp" on family "Family1", which the family does not have (a family\'s conditions, actions and expressions only reach its own instance variables): block > condition:2 ("instance-variable" parameter). Instance variables it has: "armor".',
-      '1 use(s) of behavior "Ghost" on "Sprite1", which neither "Sprite1" nor any of its families has: block > action:0 (expression). Behaviors it has: "Fade", "Sine".',
+      '1 use(s) of instance variable "hp" on "Sprite2", which neither "Sprite2" nor any of its families has: block > condition:0 at events[0] ("instance-variable" parameter). Instance variables it has: "armor".',
+      '2 use(s) of behavior "Fade" on "Sprite2", which neither "Sprite2" nor any of its families has: block > condition:1 at events[0] (behaviorType), block > action:0 at events[0] (expression). Behaviors it has: "Sine".',
+      '1 use(s) of instance variable "hp" on family "Family1", which the family does not have (a family\'s conditions, actions and expressions only reach its own instance variables): block > condition:2 at events[0] ("instance-variable" parameter). Instance variables it has: "armor".',
+      '1 use(s) of behavior "Ghost" on "Sprite1", which neither "Sprite1" nor any of its families has: block > action:0 at events[0] (expression). Behaviors it has: "Fade", "Sine".',
     ]);
     expect(issues.every(i => i.entity === 'eventSheets/Sheet1')).toBe(true);
     expect(result.errors).toEqual([]);
