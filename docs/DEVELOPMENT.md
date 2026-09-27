@@ -68,6 +68,7 @@ construct3-mcp/
 │   │       ├── event-flow.ts       # Include hierarchy visualization, function map
 │   │       ├── object-deps.ts      # Object dependency tracking, orphaned objects
 │   │       ├── asset-usage.ts      # Asset tracking
+│   │       ├── animations.ts       # Sprite animation trees (items + subfolders)
 │   │       ├── performance.ts      # Performance heuristics
 │   │       ├── integrity.ts        # Project integrity checks (validate_project)
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)

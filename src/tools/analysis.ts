@@ -123,7 +123,8 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
   // Tool: Asset usage tracking
   server.tool(
     'get_asset_usage',
-    'Track sound, image, font, and video asset usage across the project',
+    'Track sound, music, image (sprite animations and single-image objects), font, video, icon and project file usage across the project. '
+      + 'Each asset is used, unused or not-analysed (with a reason); unused and not-analysed assets are listed first.',
     {
       type: z.enum(['sound', 'music', 'image', 'font', 'video', 'icon', 'general', 'all']).optional().default('all')
         .describe('Filter by asset type'),

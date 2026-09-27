@@ -15,6 +15,9 @@ import { resolveProjectPath } from './path-utils.js';
 import { parseJsonText, stripBom } from './json-format.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+/** Limits for listing flowcharts/ and timelines/ */
+const MAX_DATA_FOLDER_DEPTH = 20;
+const MAX_DATA_FILES = 5000;
 
 /**
  * Name → project-bar folder path for one project.c3proj container: "" for
@@ -221,6 +224,69 @@ export class Construct3ProjectReader {
       if (error instanceof Error && error.message.includes('Path traversal')) throw error;
       throw new Error(
         `Failed to read script "${relativePath}": ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Read a project file (rootFileFolders.general, saved in the project's
+   * files/ folder) as text.
+   * @param relativePath  Path inside files/, e.g. "data.json" or "sub/page.html"
+   */
+  async readProjectFileText(relativePath: string): Promise<string> {
+    const filesDir = resolveProjectPath(this.getProjectDir(), 'files');
+    const filePath = resolveProjectPath(filesDir, ...relativePath.split('/'));
+    try {
+      return await this.readProjectFile(filePath);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Path traversal')) throw error;
+      throw new Error(
+        `Failed to read project file "${relativePath}": ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * List the JSON files below the project's flowcharts/ or timelines/ folder
+   * (subfolders included, editor UI state files "*.uistate.json" excluded).
+   * A missing folder lists nothing.
+   * @returns Paths relative to the folder, e.g. "Flow 1.json" or "sub/Intro.json"
+   */
+  async listDataFiles(folder: 'flowcharts' | 'timelines'): Promise<string[]> {
+    const root = resolveProjectPath(this.getProjectDir(), folder);
+    const out: string[] = [];
+    const walk = async (dir: string, prefix: string, depth: number): Promise<void> => {
+      if (depth > MAX_DATA_FOLDER_DEPTH || out.length >= MAX_DATA_FILES) return;
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          await walk(join(dir, entry.name), `${prefix}${entry.name}/`, depth + 1);
+        } else if (entry.isFile() && entry.name.endsWith('.json') && !entry.name.endsWith('.uistate.json')) {
+          if (out.length < MAX_DATA_FILES) out.push(prefix + entry.name);
+        }
+      }
+    };
+    await walk(root, '', 0);
+    return out.sort();
+  }
+
+  /**
+   * Read a file listed by listDataFiles as text.
+   * @param relativePath  Path inside the folder, e.g. "Flow 1.json"
+   */
+  async readDataFileText(folder: 'flowcharts' | 'timelines', relativePath: string): Promise<string> {
+    const root = resolveProjectPath(this.getProjectDir(), folder);
+    const filePath = resolveProjectPath(root, ...relativePath.split('/'));
+    try {
+      return await this.readProjectFile(filePath);
+    } catch (error) {
+      throw new Error(
+        `Failed to read ${folder} file "${relativePath}": ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }

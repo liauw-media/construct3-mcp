@@ -6,6 +6,7 @@ import type { Construct3ProjectReader } from '../project-reader.js';
 import type { PerformanceIssue, C3Event, BlockEvent, GroupEvent, FunctionBlockEvent } from '../types.js';
 import { getProjectIndex } from './index-builder.js';
 import { forEachLayerInstance } from '../layers.js';
+import { countAnimationFrames } from './animations.js';
 
 export interface PerformanceResult {
   summary: { critical: number; warning: number; info: number };
@@ -109,23 +110,16 @@ export async function analyzePerformance(
   // Check objects
   const objectTypes = await reader.readAllObjectTypes();
   for (const [objName, objData] of objectTypes) {
-    // Check: Objects with > 50 animation frames
-    if (objData.animations && Array.isArray(objData.animations)) {
-      let totalFrames = 0;
-      for (const anim of objData.animations) {
-        if (anim.frames && Array.isArray(anim.frames)) {
-          totalFrames += anim.frames.length;
-        }
-      }
-      if (totalFrames > 50) {
-        issues.push({
-          severity: 'info',
-          category: 'memory',
-          location: objName,
-          message: `Object has ${totalFrames} animation frames total`,
-          suggestion: 'High frame counts increase memory usage; consider sprite sheet optimization',
-        });
-      }
+    // Check: Objects with > 50 animation frames (all animations, subfolders included)
+    const { frames: totalFrames } = countAnimationFrames(objData.animations);
+    if (totalFrames > 50) {
+      issues.push({
+        severity: 'info',
+        category: 'memory',
+        location: objName,
+        message: `Object has ${totalFrames} animation frames total`,
+        suggestion: 'High frame counts increase memory usage; consider sprite sheet optimization',
+      });
     }
   }
 

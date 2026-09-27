@@ -101,7 +101,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `get_function_map` | Function definitions and call sites across event sheets |
 | `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families) |
 | `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances) |
-| `get_asset_usage` | Track sound, image, font, and video asset usage |
+| `get_asset_usage` | Track sound, image, font, video and project file usage (used, unused or not analysed) |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
 | `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Some warnings can be false positives (known ones in [API.md](docs/API.md#validate_project)) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
@@ -401,6 +401,7 @@ construct3-mcp/
 │   │       ├── event-flow.ts       # Event sheet flow and function map
 │   │       ├── object-deps.ts      # Object dependencies and orphaned objects
 │   │       ├── asset-usage.ts      # Asset usage tracking
+│   │       ├── animations.ts       # Sprite animation trees (items + subfolders)
 │   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
 │   │       ├── performance.ts      # Performance heuristics
 │   │       ├── integrity.ts        # Project integrity checks (validate_project)

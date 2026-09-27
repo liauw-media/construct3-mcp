@@ -206,14 +206,15 @@ Supporting modules next to the templates:
 
 ### 6. Analyzers (`src/construct3/analyzers/`)
 
-A shared cross-reference index and twelve analysis modules, several of which build on the index:
+A shared cross-reference index and thirteen analysis modules, several of which build on the index:
 
 | Module | Purpose |
 |--------|---------|
 | `index-builder.ts` | Builds and caches the project-wide cross-reference index |
 | `event-flow.ts` | Include hierarchy and layout bindings (Mermaid output); function definitions and call sites |
 | `object-deps.ts` | Object usage across event sheets, layouts, families; objects not referenced anywhere |
-| `asset-usage.ts` | Sound, image, font, video asset tracking |
+| `asset-usage.ts` | Sound, music, image, font, video, icon and project file usage (used, unused or not analysed); images follow the index's object usage |
+| `animations.ts` | Sprite animation trees as the editor saves them (items and animation subfolders); frame counts for the asset and performance analyses |
 | `performance.ts` | Heuristic performance audit (info/warning/critical) |
 | `integrity.ts` | Project integrity checks behind `validate_project` |
 | `load-rules.ts` | Rules the Construct 3 editor enforces when it opens a project (expression syntax, empty parameters, trigger placement, name and SID clashes, family plugins); used by `validate_project` and the pre-write checks |

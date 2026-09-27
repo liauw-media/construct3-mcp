@@ -1,11 +1,12 @@
 /**
- * Tests for the find_runtime_traps analysis tool registration and handler.
+ * Tests for the find_runtime_traps and get_asset_usage analysis tool registration and handlers.
  */
 
 import { describe, it, expect } from 'vitest';
 import { MockServer } from '../mocks/mock-server.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { registerAnalysisTools } from '../../src/tools/analysis.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 
 function setup(eventSheets: Record<string, unknown[]> = {}) {
   const server = new MockServer();
@@ -56,5 +57,32 @@ describe('find_runtime_traps', () => {
     const result = await server.callTool('find_runtime_traps', { eventsheet: 'Missing' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('Event sheet "Missing" not found');
+  });
+});
+
+describe('get_asset_usage', () => {
+  it('returns statuses for sprite images and sounds as JSON', async () => {
+    resetProjectIndex();
+    const server = new MockServer();
+    const reader = new MockReader({
+      objects: new Map<string, Record<string, unknown>>([
+        ['Audio', { name: 'Audio', 'plugin-id': 'Audio', sid: 1 }],
+        ['Knight', {
+          name: 'Knight', 'plugin-id': 'Sprite', sid: 2,
+          animations: { items: [], subfolders: [{ name: 'Moves', items: [{ name: 'Run', sid: 3, frames: [{ sid: 4 }, { sid: 5 }] }], subfolders: [] }] },
+        }],
+      ]),
+      eventSheets: new Map([['Sound', { name: 'Sound', sid: 6, events: [
+        { eventType: 'block', sid: 7, conditions: [], actions: [{ id: 'play', objectClass: 'Audio', sid: 8, parameters: { 'audio-file': 'jump' } }] },
+      ] }]]),
+      files: [{ folder: 'sound', path: 'jump.webm' }, { folder: 'sound', path: 'spare.webm' }],
+    });
+    registerAnalysisTools(server as any, reader as any);
+    const data = parseResult(await server.callTool('get_asset_usage', { detail: 'full' }));
+    expect(data.summary).toMatchObject({ totalAssets: 3, byType: { image: 1, sound: 2 }, usedCount: 1, unusedCount: 2, notAnalysedCount: 0 });
+    const byName = Object.fromEntries(data.assets.map((a: { name: string }) => [a.name, a]));
+    expect(byName['Knight']).toMatchObject({ type: 'image', status: 'unused', animations: 1, frames: 2 });
+    expect(byName['jump.webm']).toMatchObject({ status: 'used', via: ['audio-file'] });
+    expect(byName['spare.webm'].status).toBe('unused');
   });
 });

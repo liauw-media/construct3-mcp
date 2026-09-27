@@ -195,12 +195,24 @@ Only names of existing object types and families are matched. Not detected: proj
 
 ### `get_asset_usage`
 
-Track asset usage across the project. Assets are matched to object types by name; `unusedCount` counts the assets without a matching object that is used by the rule of [`find_orphaned_objects`](#find_orphaned_objects) (use through a family included).
+Track asset usage across the project.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `type` | `"sound"` \| `"music"` \| `"image"` \| `"font"` \| `"video"` \| `"icon"` \| `"general"` \| `"all"` | No | Filter by asset type (default: all) |
 | `detail` | string | No | Detail level |
+
+Returns `{ summary, assets, notes }`. `summary` has `totalAssets`, `byType`, `usedCount`, `unusedCount`, `notAnalysedCount` and `mostReferenced`. Each asset has `name`, `type`, `status` (`used`, `unused` or `not-analysed`), `referencedIn` (`eventSheets`, `layouts`, and when found `objectTypes`, `scripts`, `flowcharts`, `timelines`, `projectFiles`), `via` (how it is referenced) and, when not used, a `reason`. `standard` detail lists 50 assets, unused and not-analysed first; `full` lists all.
+
+- **Images** are object types with animations (sprites) or a single image (Tiled Background, 9-patch, Particles, Sprite font and other plugins that save an `image`), one entry per object type. A sprite has its `animations` and `frames` counts; a single-image object type has `frames: 1` and no `animations`. Animations are read as the editor saves them (`animations.items`, and the animations in `animations.subfolders`). An image is used when its object type is used by the rule of [`find_orphaned_objects`](#find_orphaned_objects) (used in an event, directly or through one of its families; an instance in a layout, sub-layers and non-world instances included; or named by an object property of another instance), or when System "Create object (by name)" creates it with a literal name.
+- **Sounds and music** are used when an Audio file parameter names them (`"audio-file"`: the name without extension, saved as a string or as `{ "path": name }`), when a by-name Audio action (`"folder"` + `"audio-file-name"`) names them with a literal, or when a string in events, scripts, flowcharts, timelines, layout instance values or project files is their name. Tag, layer, animation and text parameters and properties, and instance variable definitions, are not file references.
+- **Project files, fonts and videos** are used when a parameter, a string literal, a script, a layout or object type property (for example Video sources, or plugin properties naming data files), a flowchart or timeline string, or the text of another used project file names them. A Text object's `font` property and a CSS font declaration (`font-family: 'Pixel Sans'`, in HTML content, scripts or project files) name a font without its extension.
+- **Not analysed** (never reported as unused):
+  - icons (used by the export) and project files with a purpose other than `none` (such as stylesheets);
+  - files a name built at runtime may produce: by-name Audio actions with an expression, `"prefix" & ...` or `... & ".ext"` concatenations, `ProjectFileNameAt()`, and in scripts `runtime.assets` calls with a computed name and `fetch()`, `import()` or XMLHttpRequest `open()` with a `"prefix" + ...` URL. A prefix that starts with a server URL (`https://...`, `//...`) does not name a project file;
+  - objects that may be created or looked up by name: System "Create object (by name)" with an expression, a script that indexes `runtime.objects[...]` with a computed name or passes `runtime.objects` on (an alias, `Object.keys`), an object in a container, and an object whose name (or family name) appears in an expression, as a script identifier, or as a string literal in a parameter, variable or script;
+  - what an unreadable file may name: an event sheet, script, layout, object type or family makes every unreferenced asset not analysed; a flowchart or timeline, the file assets; a project file, the file assets once that project file is itself used or not analysed.
+- Names built at runtime without a literal part in the project (server data, user input), or by script code other than the calls above, are not seen.
 
 ### `analyze_performance`
 
@@ -210,6 +222,8 @@ Heuristic performance audit with categorized issues (info/warning/critical).
 |-----------|------|----------|-------------|
 | `scope` | string | No | Event sheet or layout name to scope analysis |
 | `detail` | string | No | Detail level |
+
+The frame count check reports object types with more than 50 animation frames, counting every animation, including those in animation subfolders.
 
 ### `validate_project`
 

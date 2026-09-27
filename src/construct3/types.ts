@@ -513,12 +513,36 @@ export interface PerformanceIssue {
 
 /** Asset usage information */
 export interface AssetUsageInfo {
+  /** File name with its folder path (file assets) or object type name (images) */
   name: string;
   type: 'sound' | 'music' | 'image' | 'font' | 'video' | 'icon' | 'general';
+  /**
+   * used: a reference was found; unused: every place this kind of asset can be
+   * named was searched and none names it; not-analysed: the use cannot be
+   * decided (see `reason`)
+   */
+  status: 'used' | 'unused' | 'not-analysed';
   referencedIn: {
     eventSheets: string[];
     layouts: string[];
+    /** Object types and families whose properties name the file */
+    objectTypes?: string[];
+    /** Script files (inline scripts count under eventSheets) */
+    scripts?: string[];
+    /** Flowcharts and timelines holding a string that names the file (path below flowcharts/ or timelines/, no .json) */
+    flowcharts?: string[];
+    timelines?: string[];
+    /** Project files (files/ folder) whose text names the file */
+    projectFiles?: string[];
   };
+  /** How the asset is referenced, e.g. "audio-file", "play-by-name", "string", "property", "script" */
+  via?: string[];
+  /** Why the asset is not analysed, or a note on an unused one */
+  reason?: string;
+  /** Images: animations of a sprite object type (absent for a single-image object type) */
+  animations?: number;
+  /** Images: frames of the object type (1 for a single-image object type such as a Tiled Background) */
+  frames?: number;
   isGlobal: boolean;
 }
 
