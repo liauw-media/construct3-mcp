@@ -232,7 +232,7 @@ Run integrity checks over the whole project. No parameters.
 Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `entity`, `message` and an optional `suggestion`. `valid` is true when there are no errors.
 
 - **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries (a subfolder without a name or `items`; the first unnamed subfolder directly under `timelines` is the editor's Transitions folder, see [`list_timelines`](#list_timelines), and is accepted), conditions/actions that name their behavior only under the legacy `"behavior-type"` key (`legacy-behavior-key`, see [`fix_legacy_behavior_keys`](#fix_legacy_behavior_keys)), and the editor load-time rules below
-- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references (conditions/actions on a class that is no object type, family, `System` or the built-in Functions object, which is named by `functionsName` in `project.c3proj`, `"Functions"` by default), layer names repeated within a layout (`duplicate-layer-name`), layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, event shapes that differ from what the current editor saves (`legacy-event-shape`, see [`fix_legacy_event_shapes`](#fix_legacy_event_shapes): block-level `isElse`, per-condition `isOr` and function calls with `id`/`objectClass` or keyed parameters, which older versions of this server wrote and Construct 3 never writes, and scripts stored as one string or without `language`, the shape older Construct 3 releases saved, which is harmless to convert), entity files whose name differs from the registered name only in letter case (`file-name-case-mismatch`), and the partly verified load-time rules below
+- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references (conditions/actions on a class that is no object type, family, `System` or the built-in Functions object, which is named by `functionsName` in `project.c3proj`, `"Functions"` by default), layer names repeated within a layout (`duplicate-layer-name`), layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, event shapes that differ from what the current editor saves (`legacy-event-shape`, see [`fix_legacy_event_shapes`](#fix_legacy_event_shapes): block-level `isElse`, per-condition `isOr` and function calls with `id`/`objectClass` or keyed parameters, which older versions of this server wrote and Construct 3 never writes, and scripts stored as one string or without `language`, the shape older Construct 3 releases saved, which is harmless to convert), entity files whose name differs from the registered name only in letter case (`file-name-case-mismatch`), layout instances without an entry for a behavior of their object type or its families (`missing-behavior-entry`, one warning per layout and object type with the instance UIDs; the editor saves an entry for every behavior, see [`add_instance_to_layout`](#add_instance_to_layout), and older versions of these tools placed instances without them), and the partly verified load-time rules below
 - **Info:** JSON files in `objectTypes`, `eventSheets` and `layouts` (subfolders included) not registered in `project.c3proj`, leftover `.bak` files in `objectTypes`, `eventSheets`, `layouts`, `families`, `timelines` (subfolders included) and next to `project.c3proj`, and orphaned objects (see [`find_orphaned_objects`](#find_orphaned_objects))
 
 Entity files are checked against the path each registered entity is read from: `<category>/<project-bar folders>/<name>.json`, since Construct 3 mirrors its project-bar folders on disk. `file-name-case-mismatch`: a file whose path differs from that path only in letter case, such as `layouts/Layout1.json` for a layout `layout1` at the root, is the entity's file on case-insensitive file systems (Windows, macOS by default), where it loads, but may not be found on case-sensitive ones (Linux). The suggestion is to rename it to the expected path; it is never reported as orphaned. Any other file is `orphaned-file`, including a copy named like a registered entity in another folder; its message names the path that entity is read from. The editor's `*.uistate.json` view-state files are not entity files and are skipped.
@@ -442,6 +442,8 @@ Update an existing object's instance variables and behaviors.
 - Validates behavior addon registration (auto-adds known Scirra behaviors)
 - Generates unique SIDs for each new variable and behavior
 - Warns on duplicate variable/behavior names (skips them)
+- Updates the object's layout instances (all layers, sub-layers and `nonworld-instances`): each gets a default entry for an added behavior (see [`add_instance_to_layout`](#add_instance_to_layout)) and loses the entry of a removed one; existing entries keep their values and their order (a new entry goes next to the entries it follows in the editor's order)
+- On any behavior or instance variable change, an instance that has no entry for another behavior of the object or its families (older versions of these tools placed instances without them) gets a default entry for it too, and a warning names these behaviors and counts the instances
 
 ### `delete_object`
 
@@ -485,11 +487,13 @@ Add or remove family members and shared instance variables.
 
 At least one parameter besides `name` must be provided. Duplicates and missing entries are skipped with a warning.
 
+When the family has behaviors, the layout instances of members that join get default entries for them, and those of members that leave lose them. Entries these instances lack for the other behaviors of their object and its families are added too, as in [`update_object_properties`](#update_object_properties).
+
 **Load-time check:** a member change that makes the family mix plugins is refused and nothing is written (`family-plugin-mismatch`, *wrong plugin*). A mix that was already there does not block other updates, and removing the odd member is allowed.
 
 ### `delete_family`
 
-Delete a family. The member object types are kept.
+Delete a family. The member object types are kept. The layout instances of its members lose the entries for the family's behaviors, and get the entries they lack for their other behaviors (see [`update_object_properties`](#update_object_properties)).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -500,7 +504,7 @@ Delete a family. The member object types are kept.
 - Checks for references first. Uses of the family's name count as for [`delete_object`](#delete_object): the family as the object of a condition or action or of a custom action, in object parameters, expressions and script actions (`runtime.objects.Family`), and object properties of instances that hold its SID. Uses through a member count too: the `"instance-variable"` parameter or the `behaviorType` of a condition or action whose object is a member, `Member.name` or `Member(0).name` in a parameter expression, and `Self.name` in a parameter expression of a condition or action whose object is a member, where `name` is an instance variable or behavior the member gets from this family only (not one it declares itself or also gets from another family). Not detected: project script files and script access to instance variables and behaviors of member instances (`instVars`, `behaviors`)
 - If referenced and `force=false`: blocks (`action: "delete_blocked"`) and lists where the family is used. `message` sums it up; `references` holds `eventSheets` and `layouts` (names), `events` and `instanceProperties` (as for `delete_object`) and `memberUses` (`{ eventSheet, path, member, kind, name, context }`, `kind` being `instance variable` or `behavior` and `context` `condition`, `action` or `expression`). Each list is capped at 50 entries; `eventsNotListed`, `instancePropertiesNotListed` and `memberUsesNotListed` count the rest
 - If referenced and `force=true`: deletes with a warning that names the remaining uses (references NOT cleaned up). [`validate_project`](#validate_project) then reports the conditions, actions and object parameters that name the family and the Particles object properties that hold its SID as `broken-object-reference`, but not the uses in expressions and scripts or through members: a second warning lists those
-- Values that member instances in layouts hold for the family's instance variables and behaviors are left as they are
+- Values that member instances in layouts hold for the family's instance variables are left as they are; their entries for the family's behaviors are removed, and entries they lack for their other behaviors are added
 - Backs up the JSON file and removes from c3proj
 
 ### `create_event_sheet`
@@ -849,7 +853,7 @@ Place an object instance on a layout layer or sub-layer. For copying instances b
 | `originX` | number | No | Horizontal origin 0-1 (default: 0.5 = center) |
 | `originY` | number | No | Vertical origin 0-1 (default: 0.5 = center) |
 | `instanceVariables` | object | No | Instance variable values as `{varName: value}` |
-| `behaviors` | object | No | Behavior runtime state as `{behaviorName: {prop: val}}` |
+| `behaviors` | object | No | Behavior property values as `{behaviorName: {properties: {prop: val}}}` (the shape `get_layout_details` returns) or `{behaviorName: {prop: val}}`; they override the defaults |
 | `tags` | string | No | Comma-separated instance tags (alphanumeric only) |
 | `showing` | boolean | No | Whether instance is initially visible (default: true) |
 | `locked` | boolean | No | Whether instance is locked in the editor (default: false) |
@@ -859,7 +863,8 @@ Place an object instance on a layout layer or sub-layer. For copying instances b
 - The new UID is above every UID in the project, sub-layer instances included, and the new SID is unused
 - Nonworld-global objects (Array, JSON, Dictionary) are placed in `nonworld-instances` instead of on layers
 - Auto-fills default instance properties for Sprite, Text, TiledBg, NinePatch
-- Warns on unknown instanceVariable or behavior keys (may be inherited from families)
+- Writes a behavior entry for every behavior of the object and of the families it belongs to, like the editor: family behaviors first, then the object's own, each as `{"properties": {...}}` with the built-in behavior's default values (from the Construct 3 r449 editor's behavior definitions). Values passed in `behaviors` override the defaults. A behavior without known defaults (third-party addons) gets `{"properties": {}}` and a warning; Construct 3 fills in missing properties with their defaults when it opens the project (Scirra's own example projects contain such entries). The warning also points out a behaviorId that is not one the editor defines, such as `"Solid"` for `"solid"`
+- Warns on unknown instanceVariable keys (may be inherited from families), on behavior names that are not behaviors of the object or its families, on property ids that a built-in behavior does not have, and on values whose type differs from the property's default (e.g. a string for a check box)
 - All visual and behavioral properties are preserved when specified
 
 ### `delete_layout`
@@ -1026,7 +1031,8 @@ Add a new animation to a Sprite object.
 
 **Notes:**
 - Validates the object is a Sprite plugin (rejects non-Sprite objects)
-- Checks animation name uniqueness within the sprite (in any animation folder), ignoring case like the editor. Frame image file names are built from the animation name, so on Windows and macOS a case variant would write its placeholder images over the existing animation's images
+- Checks animation name uniqueness within the sprite, including the animations in animation folders (their image file names do not contain the folder), ignoring case like the editor. A name that differs from an existing animation's only in case (`"walk"` next to `"Walk"`) is refused too: image file names are all lowercase, so both animations would use the same image files
+- Refuses a name with a character that cannot be part of its image file names (`images/<object>-<animation>-NNN.png`): a path separator (`/`, `\`), a character Windows does not allow in file names (`:` `*` `?` `"` `<` `>` `|`) or a control character. The animation names of the editor-saved projects checked use only letters, digits, spaces, `_` and `-`. `add_frame_to_animation` and `replace_sprite_image` refuse an existing animation with such a name
 - Frame dimensions default to the existing first animation's frame size
 
 ### `update_animation_properties`
@@ -1044,6 +1050,8 @@ Update properties of an existing animation on a Sprite object.
 
 At least one property must be provided.
 
+Like the other tools that take an existing `animationName` (`delete_animation`, `rename_animation`, `add_frame_to_animation`, `delete_frame_from_animation`, `update_frame`, `replace_sprite_image`), it finds the animation by its exact name in any animation folder, where the animation stays. When the name is not found, the error lists the sprite's animations, those in animation folders with their folder path (e.g. `Moves/Walk`); pass the name alone.
+
 ### `rename_animation`
 
 Rename an animation on a Sprite object.
@@ -1054,11 +1062,24 @@ Rename an animation on a Sprite object.
 | `animationName` | string | Yes | Current animation name |
 | `newName` | string | Yes | New animation name |
 
-A new name that differs from another animation of the sprite (in any animation folder) only in case is refused; changing only the case of the animation's own name is allowed.
+A new name that differs from another animation of the sprite (in any animation folder) only in case is refused (see [`add_animation_to_sprite`](#add_animation_to_sprite)); changing only the case of the animation's own name is allowed. `objectName` must be spelled exactly like the object's name: layout instances and event sheets name the object exactly, so a differently cased name (which Windows and macOS would still find the object file with) is refused.
+
+The rename also does what the editor does when it renames an animation:
+- **Frame image files** are renamed with it: for every frame, the file it uses, `images/<object>-<old name>-NNN.<ext>` (`.jpg` for a JPEG frame, `.png` otherwise), becomes `images/<object>-<new name>-NNN.<ext>`, all lowercase. A file whose name differs only in case is found too and gets the lowercase name. Frames, `sid` and `imageSpriteId`s stay as they are (the file name does not contain them). A frame without an image file is named in a warning. Files no frame uses (another extension, or an index past the last frame) keep their names.
+- **Layout instances** of the object whose `initial-animation` is the old name get the new name (on every layer and sub-layer).
+
+It is refused, and nothing is changed, when:
+- a renamed image would replace an existing file in `images/` (also one whose name differs only in case);
+- the new name has a character that cannot be part of a file name (see [`add_animation_to_sprite`](#add_animation_to_sprite));
+- another animation of the object (in any animation folder) has frames and a name that differs from the old name only in case: both use the same image files, and renaming them would leave the other animation without images. Delete the duplicate first (`delete_animation` leaves the image files in place).
+
+The image files are renamed first, then the object and the layouts are written; if a write fails, the files already written, and the file whose write failed if it was already replaced (e.g. its post-write check failed), are restored from their backups and the image files are renamed back.
+
+Strings in event sheets that name the old animation (e.g. `"Walk"` in *Set animation*) are not changed; a warning lists the event sheets with such parameters on the conditions and actions of the object and of the families it belongs to. Parameters that compute a name (e.g. `"Walk" & n`) are not counted.
 
 ### `delete_animation`
 
-Delete an animation from a Sprite object. The last animation cannot be deleted.
+Delete an animation from a Sprite object; an animation in an animation folder is removed from that folder. The last animation cannot be deleted (animations in folders count). The animation's image files are left in `images/`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1067,7 +1088,7 @@ Delete an animation from a Sprite object. The last animation cannot be deleted.
 
 ### `add_frame_to_animation`
 
-Add a blank frame (with a placeholder PNG in `images/`) to a Sprite animation.
+Add a blank frame (with a placeholder PNG in `images/`) to a Sprite animation. Like every image the tools write, the file is named as the editor names it: `<object>-<animation>-<frame, 3 digits>.png`, all lowercase, spaces kept (e.g. `hero-walk left-001.png`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1105,7 +1126,7 @@ Delete a frame by index. The last frame of an animation cannot be deleted.
 
 ### `replace_sprite_image`
 
-Replace a frame's image with real PNG data. The PNG is written to the frame's file in `images/`; the object JSON is backed up and rewritten.
+Replace a frame's image with real PNG data. The PNG is written to the frame's file in `images/`; the object JSON is backed up and rewritten. The editor picks the file's extension from the frame's `fileType`, so a frame stored in another format (e.g. JPEG, in `<name>.jpg`) gets `fileType: "image/png"` and the new `<name>.png`; the old file is left in `images/` and a warning names it.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

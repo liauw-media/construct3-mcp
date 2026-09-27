@@ -314,6 +314,114 @@ export function createBehavior(
   };
 }
 
+/**
+ * Default instance property values of Scirra's built-in behaviors, keyed by
+ * behaviorId, in the order the editor writes them.
+ *
+ * Source: the property definitions (id + initial value) in the Construct 3
+ * r449 editor's behaviors/allEditorBehaviors.js, which editor.construct.net
+ * serves publicly. r495.2 only adds properties (Physics collision filter,
+ * Rotate rotation-type, Solid use-instance-tags) and changes none of these.
+ * Key sets and order match the entries in Scirra's public example projects
+ * (github.com/Scirra/Construct-Example-Projects). Behaviors without
+ * properties map to {} — the editor writes them as { properties: {} }.
+ */
+export const BEHAVIOR_INSTANCE_DEFAULTS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+  Anchor: {
+    'left-edge': 'window-left', 'top-edge': 'window-top', 'right-edge': 'none', 'bottom-edge': 'none',
+    enabled: true,
+  },
+  bound: { 'bound-by': 'edge' },
+  Bullet: {
+    speed: 400, acceleration: 0, gravity: 0, 'bounce-off-solids': false, 'set-angle': true, step: false,
+    enabled: true,
+  },
+  Car: {
+    'max-speed': 350, acceleration: 200, deceleration: 300, 'steer-speed': 225, 'drift-recover': 185,
+    friction: 0.4, 'turn-while-stopped': false, 'set-angle': true, 'default-controls': true, enabled: true,
+  },
+  custom: { 'stepping-mode': 'none', 'pixels-per-step': 5, enabled: true },
+  destroy: {},
+  DragnDrop: { axes: 'both', enabled: true },
+  EightDir: {
+    'max-speed': 200, acceleration: 600, deceleration: 500, directions: 'dir-8', 'set-angle': 'smooth',
+    'allow-sliding': false, 'default-controls': true, enabled: true,
+  },
+  Fade: {
+    'fade-in-time': 0, 'wait-time': 0, 'fade-out-time': 1, destroy: true, enabled: true,
+    'live-preview': false,
+  },
+  Flash: {},
+  Follow: {
+    mode: 'time', delay: 1, 'max-delay': 1, 'history-rate': 30, 'follow-x': true, 'follow-y': true,
+    'follow-z-elevation': false, 'follow-width': false, 'follow-height': false, 'follow-angle': false,
+    'follow-opacity': false, 'follow-visibility': false, 'follow-destroyed': true, enabled: true,
+  },
+  jumpthru: { enabled: true },
+  LOS: { obstacles: 'solids', range: 10000, 'cone-of-view': 360, 'use-collision-cells': true },
+  MoveTo: {
+    'max-speed': 200, acceleration: 600, deceleration: 600, 'rotate-speed': 0, 'set-angle': true,
+    'stop-on-solids': false, enabled: true,
+  },
+  NoSave: {},
+  Orbit: {
+    speed: 180, acceleration: 0, 'primary-axis': 100, 'secondary-axis': 100, 'offset-angle': 0,
+    'match-rotation': true, enabled: true, 'live-preview': false,
+  },
+  Pathfinding: {
+    'cell-size': 30, 'cell-border': -1, obstacles: 'solids', 'max-speed': 200, acceleration: 1000,
+    deceleration: 2000, 'rotate-speed': 135, 'rotate-object': true, diagonals: true,
+    'direct-movement': 'to-destination', enabled: true,
+  },
+  Persist: {},
+  Physics: {
+    immovable: false, 'collision-mask': 'use-collision-polygon', 'prevent-rotation': false, density: 1,
+    friction: 0.5, elasticity: 0.2, 'linear-damping': 0, 'angular-damping': 0.01, bullet: false,
+    enabled: true,
+  },
+  Pin: { destroy: false },
+  Platform: {
+    'max-speed': 330, acceleration: 1500, deceleration: 1500, 'jump-strength': 650, gravity: 1500,
+    'max-fall-speed': 1000, 'double-jump': false, 'jump-sustain': 0, 'default-controls': true, enabled: true,
+  },
+  Rotate: { speed: 180, acceleration: 0, enabled: true, 'live-preview': false },
+  scrollto: { enabled: true },
+  shadowcaster: { height: 100, tag: '', enabled: true },
+  Sin: {
+    movement: 'horizontal', wave: 'sine', period: 4, 'period-random': 0, 'period-offset': 0,
+    'period-offset-random': 0, magnitude: 50, 'magnitude-random': 0, enabled: true, 'live-preview': false,
+  },
+  solid: { enabled: true, tags: '' },
+  TileMovement: {
+    'grid-width': 32, 'grid-height': 32, 'grid-offset-x': 0, 'grid-offset-y': 0, 'speed-x': 100,
+    'speed-y': 100, enabled: true, 'default-controls': true, isometric: false,
+  },
+  Timer: {},
+  Turret: {
+    range: 300, 'rate-of-fire': 1, rotate: true, 'rotate-speed': 180, 'target-mode': 'first-in-range',
+    'predictive-aim': false, 'projectile-speed': 500, 'use-collision-cells': true, enabled: true,
+  },
+  Tween: { enabled: true },
+  wrap: { 'wrap-to': 'layout' },
+};
+
+/**
+ * The per-instance entry for a behavior, as the editor stores it on layout
+ * instances: { properties: {...} } with every property at its default.
+ * For a behaviorId without known defaults (third-party addons) the entry is
+ * { properties: {} } and `known` is false; the editor fills in the addon's
+ * defaults for missing properties when it opens the project.
+ */
+export function createBehaviorInstanceEntry(behaviorId: string): {
+  entry: { properties: Record<string, unknown> };
+  known: boolean;
+} {
+  const defaults = Object.hasOwn(BEHAVIOR_INSTANCE_DEFAULTS, behaviorId)
+    ? BEHAVIOR_INSTANCE_DEFAULTS[behaviorId]
+    : undefined;
+  return { entry: { properties: { ...defaults } }, known: defaults !== undefined };
+}
+
 // ─── Event Sheet Templates ─────────────────────────────────
 
 export function createEmptySheet(name: string, sid: number): EventSheet {

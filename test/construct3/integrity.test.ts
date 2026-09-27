@@ -62,7 +62,7 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(23);
+    expect(result.summary.checksRun).toBe(24);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 
@@ -1030,6 +1030,77 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     const warn = result.warnings.find(w => w.check === 'missing-addon' && w.message.includes('MissingBehavior'));
     expect(warn).toBeDefined();
+  });
+
+  // ─── missing-behavior-entry ──────────────────────────────
+
+  describe('missing-behavior-entry', () => {
+    /** Hero (Tween) in family Movers (Sine), with the given instances on layer Main and a sub-layer */
+    function projectWithInstances(main: unknown[], sub: unknown[] = []) {
+      return createReader({
+        objects: new Map([
+          ['Hero', {
+            name: 'Hero', 'plugin-id': 'Sprite', sid: 100,
+            behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 101 }],
+          }],
+        ]),
+        families: new Map([
+          ['Movers', {
+            name: 'Movers', 'plugin-id': 'Sprite', sid: 400, members: ['Hero'],
+            behaviorTypes: [{ behaviorId: 'Sin', name: 'Sine', sid: 401 }],
+          }],
+        ]),
+        eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 200 }]]),
+        layouts: new Map([
+          ['Layout 1', {
+            name: 'Layout 1', sid: 300, eventSheet: 'MainSheet',
+            layers: [{
+              name: 'Main', sid: 301, instances: main,
+              subLayers: [{ name: 'Inner', sid: 302, instances: sub }],
+            }],
+          }],
+        ]),
+        usedAddons: [
+          { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+          { type: 'behavior', id: 'Tween', name: 'Tween', author: 'Scirra', bundled: false },
+          { type: 'behavior', id: 'Sin', name: 'Sine', author: 'Scirra', bundled: false },
+        ],
+      });
+    }
+    const complete = (uid: number) => ({
+      type: 'Hero', uid, sid: 500 + uid, properties: {}, instanceVariables: {},
+      behaviors: { Sine: { properties: {} }, Tween: { properties: { enabled: true } } },
+    });
+
+    it('warns once per layout and object type, naming the instances and the missing behaviors', async () => {
+      const reader = projectWithInstances(
+        [
+          { type: 'Hero', uid: 1, sid: 501, properties: {}, instanceVariables: {}, behaviors: {} },
+          complete(2),
+        ],
+        [{ type: 'Hero', uid: 3, sid: 503, properties: {}, instanceVariables: {}, behaviors: { Tween: { properties: { enabled: false } } } }],
+      );
+      const result = await validateProjectIntegrity(reader);
+      const warns = result.warnings.filter(w => w.check === 'missing-behavior-entry');
+      expect(warns).toHaveLength(1);
+      expect(warns[0].entity).toBe('layouts/Layout 1/inst:Hero');
+      expect(warns[0].message).toBe('2 instance(s) of "Hero" (uid 1, 3) have no entry for behavior(s) "Sine", "Tween"');
+      expect(warns[0].suggestion).toContain('update_object_properties adds the missing entries');
+      expect(result.valid).toBe(true);
+    });
+
+    it('counts an instance without a behaviors dict as lacking every entry', async () => {
+      const reader = projectWithInstances([{ type: 'Hero', uid: 4, sid: 504, properties: {} }]);
+      const result = await validateProjectIntegrity(reader);
+      const warns = result.warnings.filter(w => w.check === 'missing-behavior-entry');
+      expect(warns.map(w => w.message)).toEqual(['1 instance(s) of "Hero" (uid 4) have no entry for behavior(s) "Sine", "Tween"']);
+    });
+
+    it('does not warn for instances with every entry, or for objects without behaviors', async () => {
+      const reader = projectWithInstances([complete(1)], [complete(2)]);
+      expect((await validateProjectIntegrity(reader)).warnings.filter(w => w.check === 'missing-behavior-entry')).toEqual([]);
+      expect((await validateProjectIntegrity(validProject())).warnings.filter(w => w.check === 'missing-behavior-entry')).toEqual([]);
+    });
   });
 
   // ─── Check 3b: subfolder-structure ────────────────────────

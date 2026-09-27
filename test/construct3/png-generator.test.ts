@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { generatePlaceholderPng, getImageFileName } from '../../src/construct3/png-generator.js';
+import {
+  describeCharacter,
+  generatePlaceholderPng,
+  getImageFileName,
+  invalidImageNameCharacter,
+} from '../../src/construct3/png-generator.js';
 
 describe('generatePlaceholderPng', () => {
   it('returns a buffer with valid PNG signature', () => {
@@ -59,14 +64,24 @@ describe('generatePlaceholderPng', () => {
 });
 
 describe('getImageFileName', () => {
-  it('returns sprite filename with lowercase name and padded index', () => {
-    expect(getImageFileName('Hero', 'Walk', 0)).toBe('hero-Walk-000.png');
-    expect(getImageFileName('Hero', 'Walk', 5)).toBe('hero-Walk-005.png');
-    expect(getImageFileName('Hero', 'Walk', 123)).toBe('hero-Walk-123.png');
+  it('returns sprite filename, all lowercase, with padded index', () => {
+    expect(getImageFileName('Hero', 'Walk', 0)).toBe('hero-walk-000.png');
+    expect(getImageFileName('Hero', 'Walk', 5)).toBe('hero-walk-005.png');
+    expect(getImageFileName('Hero', 'Walk', 123)).toBe('hero-walk-123.png');
   });
 
   it('handles Animation 1 default name', () => {
-    expect(getImageFileName('Player', 'Animation 1', 0)).toBe('player-Animation 1-000.png');
+    expect(getImageFileName('Player', 'Animation 1', 0)).toBe('player-animation 1-000.png');
+  });
+
+  it('lowercases the animation name but keeps its spaces and punctuation', () => {
+    expect(getImageFileName('Sprite1', 'Animation 1', 0)).toBe('sprite1-animation 1-000.png');
+    expect(getImageFileName('Sprite1', 'WalkLeft', 12, 'Sprite')).toBe('sprite1-walkleft-012.png');
+    expect(getImageFileName('Board', 'Big Sign (EN)', 3, 'Sprite')).toBe('board-big sign (en)-003.png');
+  });
+
+  it('lowercases TiledBg names with mixed case', () => {
+    expect(getImageFileName('FloorTiles', '', 0, 'TiledBg')).toBe('floortiles.png');
   });
 
   it('returns TiledBg filename (just lowercase name)', () => {
@@ -75,5 +90,27 @@ describe('getImageFileName', () => {
 
   it('lowercases multi-word names', () => {
     expect(getImageFileName('CloseAuto', 'animation 1', 0)).toBe('closeauto-animation 1-000.png');
+  });
+});
+
+describe('invalidImageNameCharacter', () => {
+  it('accepts letters, digits, spaces and punctuation allowed in file names', () => {
+    for (const name of ['Walk', 'Animation 1', 'walk_left-2', 'Big Sign (EN)', 'a.b', 'Run!']) {
+      expect(invalidImageNameCharacter(name)).toBeUndefined();
+    }
+  });
+
+  it('returns the first path separator, Windows-reserved or control character', () => {
+    expect(invalidImageNameCharacter('Walk/Left')).toBe('/');
+    expect(invalidImageNameCharacter('Walk\\Left')).toBe('\\');
+    for (const char of [':', '*', '?', '"', '<', '>', '|', '\u0000', '\t', '\u001f']) {
+      expect(invalidImageNameCharacter(`Walk${char}Left`)).toBe(char);
+    }
+    expect(invalidImageNameCharacter('a:b/c')).toBe(':');
+  });
+
+  it('describes control characters by code point', () => {
+    expect(describeCharacter(':')).toBe('":"');
+    expect(describeCharacter('\t')).toBe('control character U+0009');
   });
 });

@@ -4,6 +4,7 @@ import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerAnimationTools } from '../../src/tools/animation-tools.js';
+import { EntityWriteError } from '../../src/construct3/project-writer.js';
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -142,6 +143,21 @@ describe('add_animation_to_sprite', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('already exists');
+  });
+
+  it('refuses a name that differs from an existing animation only in case, before writing images', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', makeSpriteObj()]]),
+    });
+    for (const animationName of ['animation 1', 'ANIMATION 1']) {
+      const result = await server.callTool('add_animation_to_sprite', { objectName: 'Hero', animationName });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('the existing animation "Animation 1" on "Hero"');
+      expect(result.content[0].text).toContain('only in case');
+      expect(result.content[0].text).toContain('images/hero-animation 1-000.png');
+    }
+    expect(writer.callsFor('writeImageFiles')).toHaveLength(0);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 
   it('uses existing sprite dimensions for frames by default', async () => {
@@ -361,6 +377,306 @@ describe('rename_animation', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('already exists');
   });
+
+  it('refuses a name that differs from another animation only in case, but allows recasing its own', async () => {
+    const twoAnims = () => ({
+      ...makeSpriteObj(),
+      animations: {
+        items: [
+          { name: 'Idle', sid: 10, frames: [], isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 0 },
+          { name: 'Walk', sid: 11, frames: [], isLooping: true, isPingPong: false, repeatCount: 1, repeatTo: 0, speed: 5 },
+        ],
+        subfolders: [],
+      },
+    });
+    const clash = setup({ objects: new Map([['Hero', twoAnims()]]) });
+    const refused = await clash.server.callTool('rename_animation', {
+      objectName: 'Hero', animationName: 'Idle', newName: 'WALK',
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('the existing animation "Walk" on "Hero"');
+    expect(refused.content[0].text).toContain('only in case');
+    expect(clash.writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    const recase = setup({ objects: new Map([['Hero', twoAnims()]]) });
+    const renamed = await recase.server.callTool('rename_animation', {
+      objectName: 'Hero', animationName: 'Walk', newName: 'WALK',
+    });
+    expect(parseResult(renamed).success).toBe(true);
+    const written = recase.writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items.map((a: { name: string }) => a.name)).toEqual(['Idle', 'WALK']);
+  });
+
+  function walkSprite() {
+    const obj = makeSpriteObj();
+    obj.animations.items[0] = {
+      ...obj.animations.items[0],
+      name: 'Walk',
+      frames: [
+        { width: 100, height: 100, originX: 0.5, originY: 0.5, fileType: 'image/png', imageSpriteId: 1000001 },
+        { width: 100, height: 100, originX: 0.5, originY: 0.5, fileType: 'image/jpeg', imageSpriteId: 1000002 },
+        { width: 100, height: 100, originX: 0.5, originY: 0.5, fileType: 'image/png', imageSpriteId: 1000003 },
+      ],
+    } as any;
+    return obj;
+  }
+
+  const instance = (type: string, animation: string, uid: number) => ({
+    type, uid, properties: { 'initial-animation': animation, 'initial-frame': 0 }, behaviors: {}, instanceVariables: {},
+  });
+
+  it('renames the frame image files and keeps frames and imageSpriteIds', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', walkSprite()]]) });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png', 'hero-idle-000.png'];
+    const data = parseResult(await server.callTool('rename_animation', {
+      objectName: 'Hero', animationName: 'Walk', newName: 'Run Fast',
+    }));
+    expect(data.success).toBe(true);
+    expect(writer.callsFor('renameImageFiles')[0].args[0]).toEqual([
+      { from: 'hero-walk-000.png', to: 'hero-run fast-000.png' },
+      { from: 'hero-walk-001.jpg', to: 'hero-run fast-001.jpg' },
+      { from: 'hero-walk-002.png', to: 'hero-run fast-002.png' },
+    ]);
+    const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(written.animations.items[0].name).toBe('Run Fast');
+    expect(written.animations.items[0].frames.map((f: { imageSpriteId: number }) => f.imageSpriteId)).toEqual([1000001, 1000002, 1000003]);
+    expect(data.warnings).toContain('Renamed 3 frame image file(s) in images/ ("hero-walk-000.png" → "hero-run fast-000.png", …).');
+    // Image files are renamed before the JSON is written
+    const order = writer.calls.map(c => c.method).filter(m => m === 'renameImageFiles' || m === 'writeEntityFile');
+    expect(order).toEqual(['renameImageFiles', 'writeEntityFile']);
+  });
+
+  it('refuses when a renamed image file would replace an existing file, and changes nothing', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', walkSprite()]]) });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png', 'hero-run-001.jpg'];
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('"images/hero-run-001.jpg", which already exist(s). Nothing was changed.');
+    expect(writer.callsFor('renameImageFiles')).toHaveLength(0);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('refuses a name with a path separator or a character Windows does not allow in file names', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', walkSprite()]]) });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png'];
+    for (const char of ['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+      const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: `Run${char}Fast` });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(`The animation name "Run${char}Fast" contains "${char}".`);
+      expect(result.content[0].text).toContain('a file name cannot contain a path separator');
+    }
+    const control = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run\tFast' });
+    expect(control.content[0].text).toContain('contains control character U+0009');
+    expect(writer.calls).toHaveLength(0);
+  });
+
+  it('refuses an objectName that differs from the object\'s name in case, and changes nothing', async () => {
+    // On Windows and macOS the object file is found under the other spelling
+    const level = { name: 'Level', layers: [{ name: 'Main', instances: [instance('Hero', 'Walk', 1)] }] };
+    const { server, writer } = setup({
+      objects: new Map([['hero', walkSprite()]]),
+      layouts: new Map<string, Record<string, unknown>>([['Level', level]]),
+    });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png'];
+    const result = await server.callTool('rename_animation', { objectName: 'hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Object "hero" is named "Hero" in the project. Object names are case-sensitive: use objectName "Hero". Nothing was changed.');
+    expect(writer.calls).toHaveLength(0);
+    expect(level.layers[0].instances[0].properties['initial-animation']).toBe('Walk');
+  });
+
+  it('refuses when another animation differs from the old name only in case and so uses the same image files', async () => {
+    const obj = walkSprite();
+    const legacy = { ...obj.animations.items[0], name: 'walk', sid: 11 };
+    (obj.animations as { subfolders: unknown[] }).subfolders = [{ name: 'Old', items: [legacy], subfolders: [] }];
+    const { server, writer } = setup({ objects: new Map([['Hero', obj]]) });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png'];
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Cannot rename "Walk" on "Hero": animation "walk" differs from it only in case, '
+      + 'so both use the same frame image files (images/hero-walk-000.png, …)');
+    expect(result.content[0].text).toContain('Nothing was changed.');
+    expect(writer.calls.filter(c => c.method !== 'listImageFiles')).toHaveLength(0);
+
+    // Without frames, the other animation uses no image files
+    const noFrames = walkSprite();
+    noFrames.animations.items.push({ ...noFrames.animations.items[0], name: 'WALK', sid: 12, frames: [] });
+    const ok = setup({ objects: new Map([['Hero', noFrames]]) });
+    ok.writer.imageFiles = ['hero-walk-000.png'];
+    expect(parseResult(await ok.server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' })).success).toBe(true);
+  });
+
+  it('warns about frames without an image file and still renames', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', walkSprite()]]) });
+    writer.imageFiles = ['hero-walk-000.png'];
+    const data = parseResult(await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.join('\n')).toContain('No image file in images/ for 2 frame(s) of "Walk" (expected "hero-walk-001.jpg", "hero-walk-002.png")');
+    expect(writer.callsFor('renameImageFiles')[0].args[0]).toEqual([{ from: 'hero-walk-000.png', to: 'hero-run-000.png' }]);
+  });
+
+  it('sets initial-animation of the object\'s layout instances that start with the old animation', async () => {
+    const level = {
+      name: 'Level',
+      layers: [{
+        name: 'Main',
+        instances: [instance('Hero', 'Walk', 1), instance('Hero', 'Idle', 2), instance('Enemy', 'Walk', 3)],
+        subLayers: [{ name: 'Front', instances: [instance('Hero', 'Walk', 4)], subLayers: [] }],
+      }],
+    };
+    const other = { name: 'Level 2', layers: [{ name: 'Main', instances: [instance('Enemy', 'Walk', 5)] }] };
+    const { server, writer } = setup({
+      objects: new Map([['Hero', walkSprite()]]),
+      layouts: new Map<string, Record<string, unknown>>([['Level', level], ['Level 2', other]]),
+    });
+    const data = parseResult(await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' }));
+    expect(data.success).toBe(true);
+
+    const layoutWrites = writer.callsFor('writeEntityFile').filter(c => c.args[0] === 'layouts');
+    expect(layoutWrites.map(c => c.args[1])).toEqual(['Level']);
+    const written = layoutWrites[0].args[2] as typeof level;
+    expect(written.layers[0].instances.map(i => i.properties['initial-animation'])).toEqual(['Run', 'Idle', 'Walk']);
+    expect(written.layers[0].subLayers[0].instances[0].properties['initial-animation']).toBe('Run');
+    expect(data.warnings).toContain('Set "initial-animation" to "Run" on 2 instance(s) of "Hero" in layout(s): Level.');
+  });
+
+  it('warns about event sheet strings that still name the old animation', async () => {
+    const sheet = {
+      name: 'Game',
+      events: [{
+        eventType: 'block',
+        conditions: [{ id: 'is-animation-playing', objectClass: 'Hero', parameters: { animation: '"Walk"' } }],
+        actions: [{ id: 'set-animation', objectClass: 'Hero', parameters: { animation: '"Walk"', from: 'beginning' } }],
+      }],
+    };
+    const { server, writer } = setup({
+      objects: new Map([['Hero', walkSprite()]]),
+      eventSheets: new Map([['Game', sheet]]),
+    });
+    const data = parseResult(await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' }));
+    expect(data.warnings.join('\n')).toContain('2 condition/action parameter(s) of "Hero" still name "Walk" as a string, in event sheet(s): Game.');
+    expect(writer.callsFor('writeEntityFile').map(c => c.args[0])).toEqual(['objectTypes']);
+  });
+
+  it('rolls back the object and the image files when a layout write fails', async () => {
+    const level = { name: 'Level', layers: [{ name: 'Main', instances: [instance('Hero', 'Walk', 1)] }] };
+    const { server, writer } = setup({
+      objects: new Map([['Hero', walkSprite()]]),
+      layouts: new Map<string, Record<string, unknown>>([['Level', level]]),
+    });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png'];
+    const write = writer.writeEntityFile.bind(writer);
+    writer.writeEntityFile = async (category: string, name: string, data: unknown, subfolder?: string) => {
+      if (category === 'layouts') throw new Error('disk full');
+      return write(category, name, data, subfolder);
+    };
+
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('disk full. The rename was rolled back');
+    expect(writer.callsFor('restoreEntityFile').map(c => c.args[0])).toEqual(['/mock/backup/objectTypes/Hero.json.bak']);
+    const [forward, back] = writer.callsFor('renameImageFiles').map(c => c.args[0]);
+    expect(back).toEqual((forward as Array<{ from: string; to: string }>).map(r => ({ from: r.to, to: r.from })));
+    expect(back).toHaveLength(3);
+  });
+
+  it('renames the image files back when the object write fails', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', walkSprite()]]) });
+    writer.imageFiles = ['hero-walk-000.png'];
+    writer.writeEntityFile = async () => { throw new Error('verification failed'); };
+
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('verification failed. The rename was rolled back');
+    expect(writer.callsFor('restoreEntityFile')).toHaveLength(0);
+    expect(writer.callsFor('renameImageFiles').map(c => c.args[0])).toEqual([
+      [{ from: 'hero-walk-000.png', to: 'hero-run-000.png' }],
+      [{ from: 'hero-run-000.png', to: 'hero-walk-000.png' }],
+    ]);
+  });
+
+  it('restores the object file too when its write failed after replacing it', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', walkSprite()]]) });
+    writer.imageFiles = ['hero-walk-000.png'];
+    writer.writeEntityFile = async () => {
+      throw new EntityWriteError(new Error('Post-write verification failed for "Hero"'), '/mock/backup/objectTypes/Hero.json.bak');
+    };
+
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Post-write verification failed for "Hero". The rename was rolled back');
+    expect(writer.callsFor('restoreEntityFile').map(c => c.args[0])).toEqual(['/mock/backup/objectTypes/Hero.json.bak']);
+    expect(writer.callsFor('renameImageFiles').map(c => c.args[0])).toEqual([
+      [{ from: 'hero-walk-000.png', to: 'hero-run-000.png' }],
+      [{ from: 'hero-run-000.png', to: 'hero-walk-000.png' }],
+    ]);
+  });
+
+  it('writes no JSON when renaming the image files fails', async () => {
+    const level = { name: 'Level', layers: [{ name: 'Main', instances: [instance('Hero', 'Walk', 1)] }] };
+    const { server, writer } = setup({
+      objects: new Map([['Hero', walkSprite()]]),
+      layouts: new Map<string, Record<string, unknown>>([['Level', level]]),
+    });
+    writer.imageFiles = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.png'];
+    writer.renameImageFiles = async () => {
+      throw new Error('Renaming image files failed: EBUSY. The files renamed before were renamed back.');
+    };
+
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Renaming image files failed: EBUSY. The files renamed before were renamed back.');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(writer.callsFor('restoreEntityFile')).toHaveLength(0);
+  });
+
+  it('names what could not be rolled back when the rollback fails', async () => {
+    const level = { name: 'Level', layers: [{ name: 'Main', instances: [instance('Hero', 'Walk', 1)] }] };
+    const { server, writer } = setup({
+      objects: new Map([['Hero', walkSprite()]]),
+      layouts: new Map<string, Record<string, unknown>>([['Level', level]]),
+    });
+    writer.imageFiles = ['hero-walk-000.png'];
+    const write = writer.writeEntityFile.bind(writer);
+    writer.writeEntityFile = async (category: string, name: string, data: unknown, subfolder?: string) => {
+      if (category === 'layouts') throw new Error('disk full');
+      return write(category, name, data, subfolder);
+    };
+    writer.restoreEntityFile = async () => { throw new Error('EPERM'); };
+    let renameCalls = 0;
+    writer.renameImageFiles = async () => {
+      if (++renameCalls === 2) throw new Error('EBUSY');
+    };
+
+    const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('disk full. Rolling back the rename failed for: /mock/backup/objectTypes/Hero.json; image files (EBUSY).');
+  });
+
+  it('counts the event sheet strings on the object\'s families too', async () => {
+    const sheet = {
+      name: 'Game',
+      events: [{
+        eventType: 'block',
+        conditions: [{ id: 'is-animation-playing', objectClass: 'Characters', parameters: { animation: '"Walk"' } }],
+        actions: [
+          { id: 'set-animation', objectClass: 'Hero', parameters: { animation: '"Walk"', from: 'beginning' } },
+          { id: 'set-animation', objectClass: 'Props', parameters: { animation: '"Walk"', from: 'beginning' } },
+        ],
+      }],
+    };
+    const { server } = setup({
+      objects: new Map([['Hero', walkSprite()]]),
+      eventSheets: new Map([['Game', sheet]]),
+      families: new Map<string, Record<string, unknown>>([
+        ['Characters', { name: 'Characters', members: ['Hero'] }],
+        ['Props', { name: 'Props', members: ['Crate'] }],
+      ]),
+    });
+    const data = parseResult(await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' }));
+    expect(data.warnings.join('\n')).toContain('2 condition/action parameter(s) of "Hero" and its families ("Characters") still name "Walk" as a string, in event sheet(s): Game.');
+    expect(data.warnings.join('\n')).toContain('Parameters that compute an animation name are not counted.');
+  });
 });
 
 // ─── add_frame_to_animation ───────────────────────────────
@@ -521,5 +837,43 @@ describe('replace_sprite_image', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('valid PNG');
+  });
+});
+
+// ─── Animation names in image file names ─────────────────
+
+describe('animation names that cannot be part of an image file name', () => {
+  it('add_animation_to_sprite refuses them and writes nothing', async () => {
+    for (const animationName of ['Walk/Left', 'Walk\\Left', 'Walk:Left', 'Walk?']) {
+      const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+      const result = await server.callTool('add_animation_to_sprite', { objectName: 'Hero', animationName });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(`The animation name "${animationName}" contains`);
+      expect(result.content[0].text).toContain('Choose another name.');
+      expect(writer.calls).toHaveLength(0);
+    }
+  });
+
+  it('add_frame_to_animation and replace_sprite_image refuse an existing animation with such a name', async () => {
+    const obj = makeSpriteObj();
+    obj.animations.items[0] = {
+      ...obj.animations.items[0],
+      name: 'Walk/Left',
+      frames: [{ width: 100, height: 100, originX: 0.5, originY: 0.5, imageSpriteId: 1 }],
+    } as any;
+    const { server, writer } = setup({ objects: new Map([['Hero', obj]]) });
+
+    const added = await server.callTool('add_frame_to_animation', { objectName: 'Hero', animationName: 'Walk/Left' });
+    expect(added.isError).toBe(true);
+    expect(added.content[0].text).toContain('Animation "Walk/Left" contains "/".');
+    expect(added.content[0].text).toContain('Rename the animation first (rename_animation). Nothing was changed.');
+
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
+    const replaced = await server.callTool('replace_sprite_image', {
+      objectName: 'Hero', animationName: 'Walk/Left', frameIndex: 0, pngBase64: png,
+    });
+    expect(replaced.isError).toBe(true);
+    expect(replaced.content[0].text).toContain('Animation "Walk/Left" contains "/".');
+    expect(writer.calls).toHaveLength(0);
   });
 });

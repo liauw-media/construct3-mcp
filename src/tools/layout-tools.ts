@@ -17,6 +17,11 @@ import {
 } from '../construct3/templates.js';
 import type { InstanceOverrides } from '../construct3/templates.js';
 import {
+  buildInstanceBehaviors,
+  expectedInstanceBehaviors,
+  readFamiliesForInstances,
+} from '../construct3/instance-behaviors.js';
+import {
   countInstancesInLayerTree,
   findInstanceByUid,
   findLayerNameClash,
@@ -191,7 +196,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         .refine(obj => Object.keys(obj).length <= 50, 'Too many behaviors (max 50)')
         .refine(obj => JSON.stringify(obj).length <= 50_000, 'Behaviors payload too large (max 50KB)')
         .optional()
-        .describe('Behavior runtime state as {behaviorName: {prop: val}} (each behavior props: max 100 keys, depth 6)'),
+        .describe('Behavior property values as {behaviorName: {properties: {prop: val}}} (the shape get_layout_details returns) or {behaviorName: {prop: val}}. Every behavior of the object and its families gets an entry with the built-in defaults; values given here override them. Use the property ids the editor writes (e.g. "max-speed"). Each behavior: max 100 keys, depth 6'),
       tags: z.string().max(500).regex(/^[a-zA-Z0-9_, ]*$/).optional()
         .describe('Comma-separated instance tags (default: empty)'),
       showing: z.boolean().optional().describe('Whether instance is initially visible (default: true)'),
@@ -240,15 +245,13 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           }
         }
 
-        // Validate behaviors keys against object type definition
-        if (args.behaviors && objData) {
-          const definedBehaviors = new Set((objData.behaviorTypes ?? []).map(b => b.name));
-          for (const key of Object.keys(args.behaviors)) {
-            if (!definedBehaviors.has(key)) {
-              warnings.push(`Behavior "${key}" is not defined on "${args.objectType}". Defined behaviors: ${[...definedBehaviors].join(', ') || '(none)'}. It may be inherited from a family.`);
-            }
-          }
-        }
+        // One behavior entry per behavior of the object and its families, like
+        // the editor writes them; caller values override the defaults
+        const expectedBehaviors = expectedInstanceBehaviors(
+          args.objectType, objData, await readFamiliesForInstances(reader),
+        );
+        const instanceBehaviors = buildInstanceBehaviors(args.objectType, expectedBehaviors, args.behaviors);
+        warnings.push(...instanceBehaviors.warnings);
 
         // Build overrides from optional params
         const overrides: InstanceOverrides = {};
@@ -258,11 +261,10 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         if (args.originX !== undefined) overrides.originX = args.originX;
         if (args.originY !== undefined) overrides.originY = args.originY;
         if (args.instanceVariables !== undefined) overrides.instanceVariables = args.instanceVariables;
-        if (args.behaviors !== undefined) overrides.behaviors = args.behaviors;
+        overrides.behaviors = instanceBehaviors.behaviors;
         if (args.tags !== undefined) overrides.tags = args.tags;
         if (args.showing !== undefined) overrides.showing = args.showing;
         if (args.locked !== undefined) overrides.locked = args.locked;
-        const hasOverrides = Object.keys(overrides).length > 0;
 
         if (isNonworld) {
           if (!layout['nonworld-instances']) layout['nonworld-instances'] = [];
@@ -273,7 +275,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
             sid,
             tags: overrides.tags ?? '',
             instanceVariables: overrides.instanceVariables ?? {},
-            behaviors: overrides.behaviors ?? {},
+            behaviors: instanceBehaviors.behaviors,
             showing: overrides.showing ?? true,
             locked: overrides.locked ?? false,
           });
@@ -296,7 +298,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           const instance = createInstance(
             args.objectType, uid, sid, args.x, args.y, args.width, args.height,
             pluginProps,
-            hasOverrides ? overrides : undefined,
+            overrides,
           );
 
           targetLayer.instances.push(instance);

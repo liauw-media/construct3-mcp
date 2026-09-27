@@ -16,6 +16,7 @@ import { scanLegacyBehaviorKeys, hasOnlyLegacyBehaviorName, describeLegacyHit } 
 import { scanLegacyEventShapes, describeLegacyEventShapeHit } from './legacy-event-shapes.js';
 import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.js';
 import { checkBehaviorName } from './behavior-refs.js';
+import { findMissingBehaviorEntries } from '../instance-behaviors.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import {
   checkEventLoadRules,
@@ -115,6 +116,7 @@ export async function validateProjectIntegrity(
   checkBrokenEventSheetReferences(layouts, eventSheets, warnings);
   checkBrokenIncludes(eventSheets, warnings);
   checkMissingAddons(objects, reader, warnings);
+  checkMissingBehaviorEntries(layouts, objects, families, warnings);
 
   // Info checks (orphaned files also warn about file-name-case-mismatch)
   await checkOrphanedFiles(reader, project, warnings, info);
@@ -124,8 +126,8 @@ export async function validateProjectIntegrity(
   // 13 original checks + legacy-behavior-key + legacy-event-shape +
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
-  // duplicate-layer-name
-  const checksRun = 23;
+  // duplicate-layer-name, missing-behavior-entry
+  const checksRun = 24;
 
   return {
     valid: errors.length === 0,
@@ -1142,6 +1144,36 @@ function checkMissingAddons(
         }
       }
     }
+  }
+}
+
+// ─── Missing instance behavior entries ──────────────────────
+
+/**
+ * Instances without an entry for a behavior of their object type or its
+ * families (see instance-behaviors.ts). The editor saves one entry per
+ * behavior on every instance; older versions of these tools placed instances
+ * without them. Whether the editor opens such instances is not verified, so
+ * this is a warning.
+ */
+function checkMissingBehaviorEntries(
+  layouts: Map<string, Layout>,
+  objects: Map<string, ObjectType>,
+  families: Map<string, Record<string, unknown>>,
+  warnings: IntegrityIssue[]
+): void {
+  for (const group of findMissingBehaviorEntries(layouts, objects, families)) {
+    const behaviors = group.missing.map(name => `"${name}"`).join(', ');
+    const uids = group.uids.length > 0 ? ` (uid ${listExamples(group.uids.map(String), ', ', 10)})` : '';
+    warnings.push({
+      check: 'missing-behavior-entry',
+      entity: `layouts/${group.layout}/inst:${group.objectType}`,
+      message: `${group.instances} instance(s) of "${group.objectType}"${uids} have no entry for behavior(s) ${behaviors}`,
+      suggestion: 'Construct 3 saves an entry for every behavior of the object and its families on each instance; '
+        + 'whether it opens instances without one is not verified. Older versions of construct3-mcp placed instances without them. '
+        + `The next behavior or instance variable change of "${group.objectType}" with update_object_properties adds the missing entries `
+        + 'with default values and keeps the existing ones.',
+    });
   }
 }
 

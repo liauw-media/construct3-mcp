@@ -147,10 +147,12 @@ export function nonWorldInstances(layout: Layout): Instance[] {
 /**
  * Call `visit` for every instance of a layout: on every layer and sub-layer
  * (with its layer entry), then the non-world instances (entry undefined).
+ * Anything that is not an object (a malformed layout) has no instances.
  */
-export function forEachLayoutInstance(layout: Layout, visit: (instance: Instance, entry: LayerEntry | undefined) => void): void {
+export function forEachLayoutInstance(layout: unknown, visit: (instance: Instance, entry: LayerEntry | undefined) => void): void {
+  if (!isRecord(layout)) return;
   forEachLayerInstance(layout.layers, visit);
-  for (const instance of nonWorldInstances(layout)) visit(instance, undefined);
+  for (const instance of nonWorldInstances(layout as Layout)) visit(instance, undefined);
 }
 
 /** Number of instances on a layer and all of its sub-layers. */

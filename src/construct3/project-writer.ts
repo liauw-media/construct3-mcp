@@ -5,7 +5,7 @@
  * see json-format.ts.
  */
 
-import { readFile, writeFile, copyFile, unlink, mkdir, stat } from 'fs/promises';
+import { readFile, writeFile, copyFile, unlink, mkdir, stat, rename, readdir } from 'fs/promises';
 import { dirname, relative, sep } from 'path';
 import { resolveProjectPath } from './path-utils.js';
 import { atomicReplace, existingSpelling, findFileIgnoringCase } from './atomic-write.js';
@@ -60,6 +60,21 @@ export interface WriteEntityOptions {
  */
 export function newProjectFolder(name: string): Subfolder {
   return { items: [], subfolders: [], name };
+}
+
+/**
+ * writeEntityFile failed after it backed the file up, while or after
+ * replacing it: the file may hold the new content (e.g. the post-write check
+ * failed), none, or its old content. `backupPath` is the path writeEntityFile
+ * returns on success; restoreEntityFile(backupPath) puts the content from
+ * before the call back when the file existed (for a new file there is no
+ * backup). The message is the cause's.
+ */
+export class EntityWriteError extends Error {
+  constructor(cause: unknown, readonly backupPath: string) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'EntityWriteError';
+  }
 }
 
 export class Construct3ProjectWriter {
@@ -224,10 +239,15 @@ export class Construct3ProjectWriter {
     const text = applyJsonTextStyle(json, style);
 
     const backupPath = await this.createBackup(filePath);
-    await this.atomicWrite(filePath, text);
+    try {
+      await this.atomicWrite(filePath, text);
 
-    // Post-write verification
-    await this.verifyWrittenFile(filePath, name, text);
+      // Post-write verification
+      await this.verifyWrittenFile(filePath, name, text);
+    } catch (error) {
+      // The file may have been replaced already: tell the caller where the backup is
+      throw new EntityWriteError(error, backupPath);
+    }
 
     this.invalidateAll();
     return backupPath;
@@ -454,7 +474,8 @@ export class Construct3ProjectWriter {
     height = 1,
   ): Promise<string> {
     const fileName = getImageFileName(objectName, animationName, frameIndex, pluginId);
-    const filePath = resolveProjectPath(this.reader.getProjectDir(), 'images', fileName);
+    // Directly in images/: a name with a path separator is refused
+    const filePath = this.imageFilePath(fileName);
 
     await mkdir(dirname(filePath), { recursive: true });
 
@@ -506,6 +527,90 @@ export class Construct3ProjectWriter {
       }
       throw error;
     }
+  }
+
+  /** Names of the entries in the project's images/ folder (none when there is no such folder). */
+  async listImageFiles(): Promise<string[]> {
+    try {
+      return await readdir(resolveProjectPath(this.reader.getProjectDir(), 'images'));
+    } catch (e: unknown) {
+      if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return [];
+      throw e;
+    }
+  }
+
+  /**
+   * Rename files in images/ (`from` and `to` are names in that folder), all
+   * or nothing: when a rename fails, the files renamed before it are renamed
+   * back and the call throws. Nothing is renamed when a `to` is taken by
+   * another file, also one whose name differs only in case (on Windows and
+   * macOS that is the same file). `to` may differ from `from` only in case.
+   */
+  async renameImageFiles(renames: ReadonlyArray<{ from: string; to: string }>): Promise<void> {
+    const moves = renames.map(r => ({ ...r, fromPath: this.imageFilePath(r.from), toPath: this.imageFilePath(r.to) }));
+    const existing = moves.length > 0 ? await this.listImageFiles() : [];
+    for (const [index, move] of moves.entries()) {
+      const taken = existing.find(f => f !== move.from && f.toLowerCase() === move.to.toLowerCase());
+      if (taken !== undefined) {
+        throw new Error(`Cannot rename images/${move.from} to images/${move.to}: images/${taken} already exists. No image file was renamed.`);
+      }
+      if (moves.findIndex(m => m.to.toLowerCase() === move.to.toLowerCase()) !== index) {
+        throw new Error(`Cannot rename two files to images/${move.to}. No image file was renamed.`);
+      }
+    }
+
+    const done: typeof moves = [];
+    try {
+      for (const move of moves) {
+        await rename(move.fromPath, move.toPath);
+        done.push(move);
+      }
+    } catch (error) {
+      const notRestored: string[] = [];
+      for (const move of done.reverse()) {
+        try {
+          await rename(move.toPath, move.fromPath);
+        } catch {
+          notRestored.push(`images/${move.to} (was images/${move.from})`);
+        }
+      }
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new Error(notRestored.length === 0
+        ? `Renaming image files failed: ${cause}. The files renamed before were renamed back.`
+        : `Renaming image files failed: ${cause}. These files could not be renamed back: ${notRestored.join(', ')}.`);
+    }
+  }
+
+  /**
+   * Put an entity file back to its content before a writeEntityFile call,
+   * copied from the backup path that call returned (or that its
+   * EntityWriteError carries). Rolls back one file of a change that spans
+   * several files. A file that already holds that content is left as it is.
+   */
+  async restoreEntityFile(backupPath: string): Promise<void> {
+    if (!backupPath.endsWith('.json.bak')) {
+      throw new Error(`Not a backup of an entity file: ${backupPath}`);
+    }
+    const filePath = resolveProjectPath(this.reader.getProjectDir(), backupPath.slice(0, -'.bak'.length));
+    const content = await readFile(backupPath);
+    let current: Buffer | undefined;
+    try {
+      current = await readFile(filePath);
+    } catch {
+      // Missing or unreadable: write it
+    }
+    if (current === undefined || !current.equals(content)) {
+      await this.atomicWrite(filePath, content);
+    }
+    this.invalidateAll();
+  }
+
+  /** Path of a file directly in images/; refuses names that would point elsewhere. */
+  private imageFilePath(name: string): string {
+    if (name === '' || name === '.' || name === '..' || /[\\/]/.test(name)) {
+      throw new Error(`Invalid image file name "${name}"`);
+    }
+    return resolveProjectPath(this.reader.getProjectDir(), 'images', name);
   }
 
   /**

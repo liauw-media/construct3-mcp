@@ -104,6 +104,22 @@ describe('layer walker', () => {
     expect(layerEntries(undefined)).toEqual([]);
   });
 
+  it('visits layer, sub-layer and non-world instances of a malformed layout and skips entries that are not objects', () => {
+    const layout = {
+      layers: [
+        { instances: [{ uid: 1 }, null, 7], subLayers: [{ instances: [{ uid: 2 }], subLayers: [{ instances: [{ uid: 3 }] }] }] },
+        null,
+        { instances: 'x' },
+      ],
+      'nonworld-instances': [{ uid: 4 }],
+    };
+    const uids: unknown[] = [];
+    forEachLayoutInstance(layout, instance => uids.push(instance.uid));
+    expect(uids).toEqual([1, 2, 3, 4]);
+    forEachLayoutInstance(null, () => uids.push('never'));
+    expect(uids).toHaveLength(4);
+  });
+
   it('visits instances on every layer and sub-layer, then the non-world instances', () => {
     const seen: string[] = [];
     forEachLayoutInstance(nestedLayout() as unknown as Layout, (i, e) => seen.push(`${i.uid}@${e ? layerPathLabel(e) : 'nonworld'}`));

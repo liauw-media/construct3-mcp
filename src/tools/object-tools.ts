@@ -34,6 +34,14 @@ import {
   createInstanceVariable,
   createBehavior,
 } from '../construct3/templates.js';
+import {
+  expectedInstanceBehaviors,
+  readFamiliesForInstances,
+  syncInstanceBehaviors,
+  unknownDefaultsWarning,
+  behaviorTypesOf,
+} from '../construct3/instance-behaviors.js';
+import type { InstanceBehavior } from '../construct3/instance-behaviors.js';
 
 export function registerObjectTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_object ──────────────────────────────────────────
@@ -185,6 +193,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         }
 
         const warnings: string[] = [];
+        const addedBehaviors: string[] = [];
+        const removedBehaviors: string[] = [];
 
         // Update global status
         if (args.isGlobal !== undefined) {
@@ -240,6 +250,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             }
             const sid = await idGen.generateSid(reader);
             behaviors.push(createBehavior(b.behaviorId, b.name, sid));
+            addedBehaviors.push(b.name);
           }
         }
 
@@ -251,6 +262,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
               const idx = behaviors.findIndex(b => b.name === bName);
               if (idx !== -1) {
                 behaviors.splice(idx, 1);
+                removedBehaviors.push(bName);
               } else {
                 warnings.push(`Behavior "${bName}" not found, skipping`);
               }
@@ -263,12 +275,15 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const backupPath = await writer.writeEntityFile('objectTypes', args.name, obj, subfolder);
 
         // Sync layout instances: ensure all instances of this object have
-        // behaviors/instanceVariables dicts so C3 can resolve them on load.
+        // behaviors/instanceVariables dicts so C3 can resolve them on load,
+        // add an entry for each added behavior (and any other entry an
+        // instance lacks) and drop the removed ones.
         if (args.addBehaviors?.length || args.removeBehaviors?.length || args.addVariables?.length || args.removeVariables?.length) {
-          const syncedLayouts = await syncLayoutInstances(reader, writer, args.name);
-          if (syncedLayouts.length > 0) {
-            warnings.push(`Updated instances in layout(s): ${syncedLayouts.join(', ')}`);
-          }
+          const expected = expectedInstanceBehaviors(args.name, obj, await readFamiliesForInstances(reader));
+          const sync = await syncLayoutInstances(reader, writer, new Map([
+            [args.name, { expected, add: addedBehaviors, drop: removedBehaviors }],
+          ]));
+          warnings.push(...sync.warnings);
         }
 
         const result: WriteResult = {
@@ -548,6 +563,19 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const subfolder = writer.getSubfolderForEntity('families', args.name);
         const backupPath = await writer.writeEntityFile('families', args.name, family, subfolder);
 
+        // Instances of members that joined get entries for the family's
+        // behaviors, instances of members that left lose them
+        const familyBehaviors = behaviorTypesOf(family).map(b => b.name);
+        const memberChanges = [...new Set([...(args.addMembers ?? []), ...(args.removeMembers ?? [])])]
+          .filter(m => members.includes(m) !== membersBefore.includes(m))
+          .map(m => ({ member: m, joined: members.includes(m) }));
+        if (familyBehaviors.length > 0 && memberChanges.length > 0) {
+          const families = new Map(await readFamiliesForInstances(reader));
+          families.set(args.name, family);
+          const plans = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
+          warnings.push(...(await syncLayoutInstances(reader, writer, plans)).warnings);
+        }
+
         const result: WriteResult = {
           success: true,
           entity: args.name,
@@ -611,9 +639,30 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           if (unreported) warnings.push(unreported);
         }
 
+        // Read before deleting: the members' instances lose the entries for the family's behaviors
+        let family: Record<string, unknown> | undefined;
+        try {
+          family = await reader.readFamily(args.name);
+        } catch {
+          family = undefined;
+        }
+
         const subfolder = writer.getSubfolderForEntity('families', args.name);
         const backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
         await writer.removeFromProject('families', args.name);
+
+        const familyBehaviors = behaviorTypesOf(family).map(b => b.name);
+        const formerMembers = Array.isArray(family?.members)
+          ? family.members.filter((m): m is string => typeof m === 'string')
+          : [];
+        if (familyBehaviors.length > 0 && formerMembers.length > 0) {
+          const families = new Map(await readFamiliesForInstances(reader));
+          families.delete(args.name);
+          const plans = await familyMemberPlans(
+            reader, families, formerMembers.map(m => ({ member: m, joined: false })), familyBehaviors,
+          );
+          warnings.push(...(await syncLayoutInstances(reader, writer, plans)).warnings);
+        }
 
         const result: WriteResult = {
           success: true,
@@ -738,31 +787,69 @@ function unreportedUsesWarning(events: ObjectReference[], memberUses: FamilyMemb
   return `validate_project will not report its ${counts.join(' and ')} (${listSome(where)}): fix them now.`;
 }
 
+/** How the layout instances of one object type change (see syncInstanceBehaviors). */
+interface InstanceSyncPlan {
+  /** Behaviors the object's instances carry entries for, after the change */
+  expected: InstanceBehavior[];
+  /**
+   * Behavior names the change added. Every expected entry an instance lacks
+   * gets added; only those for other names are reported as missing before
+   * the change.
+   */
+  add?: string[];
+  /** Behavior names whose entries are removed unless still expected */
+  drop?: string[];
+}
+
 /**
- * Ensure all layout instances of an object type (on every layer and sub-layer,
- * and non-world instances) have the standard `behaviors` and
- * `instanceVariables` dicts that C3 expects.
- * Without these, C3 may fail to load the project after a behavior or
- * variable is added to the object type definition.
+ * Update all layout instances (on every layer and sub-layer, and in
+ * nonworld-instances) of the object types in `plans`: make sure they have
+ * the `behaviors` and `instanceVariables` dicts C3 expects, give them a
+ * default entry for every expected behavior they lack, and drop the entries
+ * named in the plan's `drop` that are no longer expected. The editor stores
+ * an entry for every behavior of the object and its families on each
+ * instance, so besides the entries for behaviors the change added (`add`),
+ * entries missing before the change are added too: older versions of these
+ * tools wrote instances without them, and a hand edit can leave one out.
+ * Existing entries keep their values and their saved order.
  *
- * Returns the names of any layouts that were modified.
+ * Returns warnings naming the modified layouts, the entries that were missing
+ * before the change, and any behavior that got an empty entry because its
+ * defaults are not known.
  */
 async function syncLayoutInstances(
   reader: Construct3ProjectReader,
   writer: Construct3ProjectWriter,
-  objectName: string,
-): Promise<string[]> {
+  plans: ReadonlyMap<string, InstanceSyncPlan>,
+): Promise<{ warnings: string[] }> {
   const layouts = await reader.readAllLayouts();
   const modifiedLayouts: string[] = [];
+  const unknownDefaults: InstanceBehavior[] = [];
+  /** Per object type: instances that lacked entries the change did not add, and those behavior names */
+  const backfilled = new Map<string, { instances: number; names: Set<string> }>();
 
   for (const [layoutName, layout] of layouts) {
     let modified = false;
-
-    forEachLayoutInstance(layout, instance => {
-      if (instance.type === objectName) {
-        modified = ensureInstanceFields(instance) || modified;
+    const visit = (instance: Instance) => {
+      const plan = plans.get(instance.type);
+      if (!plan) return;
+      modified = ensureInstanceFields(instance) || modified;
+      const synced = syncInstanceBehaviors(instance, plan.expected, {
+        add: plan.expected.map(b => b.name),
+        drop: plan.drop,
+      });
+      modified = synced.modified || modified;
+      unknownDefaults.push(...synced.unknownDefaults);
+      const missingBefore = synced.added.filter(name => !(plan.add ?? []).includes(name));
+      if (missingBefore.length > 0) {
+        const entry = backfilled.get(instance.type) ?? { instances: 0, names: new Set<string>() };
+        entry.instances++;
+        for (const name of missingBefore) entry.names.add(name);
+        backfilled.set(instance.type, entry);
       }
-    });
+    };
+
+    forEachLayoutInstance(layout, visit);
 
     if (modified) {
       const subfolder = writer.getSubfolderForEntity('layouts', layoutName);
@@ -771,7 +858,43 @@ async function syncLayoutInstances(
     }
   }
 
-  return modifiedLayouts;
+  const warnings: string[] = [];
+  if (modifiedLayouts.length > 0) {
+    warnings.push(`Updated instances in layout(s): ${modifiedLayouts.join(', ')}`);
+  }
+  for (const [objectType, entry] of backfilled) {
+    const expected = plans.get(objectType)?.expected ?? [];
+    const names = expected.map(b => b.name).filter(name => entry.names.has(name));
+    warnings.push(`Also added default entries for behavior(s) ${names.map(n => `"${n}"`).join(', ')} to ${entry.instances} instance(s) of "${objectType}" `
+      + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores an entry for every behavior of the object and its families on each instance.');
+  }
+  if (unknownDefaults.length > 0) warnings.push(unknownDefaultsWarning(unknownDefaults));
+  return { warnings };
+}
+
+/**
+ * Sync plans for family members whose family behaviors changed: members that
+ * joined get entries for `familyBehaviors`, members that left (or whose
+ * family was deleted) lose them. `families` is the project's families after
+ * the change.
+ */
+async function familyMemberPlans(
+  reader: Construct3ProjectReader,
+  families: ReadonlyMap<string, unknown>,
+  changes: Array<{ member: string; joined: boolean }>,
+  familyBehaviors: string[],
+): Promise<Map<string, InstanceSyncPlan>> {
+  const memberObjects = await readMemberObjects(reader, changes.map(c => c.member));
+  const plans = new Map<string, InstanceSyncPlan>();
+  for (const { member, joined } of changes) {
+    const obj = memberObjects.get(member);
+    if (!obj) continue; // missing object type: it has no instances to update
+    plans.set(member, {
+      expected: expectedInstanceBehaviors(member, obj, families),
+      ...(joined ? { add: familyBehaviors } : { drop: familyBehaviors }),
+    });
+  }
+  return plans;
 }
 
 /**

@@ -5,6 +5,7 @@ import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerObjectTools } from '../../src/tools/object-tools.js';
 import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+import { BEHAVIOR_INSTANCE_DEFAULTS } from '../../src/construct3/templates.js';
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -303,10 +304,12 @@ describe('update_object_properties', () => {
     expect(entityWrites[1].args[0]).toBe('layouts');
     expect(entityWrites[1].args[1]).toBe('Level1');
 
-    // The layout data should have behaviors and instanceVariables on the instance
+    // The instance gets the dicts C3 expects and a default entry for the new behavior
     const layoutData = entityWrites[1].args[2] as Record<string, unknown>;
     const layers = (layoutData as any).layers as Array<{ instances: Array<Record<string, unknown>> }>;
-    expect(layers[0].instances[0].behaviors).toEqual({});
+    expect(layers[0].instances[0].behaviors).toEqual({
+      Platform: { properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Platform } },
+    });
     expect(layers[0].instances[0].instanceVariables).toEqual({});
   });
 
@@ -330,11 +333,11 @@ describe('update_object_properties', () => {
     expect(entityWrites[0].args[0]).toBe('objectTypes');
   });
 
-  it('adding behavior does not overwrite existing instance behaviors', async () => {
+  it('adding behavior keeps existing instance entries and adds the new one', async () => {
     const { server, writer, reader } = setup({
-      objects: new Map([['Player', {
-        name: 'Player', 'plugin-id': 'Sprite', sid: 1,
-        instanceVariables: [], behaviorTypes: [],
+      objects: new Map([['Sprite1', {
+        name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1,
+        instanceVariables: [], behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 2 }],
       }]]),
     });
     reader.addLayout('Level1', {
@@ -343,11 +346,11 @@ describe('update_object_properties', () => {
         name: 'Main',
         sid: 100,
         instances: [{
-          type: 'Player',
+          type: 'Sprite1',
           uid: 0,
           sid: 200,
           properties: {},
-          behaviors: { Tween: { enabled: true } },
+          behaviors: { Tween: { properties: { enabled: false } } },
           instanceVariables: { health: 100 },
           world: { x: 0, y: 0, width: 64, height: 64 },
         }],
@@ -355,15 +358,114 @@ describe('update_object_properties', () => {
       sid: 300,
     });
 
-    await server.callTool('update_object_properties', {
-      name: 'Player',
-      addBehaviors: [{ behaviorId: 'Platform', name: 'Platform' }],
+    const data = parseResult(await server.callTool('update_object_properties', {
+      name: 'Sprite1',
+      addBehaviors: [{ behaviorId: 'Pin', name: 'Pin' }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toContain('Updated instances in layout(s): Level1');
+
+    const entityWrites = writer.callsFor('writeEntityFile');
+    expect(entityWrites.map(w => w.args[0])).toEqual(['objectTypes', 'layouts']);
+    const instance = (entityWrites[1].args[2] as any).layers[0].instances[0];
+    expect(instance.behaviors).toEqual({
+      Tween: { properties: { enabled: false } },
+      Pin: { properties: { destroy: false } },
+    });
+    expect(Object.keys(instance.behaviors)).toEqual(['Tween', 'Pin']);
+    expect(instance.instanceVariables).toEqual({ health: 100 });
+  });
+
+  it('adding a behavior leaves instances alone that already carry its entry', async () => {
+    const { server, writer, reader } = setup({
+      objects: new Map([['Sprite1', {
+        name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1,
+        instanceVariables: [], behaviorTypes: [],
+      }]]),
+    });
+    reader.addLayout('Level1', {
+      name: 'Level1', sid: 300,
+      layers: [{
+        name: 'Main', sid: 100,
+        instances: [{
+          type: 'Sprite1', uid: 0, sid: 200, properties: {},
+          behaviors: { Pin: { properties: { destroy: true } } },
+          instanceVariables: {},
+        }],
+      }],
     });
 
-    // Layout should NOT be rewritten since it already has behaviors/instanceVariables
+    await server.callTool('update_object_properties', {
+      name: 'Sprite1',
+      addBehaviors: [{ behaviorId: 'Pin', name: 'Pin' }],
+    });
+
+    // Nothing to change on the instance: only the object type is written
     const entityWrites = writer.callsFor('writeEntityFile');
     expect(entityWrites).toHaveLength(1);
     expect(entityWrites[0].args[0]).toBe('objectTypes');
+  });
+
+  it('removing a behavior drops its entry from all instances, on sub-layers too', async () => {
+    const { server, writer, reader } = setup({
+      objects: new Map([['Sprite1', {
+        name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1, instanceVariables: [],
+        behaviorTypes: [
+          { behaviorId: 'Tween', name: 'Tween', sid: 2 },
+          { behaviorId: 'Pin', name: 'Pin', sid: 3 },
+        ],
+      }]]),
+    });
+    const entries = () => ({
+      Tween: { properties: { enabled: true } },
+      Pin: { properties: { destroy: false } },
+    });
+    reader.addLayout('Level1', {
+      name: 'Level1', sid: 300,
+      layers: [{
+        name: 'Main', sid: 100,
+        instances: [{ type: 'Sprite1', uid: 0, sid: 200, properties: {}, behaviors: entries(), instanceVariables: {} }],
+        subLayers: [{
+          name: 'Inner', sid: 101,
+          instances: [{ type: 'Sprite1', uid: 1, sid: 201, properties: {}, behaviors: entries(), instanceVariables: {} }],
+          subLayers: [],
+        }],
+      }],
+    });
+
+    const data = parseResult(await server.callTool('update_object_properties', {
+      name: 'Sprite1',
+      removeBehaviors: ['Pin'],
+    }));
+    expect(data.success).toBe(true);
+
+    const layout = writer.callsFor('writeEntityFile')[1].args[2] as any;
+    expect(layout.layers[0].instances[0].behaviors).toEqual({ Tween: { properties: { enabled: true } } });
+    expect(layout.layers[0].subLayers[0].instances[0].behaviors).toEqual({ Tween: { properties: { enabled: true } } });
+  });
+
+  it('adding a behavior without known defaults writes { properties: {} } and warns', async () => {
+    const { server, writer, reader } = setup({
+      objects: new Map([['Sprite1', {
+        name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1, instanceVariables: [], behaviorTypes: [],
+      }]]),
+    });
+    reader.addLayout('Level1', {
+      name: 'Level1', sid: 300,
+      layers: [{
+        name: 'Main', sid: 100,
+        instances: [{ type: 'Sprite1', uid: 0, sid: 200, properties: {}, behaviors: {}, instanceVariables: {} }],
+      }],
+    });
+
+    const data = parseResult(await server.callTool('update_object_properties', {
+      name: 'Sprite1',
+      addBehaviors: [{ behaviorId: 'Custom1', name: 'MyCustom' }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('"MyCustom" (Custom1)'))).toBe(true);
+    const layout = writer.callsFor('writeEntityFile')[1].args[2] as any;
+    expect(layout.layers[0].instances[0].behaviors).toEqual({ MyCustom: { properties: {} } });
   });
 });
 
@@ -622,6 +724,58 @@ describe('update_family', () => {
     const other = setup({ objects: mixedObjects(), families: family() });
     expect(parseResult(await other.server.callTool('update_family', { name: 'TestFamily', addMembers: ['MemberB'] })).success).toBe(true);
   });
+
+  // Synthetic project: Family1 has a Sine behavior; Sprite1/Sprite2 are Sprites with a Tween
+  const familyProject = (members: string[]) => ({
+    objects: new Map<string, Record<string, unknown>>([
+      ['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 2, behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 20 }] }],
+      ['Sprite2', { name: 'Sprite2', 'plugin-id': 'Sprite', sid: 3, behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 21 }] }],
+    ]),
+    families: new Map([['Family1', {
+      name: 'Family1', 'plugin-id': 'Sprite', sid: 1, members, instanceVariables: [],
+      behaviorTypes: [{ behaviorId: 'Sin', name: 'Sine', sid: 10 }], effectTypes: [],
+    }]]),
+    layouts: new Map([['Level1', {
+      name: 'Level1', sid: 300,
+      layers: [{
+        name: 'Main', sid: 100,
+        instances: [
+          { type: 'Sprite1', uid: 0, sid: 200, properties: {}, instanceVariables: {}, behaviors: members.includes('Sprite1')
+            ? { Sine: { properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Sin, magnitude: 8 } }, Tween: { properties: { enabled: true } } }
+            : { Tween: { properties: { enabled: true } } } },
+          { type: 'Sprite2', uid: 1, sid: 201, properties: {}, instanceVariables: {}, behaviors: { Tween: { properties: { enabled: true } } } },
+        ],
+      }],
+    }]]),
+  });
+
+  it('adding a member gives its instances the family behavior entries, family entries first', async () => {
+    const { server, writer } = setup(familyProject([]));
+    const data = parseResult(await server.callTool('update_family', { name: 'Family1', addMembers: ['Sprite1'] }));
+    expect(data.success).toBe(true);
+
+    const writes = writer.callsFor('writeEntityFile');
+    expect(writes.map(w => w.args[0])).toEqual(['families', 'layouts']);
+    const [inst1, inst2] = (writes[1].args[2] as any).layers[0].instances;
+    expect(Object.keys(inst1.behaviors)).toEqual(['Sine', 'Tween']);
+    expect(inst1.behaviors.Sine).toEqual({ properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Sin } });
+    expect(inst2.behaviors).toEqual({ Tween: { properties: { enabled: true } } });
+  });
+
+  it('removing a member drops the family behavior entries from its instances', async () => {
+    const { server, writer } = setup(familyProject(['Sprite1']));
+    await server.callTool('update_family', { name: 'Family1', removeMembers: ['Sprite1'] });
+    const layout = writer.callsFor('writeEntityFile')[1].args[2] as any;
+    expect(layout.layers[0].instances[0].behaviors).toEqual({ Tween: { properties: { enabled: true } } });
+  });
+
+  it('member changes on a family without behaviors do not touch layouts', async () => {
+    const project = familyProject([]);
+    (project.families.get('Family1') as any).behaviorTypes = [];
+    const { server, writer } = setup(project);
+    await server.callTool('update_family', { name: 'Family1', addMembers: ['Sprite1'] });
+    expect(writer.callsFor('writeEntityFile').map(w => w.args[0])).toEqual(['families']);
+  });
 });
 
 // ─── delete_family ────────────────────────────────────────
@@ -809,5 +963,30 @@ describe('delete_family', () => {
     const { server } = setup();
     const result = await server.callTool('delete_family', { name: 'Ghost' });
     expect(result.isError).toBe(true);
+  });
+
+  it('drops the family behavior entries from the former members\' instances', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 2, behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 20 }] }]]),
+      families: new Map([['Family1', {
+        name: 'Family1', 'plugin-id': 'Sprite', sid: 1, members: ['Sprite1'],
+        behaviorTypes: [{ behaviorId: 'Sin', name: 'Sine', sid: 10 }],
+      }]]),
+      layouts: new Map([['Level1', {
+        name: 'Level1', sid: 300,
+        layers: [{
+          name: 'Main', sid: 100,
+          instances: [{
+            type: 'Sprite1', uid: 0, sid: 200, properties: {}, instanceVariables: {},
+            behaviors: { Sine: { properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Sin } }, Tween: { properties: { enabled: true } } },
+          }],
+        }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toContain('Updated instances in layout(s): Level1');
+    const layout = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(layout.layers[0].instances[0].behaviors).toEqual({ Tween: { properties: { enabled: true } } });
   });
 });

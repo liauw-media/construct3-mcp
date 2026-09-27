@@ -3,8 +3,12 @@
  * Produces valid transparent PNGs without any image library dependencies.
  *
  * C3 image filename conventions (verified from real projects):
- * - Sprites: `images/{objectname lowercase}-{animation name}-{frameIndex padded to 3}.png`
+ * - Sprites: `images/{objectname-animationname-NNN}.png` with the frame index
+ *   padded to 3 digits and the WHOLE name lowercased. Spaces and other
+ *   characters of the animation name are kept (public example: animation
+ *   "Kyoto Shop (JP)" of object "Signs" → "signs-kyoto shop (jp)-000.png").
  * - TiledBg: `images/{objectname lowercase}.png`
+ * Only the image file names are lowercased; object JSON files keep their case.
  */
 
 import { deflateSync } from 'zlib';
@@ -81,7 +85,11 @@ export function generatePlaceholderPng(width = 1, height = 1): Buffer {
 /**
  * Get the image filename that C3 expects for a given object/animation/frame.
  *
- * @param objectName    Object type name (will be lowercased)
+ * The editor writes image file names entirely in lowercase, so the result is
+ * lowercased as a whole. On a case-sensitive checkout (Linux CI, build tools)
+ * a mixed-case name would not match the file the editor expects.
+ *
+ * @param objectName    Object type name
  * @param animationName Animation name (for Sprites)
  * @param frameIndex    Frame index (0-based, zero-padded to 3 digits)
  * @param pluginId      Plugin ID — 'TiledBg' uses a simpler naming convention
@@ -93,13 +101,30 @@ export function getImageFileName(
   frameIndex: number,
   pluginId?: string,
 ): string {
-  const lowerName = objectName.toLowerCase();
-
   if (pluginId === 'TiledBg') {
-    return `${lowerName}.png`;
+    return `${objectName}.png`.toLowerCase();
   }
 
   // Sprite convention: name-animation-frameIndex(3 digits).png
   const paddedIndex = String(frameIndex).padStart(3, '0');
-  return `${lowerName}-${animationName}-${paddedIndex}.png`;
+  return `${objectName}-${animationName}-${paddedIndex}.png`.toLowerCase();
+}
+
+/**
+ * The first character of `name` that cannot be part of an image file name
+ * built by getImageFileName, or undefined when there is none: a path
+ * separator (the file would land in a subfolder of images/, or outside it),
+ * one of : * ? " < > | that Windows does not allow in file names (the file
+ * could not be written or checked out there), or a control character. The
+ * animation names of editor-saved projects seen so far use only letters,
+ * digits, spaces, "_" and "-".
+ */
+export function invalidImageNameCharacter(name: string): string | undefined {
+  return /[\\/:*?"<>|\u0000-\u001f]/.exec(name)?.[0];
+}
+
+/** How to show a character found by invalidImageNameCharacter in a message. */
+export function describeCharacter(char: string): string {
+  const code = char.charCodeAt(0);
+  return code < 0x20 ? `control character U+${code.toString(16).toUpperCase().padStart(4, '0')}` : `"${char}"`;
 }

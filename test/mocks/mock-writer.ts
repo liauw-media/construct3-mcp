@@ -83,7 +83,7 @@ export class MockWriter {
     height?: number,
   ): Promise<string> {
     this.calls.push({ method: 'writeImageFile', args: [objectName, animationName, frameIndex, pluginId, width, height] });
-    return `/mock/project/images/${objectName.toLowerCase()}-${animationName}-${String(frameIndex).padStart(3, '0')}.png`;
+    return `/mock/project/images/${objectName}-${animationName}-${String(frameIndex).padStart(3, '0')}.png`.toLowerCase();
   }
 
   async writeImageFiles(
@@ -98,8 +98,24 @@ export class MockWriter {
   ): Promise<string[]> {
     this.calls.push({ method: 'writeImageFiles', args: [files] });
     return files.map(f =>
-      `/mock/project/images/${f.objectName.toLowerCase()}-${f.animationName}-${String(f.frameIndex).padStart(3, '0')}.png`
+      `/mock/project/images/${f.objectName}-${f.animationName}-${String(f.frameIndex).padStart(3, '0')}.png`.toLowerCase()
     );
+  }
+
+  /** Entries of images/ that listImageFiles returns */
+  imageFiles: string[] = [];
+
+  async listImageFiles(): Promise<string[]> {
+    this.calls.push({ method: 'listImageFiles', args: [] });
+    return [...this.imageFiles];
+  }
+
+  async renameImageFiles(renames: ReadonlyArray<{ from: string; to: string }>): Promise<void> {
+    this.calls.push({ method: 'renameImageFiles', args: [renames.map(r => ({ ...r }))] });
+  }
+
+  async restoreEntityFile(backupPath: string): Promise<void> {
+    this.calls.push({ method: 'restoreEntityFile', args: [backupPath] });
   }
 
   // Helper: get calls for a specific method

@@ -428,8 +428,8 @@ describe('Image pipeline (integration)', () => {
     const filePath = await writer.writeImageFile('Hero', 'Walk', 0, 'Sprite');
 
     await expect(stat(filePath)).resolves.toBeDefined();
-    // animationName is case-preserved; only objectName is lowercased
-    expect(filePath).toContain(join('images', 'hero-Walk-000.png'));
+    // The whole image file name is lowercased, like the editor writes it
+    expect(filePath).toContain(join('images', 'hero-walk-000.png'));
   });
 
   it('written PNG has valid signature', async () => {
@@ -450,10 +450,10 @@ describe('Image pipeline (integration)', () => {
     expect(paths).toHaveLength(3);
     const imagesDir = join(tmpDir, 'images');
     const files = await readdir(imagesDir);
-    // animationName is case-preserved
-    expect(files).toContain('player-Run-000.png');
-    expect(files).toContain('player-Run-001.png');
-    expect(files).toContain('player-Run-002.png');
+    // The whole image file name is lowercased (readdir compares exactly, also on Windows)
+    expect(files).toContain('player-run-000.png');
+    expect(files).toContain('player-run-001.png');
+    expect(files).toContain('player-run-002.png');
   });
 
   it('Sprite creation round-trip: JSON has imageSpriteId + PNG exists', async () => {
@@ -672,7 +672,7 @@ describe('Behavior workflow (integration)', () => {
     expect(animations.items[0].name).toBe('Animation 1');
 
     // Verify PNG still exists
-    const pngPath = join(tmpDir, 'images', 'hero-Animation 1-000.png');
+    const pngPath = join(tmpDir, 'images', 'hero-animation 1-000.png');
     await expect(stat(pngPath)).resolves.toBeDefined();
   });
 });

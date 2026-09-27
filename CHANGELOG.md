@@ -22,6 +22,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `fix_legacy_event_shapes` tool: converts event shapes that older versions wrote (block `isElse`, condition `isOr`, old-shape function calls, one-string scripts) into the editor's own where the result is unambiguous, and flags conversions that can change how an event runs (dry-run by default) (#32).
 - `validate_project` checks `legacy-event-shape` (shapes the current editor never writes) and `else-placement` (an else block that does not follow a non-triggered block, or holds a trigger) (#32).
 - `add_event_block` and `update_event_block` write else-if blocks, OR blocks (`isOrBlock`), events without conditions, positional function calls, multi-line script actions and comment rows; `update_event_block` can make a block an else or OR block (#32).
+- `validate_project` check `missing-behavior-entry`: layout instances that lack the entry for a behavior of their object type or its families (#33).
 
 ### Changed
 
@@ -43,6 +44,9 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `delete_event_from_sheet` refuses, unless forced, to delete functions or event variables that calls, function maps, System variable conditions/actions or expressions elsewhere still use; a forced dry run lists the references the delete would leave dangling (#32).
 - `get_function_map` counts `Functions.Name(...)` expression calls and function map registrations as call sites (#32).
 - `create_object` and `create_family` refuse names that clash with System or the built-in Functions object (#32).
+- `rename_animation` also renames the frame image files and updates layout instances whose `initial-animation` is the old name, as the editor does; it refuses renames that would replace an existing image file or leave another animation without images, and restores the files when a write fails (#33).
+- Layout instances carry a behavior entry, with the built-in behaviors' default property values, for every behavior of their object type and its families: `add_instance_to_layout` writes them, and `update_object_properties`, `update_family` and `delete_family` add or remove them on existing instances (#33).
+- The animation tools find animations inside animation folders and refuse animation names that cannot be part of an image file name (#33).
 
 ### Fixed
 
@@ -63,6 +67,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 - The built-in `Functions` object class (e.g. *Set return value*) is accepted by the event tools and no longer reported as a broken object reference by `validate_project` (#32).
 - `groupPath` finds groups whose titles have leading or trailing whitespace (#32).
 - `update_event_block` no longer warns that all conditions were removed on blocks that never had conditions, such as function blocks (#32).
+- Placeholder image files are named all lowercase, as the editor names them (`images/<object>-<animation>-000.png`), instead of keeping the case of the animation name (#33).
+- `replace_sprite_image` on a frame stored in another format (e.g. JPEG) sets the frame's `fileType` to PNG to match the new `.png` file and names the old file in a warning (#33).
 
 ## [1.8.1] - 2026-04-16
 

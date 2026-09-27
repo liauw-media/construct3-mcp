@@ -4,6 +4,7 @@ import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerLayoutTools } from '../../src/tools/layout-tools.js';
+import { BEHAVIOR_INSTANCE_DEFAULTS } from '../../src/construct3/templates.js';
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -279,15 +280,97 @@ describe('add_instance_to_layout', () => {
       objectType: 'Player',
       x: 0, y: 0,
       instanceVariables: { health: 100 },
-      behaviors: { Platform: { maxSpeed: 300 } },
+      behaviors: { Platform: { 'max-speed': 300 } },
     });
     const data = parseResult(result);
     expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
     const writtenLayout = writer.callsFor('writeEntityFile')[0].args[2] as Record<string, unknown>;
     const layers = writtenLayout.layers as Array<Record<string, unknown>>;
     const instance = (layers[0].instances as Array<Record<string, unknown>>)[0];
     expect(instance.instanceVariables).toEqual({ health: 100 });
-    expect(instance.behaviors).toEqual({ Platform: { maxSpeed: 300 } });
+    // Stored in the editor's shape, the given value on top of the defaults
+    expect(instance.behaviors).toEqual({
+      Platform: { properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Platform, 'max-speed': 300 } },
+    });
+  });
+
+  // Synthetic project: Sprite1 has Tween and Pin and is a member of Family1 (Sine)
+  const behaviorProject = (extraBehaviors: Array<Record<string, unknown>> = []) => ({
+    objects: new Map([['Sprite1', {
+      name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1, isGlobal: false, instanceVariables: [],
+      behaviorTypes: [
+        { behaviorId: 'Tween', name: 'Tween', sid: 2 },
+        { behaviorId: 'Pin', name: 'Pin', sid: 3 },
+        ...extraBehaviors,
+      ],
+    }]]),
+    families: new Map([
+      ['Family0', { name: 'Family0', 'plugin-id': 'Sprite', sid: 5, members: ['OtherObject'], behaviorTypes: [{ behaviorId: 'Fade', name: 'Fade', sid: 6 }] }],
+      ['Family1', { name: 'Family1', 'plugin-id': 'Sprite', sid: 7, members: ['Sprite1'], behaviorTypes: [{ behaviorId: 'Sin', name: 'Sine', sid: 8 }] }],
+    ]),
+    layouts: new Map([['Level 1', {
+      name: 'Level 1', sid: 10,
+      layers: [{ name: 'Main', sid: 20, instances: [] }],
+      'nonworld-instances': [],
+    }]]),
+  });
+
+  async function placeSprite1(data: ReturnType<typeof behaviorProject>, behaviors?: Record<string, unknown>) {
+    const { server, writer } = setup(data);
+    const result = parseResult(await server.callTool('add_instance_to_layout', {
+      layoutName: 'Level 1', layerName: 'Main', objectType: 'Sprite1', x: 0, y: 0,
+      ...(behaviors ? { behaviors } : {}),
+    }));
+    const layout = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    return { result, instance: layout.layers[0].instances[0] as Record<string, any> };
+  }
+
+  it('writes a default entry for every behavior of the object and its families, family first', async () => {
+    const { result, instance } = await placeSprite1(behaviorProject());
+    expect(result.success).toBe(true);
+    expect(result.warnings).toBeUndefined();
+    expect(Object.keys(instance.behaviors)).toEqual(['Sine', 'Tween', 'Pin']);
+    expect(instance.behaviors).toEqual({
+      Sine: { properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Sin } },
+      Tween: { properties: { enabled: true } },
+      Pin: { properties: { destroy: false } },
+    });
+  });
+
+  it('wraps a flat behavior value into { properties }', async () => {
+    const { instance } = await placeSprite1(behaviorProject(), { Pin: { destroy: true } });
+    expect(instance.behaviors.Pin).toEqual({ properties: { destroy: true } });
+    expect(instance.behaviors.Tween).toEqual({ properties: { enabled: true } });
+  });
+
+  it('accepts the editor shape as get_layout_details returns it', async () => {
+    const { result, instance } = await placeSprite1(behaviorProject(), {
+      Sine: { properties: { movement: 'vertical', magnitude: 12 } },
+    });
+    expect(result.warnings).toBeUndefined();
+    expect(instance.behaviors.Sine).toEqual({
+      properties: { ...BEHAVIOR_INSTANCE_DEFAULTS.Sin, movement: 'vertical', magnitude: 12 },
+    });
+  });
+
+  it('warns about property ids a built-in behavior does not have', async () => {
+    const { result, instance } = await placeSprite1(behaviorProject(), { Pin: { destroyWithParent: true } });
+    expect(result.warnings.some((w: string) => w.includes('"destroyWithParent"') && w.includes('destroy'))).toBe(true);
+    expect(instance.behaviors.Pin).toEqual({ properties: { destroy: false, destroyWithParent: true } });
+  });
+
+  it('writes { properties: {} } for a behavior without known defaults and names it', async () => {
+    const { result, instance } = await placeSprite1(
+      behaviorProject([{ behaviorId: 'Custom1', name: 'MyCustom', sid: 4 }]),
+    );
+    expect(instance.behaviors.MyCustom).toEqual({ properties: {} });
+    expect(result.warnings.some((w: string) => w.includes('"MyCustom" (Custom1)'))).toBe(true);
+  });
+
+  it('does not warn about a behavior that comes from a family', async () => {
+    const { result } = await placeSprite1(behaviorProject(), { Sine: { period: 2 } });
+    expect(result.warnings).toBeUndefined();
   });
 
   it('creates instance with tags, showing=false, locked=true', async () => {
