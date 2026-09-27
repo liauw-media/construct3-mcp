@@ -2,72 +2,79 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
-## [Unreleased]
+## [1.9.0] - 2026-09-27
+
+### Highlights
+
+- **Editor load-time checks.** `validate_project` checks the rules the Construct 3 editor enforces when it opens a project, and event sheet writes that would add such an error are refused before anything is written.
+- **Behavior conditions and actions the editor can read.** They are written with the `behaviorType` key instead of `behavior-type`, which made the editor refuse to open the project; `fix_legacy_behavior_keys` repairs sheets written by older versions.
+- **Find events by their editor number.** `locate_event` and `get_eventsheet_outline` map an editor location such as "sheet, event N, action M" to the event sheet JSON.
+- **Runtime-trap analysis.** `find_runtime_traps`, the `construct3://docs/pitfalls` resource and the `debug_stuck_game` prompt find event logic that loads but hangs or fails silently.
+- **Editor-faithful event shapes.** Else and else-if blocks, OR blocks, events without conditions, positional function calls, script lines and the built-in Functions object are written the way the editor saves them; `fix_legacy_event_shapes` converts sheets written by older versions.
+- **Safer deletes and case-insensitive names.** Deletes, and removals of behaviors, instance variables and family members, are refused while something still uses what they remove, SID-addressed event tools refuse SIDs shared by several events, and names that differ from an existing one only in case are refused wherever the editor compares names ignoring case.
+- **`validate_project` without false reports.** Editor-saved projects no longer come out invalid or with destructive advice; object and asset usage count every real use, nested sub-layers included.
+- **Byte-faithful writes.** Files keep their line endings, trailing newline, BOM and file-name case, and every write result carries an `editorNote` about reopening the project in the editor.
 
 ### Added
 
-- `fix_legacy_behavior_keys` tool: renames legacy `"behavior-type"` keys to `"behaviorType"` in all event sheets, checking each value against the object's behaviors first (dry-run by default) (#16).
-- `validate_project` check `legacy-behavior-key`: error when a condition/action names its behavior only under the legacy key, warning for leftover keys (#16).
-- Every response that reports a completed project write carries an `editorNote`: the Construct 3 editor keeps the open project in memory, so close and reopen it there before saving, or it overwrites the change (#21).
 - `validate_project` checks rules the Construct 3 editor enforces when it opens a project: expression syntax, empty parameters, trigger placement, duplicate object/family names, family plugin mismatches and object class SID clashes (#18).
 - Event sheet writes (`add_event_block`, `update_event_block`, `add_event_to_sheet`, `update_event_block_action`, `move_events_between_sheets`) are refused when they add a new load-time error; new warnings are returned, existing problems do not block edits (#18).
+- `fix_legacy_behavior_keys` tool: renames legacy `"behavior-type"` keys to `"behaviorType"` in all event sheets, checking each value against the object's behaviors first (dry-run by default) (#16).
+- `fix_legacy_event_shapes` tool: converts event shapes that older versions wrote (block `isElse`, condition `isOr`, old-shape function calls, one-string scripts) into the editor's own where the result is unambiguous, and flags conversions that can change how an event runs (dry-run by default) (#32).
 - `locate_event` tool: maps an editor location such as "sheet, event N, action M" to the event's JSON path, SID, enclosing group/function, summary and neighbouring events (#19).
 - `get_eventsheet_outline` tool: paged, readable outline of an event sheet with the editor's event numbers; rows that still use the legacy `"behavior-type"` key are marked (#19).
 - `find_runtime_traps` tool: finds event logic that loads but hangs or fails at runtime, such as waits for signals nothing raises, waits that start after their signal was raised, and scripts that use function parameters without `localVars` (#20).
 - `construct3://docs/pitfalls` resource with curated Construct 3 pitfalls, and a `debug_stuck_game` prompt that embeds the current trap scan (#20).
-- `eventPath` parameter (`eventPaths` for `move_events_between_sheets`) on the SID-addressed event tools: picks one of several events that share a SID; single-event results name the `eventPath` they acted on (#30).
-- `validate_project` check `file-name-case-mismatch`: warns when an entity file's name differs from its registered name only in case, instead of reporting a live file as orphaned (#31).
-- `validate_project` check `duplicate-layer-name`: layers of one layout, sub-layers included, whose names are the same ignoring case (#35).
-- `delete_family` checks references before deleting (events, object properties, uses of its instance variables and behaviors through members) and takes `force` (#35).
-- `fix_legacy_event_shapes` tool: converts event shapes that older versions wrote (block `isElse`, condition `isOr`, old-shape function calls, one-string scripts) into the editor's own where the result is unambiguous, and flags conversions that can change how an event runs (dry-run by default) (#32).
-- `validate_project` checks `legacy-event-shape` (shapes the current editor never writes) and `else-placement` (an else block that does not follow a non-triggered block, or holds a trigger) (#32).
+- New `validate_project` checks: `legacy-behavior-key` (error when a condition/action names its behavior only under the legacy key, warning for leftover keys; #16), `legacy-event-shape` (shapes the current editor never writes; #32), `else-placement` (an else block that does not follow a non-triggered block, or holds a trigger; #32), `file-name-case-mismatch` (an entity file whose name differs from its registered name only in case, instead of reporting a live file as orphaned; #31), `duplicate-layer-name` (layers of one layout, sub-layers included, whose names are the same ignoring case; #35) and `missing-behavior-entry` (layout instances that lack the entry for a behavior of their object type or its families; #33).
 - `add_event_block` and `update_event_block` write else-if blocks, OR blocks (`isOrBlock`), events without conditions, positional function calls, multi-line script actions and comment rows; `update_event_block` can make a block an else or OR block (#32).
-- `validate_project` check `missing-behavior-entry`: layout instances that lack the entry for a behavior of their object type or its families (#33).
+- `eventPath` parameter (`eventPaths` for `move_events_between_sheets`) on the SID-addressed event tools: picks one of several events that share a SID; single-event results name the `eventPath` they acted on (#30).
+- `delete_family` checks references before deleting (events, object properties, uses of its instance variables and behaviors through members) and takes `force` (#35).
+- Every response that reports a completed project write carries an `editorNote`: the Construct 3 editor keeps the open project in memory, so close and reopen it there before saving, or it overwrites the change (#21).
 - `validate_project` check `missing-behavior-or-variable`: conditions, actions and expressions that use an instance variable or behavior which the object type, its families or the family do not have (#37).
 
 ### Changed
 
+- Event blocks are written in the shapes and key order the editor saves: Else as a System `else` condition at index 0, `isOrBlock` on OR blocks, function calls as `{ callFunction, sid, parameters: [...] }`, scripts as `{ type: "script", language: "javascript", script: [lines] }`, `disabled` after `sid`, `isInverted` after `parameters`. The per-condition `isOr` input is deprecated (#32).
 - `update_event_block` and `update_event_block_action` normalize the legacy `"behavior-type"` key on the conditions/actions they edit and report it in `warnings`; `update_event_block` validates all additions before changing anything (#16).
-- Runtime tools that change the open project report `success: true`; README and `docs/API.md` now document every registered tool and the real source tree (#21).
-- `list_timelines` returns the editor's transitions separately in `transitions`; the timeline tools refuse to read, change or delete transitions. `create_timeline` rejects unsafe `subfolder` paths and `"transitions"`, and writes new folders in the editor's key order (#22).
-- `create_object`, `create_family` and `update_family` refuse names that clash with another object type or family, and family members that mix plugins (#18).
-- Duplicate-SID reports locate event sheet entries by event path and index and no longer advise re-saving the project; behavior and instance variable SID clashes are warnings (#18).
-- The `review_game_logic` and `explain_eventsheet` prompts point to `find_runtime_traps` and the pitfalls resource (#20).
-- `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md` refreshed to match the code: source tree, write flow (backups, atomic writes, project lock), analyzers and the load-time gate.
 - Create and rename tools compare names the way the Construct 3 editor does: a name that differs from an existing event sheet, layout, object type or family, layer, animation, event variable or project-bar folder only in case is refused; `create_timeline` refuses a case variant of a timeline in the same folder (#29).
 - `add_event_to_sheet`, `update_event_variable` and `move_events_between_sheets` check event variable and function parameter names like the editor: no clash within the variable's scope (ignoring case), no System expression names, none of the characters the editor removes (#29).
-- `move_events_between_sheets` warns when a copy leaves a SID shared by several events in the target sheet, and `duplicate-sid` reports end each event location with its JSON path (#30).
-- `validate_project` lists leftover `.bak` files in `timelines/` and next to `project.c3proj` too, and its `duplicate-uid` advice gives accurate guidance instead of suggesting a re-save in Construct 3 (#31).
-- Layout tools handle nested sub-layers (`layers[].subLayers`): `add_instance_to_layout`, `update_instance`, `delete_instance_from_layout`, `update_layer` and `delete_layer` find layers and instances at any depth (a sub-layer also by a path such as `"Main > HUD"`), and `add_layer` refuses a name any layer or sub-layer uses (#35).
-- A blocked `delete_object` or `delete_family` lists where the object is used; a forced delete names the uses it leaves behind, and `validate_project` reports dangling instances, object parameters, family members and object properties as `broken-object-reference` (#35).
-- `get_asset_usage` gives each asset a `status` (`used`, `unused` or `not-analysed`), where and how it is referenced (`referencedIn`, `via`) and a `reason` when not used; assets that names built at runtime may reach are reported as not analysed instead of unused (#34).
-- Event blocks are written in the shapes and key order the editor saves: Else as a System `else` condition at index 0, `isOrBlock` on OR blocks, function calls as `{ callFunction, sid, parameters: [...] }`, scripts as `{ type: "script", language: "javascript", script: [lines] }`, `disabled` after `sid`, `isInverted` after `parameters`. The per-condition `isOr` input is deprecated (#32).
+- `create_object` and `create_family` refuse names that clash, ignoring case, with another object type or family (#18) or with System or the built-in Functions object (#32); `create_family` and `update_family` refuse family members that mix plugins (#18).
+- Duplicate-SID reports locate event sheet entries by event path and index, end each event location with its JSON path, and no longer advise re-saving the project; behavior and instance variable SID clashes are warnings (#18, #30).
+- `move_events_between_sheets` warns when a copy leaves a SID shared by several events in the target sheet (#30).
 - `delete_event_from_sheet` refuses, unless forced, to delete functions or event variables that calls, function maps, System variable conditions/actions or expressions elsewhere still use; a forced dry run lists the references the delete would leave dangling (#32).
-- `get_function_map` counts `Functions.Name(...)` expression calls and function map registrations as call sites (#32).
-- `create_object` and `create_family` refuse names that clash with System or the built-in Functions object (#32).
-- `rename_animation` also renames the frame image files and updates layout instances whose `initial-animation` is the old name, as the editor does; it refuses renames that would replace an existing image file or leave another animation without images, and restores the files when a write fails (#33).
+- A blocked `delete_object` or `delete_family` lists where the object is used; a forced delete names the uses it leaves behind, and `validate_project` reports dangling instances, object parameters, family members and object properties as `broken-object-reference` (#35).
+- Layout tools handle nested sub-layers (`layers[].subLayers`): `add_instance_to_layout`, `update_instance`, `delete_instance_from_layout`, `update_layer` and `delete_layer` find layers and instances at any depth (a sub-layer also by a path such as `"Main > HUD"`), and `add_layer` refuses a name any layer or sub-layer uses (#35).
 - Layout instances carry a behavior entry, with the built-in behaviors' default property values, for every behavior of their object type and its families: `add_instance_to_layout` writes them, and `update_object_properties`, `update_family` and `delete_family` add or remove them on existing instances (#33).
+- `rename_animation` also renames the frame image files and updates layout instances whose `initial-animation` is the old name, as the editor does; it refuses renames that would replace an existing image file or leave another animation without images, and restores the files when a write fails (#33).
 - The animation tools find animations inside animation folders and refuse animation names that cannot be part of an image file name (#33).
+- `get_asset_usage` gives each asset a `status` (`used`, `unused` or `not-analysed`), where and how it is referenced (`referencedIn`, `via`) and a `reason` when not used; assets that names built at runtime may reach are reported as not analysed instead of unused (#34).
+- `get_function_map` counts `Functions.Name(...)` expression calls and function map registrations as call sites (#32).
+- `validate_project` lists leftover `.bak` files in `timelines/` and next to `project.c3proj` too, and its `duplicate-uid` advice gives accurate guidance instead of suggesting a re-save in Construct 3 (#31).
+- `list_timelines` returns the editor's transitions separately in `transitions`; the timeline tools refuse to read, change or delete transitions. `create_timeline` rejects unsafe `subfolder` paths and `"transitions"`, and writes new folders in the editor's key order (#22).
+- The `review_game_logic` and `explain_eventsheet` prompts point to `find_runtime_traps` and the pitfalls resource (#20).
+- Runtime tools that change the open project report `success: true` (#21).
+- Documentation: README and `docs/API.md` document every registered tool and the real source tree (#21); `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md` are refreshed to match the code: source tree, write flow (backups, atomic writes, project lock), analyzers and the load-time gate.
+- Event tool input is checked strictly: unknown keys in conditions, actions, sub-events and `update_event_block` entries are refused instead of silently dropped, and comment and script sub-events are written the way the editor saves them (#32).
 
 ### Fixed
 
 - Behavior conditions/actions are written with the `behaviorType` key that Construct 3 reads, instead of `behavior-type`, which made the editor refuse to open the project. `"behavior-type"` is still accepted as a deprecated input alias (#16).
 - Writes keep each file's line endings, trailing newline and BOM instead of rewriting CRLF files with LF (whole-file diffs on Windows checkouts); new files follow the style of `project.c3proj` (#21).
-- Timeline tools find timelines in any `project.c3proj` subfolder, and `update_timeline` writes back to the same file. `delete_timeline` backs up exactly the file it deletes and leaves `project.c3proj` unchanged when that file is missing (#22).
-- Create tools no longer overwrite an existing entity or timeline file whose name differs only in case (Windows, macOS); they refuse to write where a file already exists (#29).
 - Rewriting an existing file keeps its name on disk, including its case, instead of renaming it to the registered spelling (#29).
+- Create tools no longer overwrite an existing entity or timeline file whose name differs only in case (Windows, macOS); they refuse to write where a file already exists (#29).
+- Timeline tools find timelines in any `project.c3proj` subfolder, and `update_timeline` writes back to the same file. `delete_timeline` backs up exactly the file it deletes and leaves `project.c3proj` unchanged when that file is missing (#22).
 - `delete_event_from_sheet`, `update_event_block`, `update_event_block_action`, `update_event_variable` and `move_events_between_sheets` refuse a SID shared by several events in the sheet, dry runs included, and list the candidates, instead of acting on the first match (#30).
 - `validate_project` accepts the editor's Transitions folder in `timelines` instead of reporting a `subfolder-structure` error, so editor-saved projects are no longer `valid: false`; only a nameless folder elsewhere is reported as malformed (#31).
 - `validate_project` skips the editor's `*.uistate.json` files and checks entity files against the path each registered entity is read from (#31).
 - `find_orphaned_objects`, `get_object_dependencies` and `validate_project` count non-world instances, object parameters, expressions and script actions as object uses, so such objects are no longer reported as unused (#31).
 - `delete_object` without `force` no longer deletes object types that are still used as non-world instances, in object parameters, expressions or scripts, on sub-layers, or through object properties of other instances (#35).
 - New instance UIDs are allocated above every UID in the project, sub-layer instances included, and the duplicate UID/SID checks and the dependency and orphan analysis look into sub-layers (#35).
-- `get_asset_usage` reads sprite animations as the editor saves them (`animations.items` and animation subfolders), lists single-image object types as images, and counts an image as used by the same rule as `find_orphaned_objects` (#34).
-- `get_asset_usage` matches sounds, music, fonts, videos and project files to their real uses (Audio file parameters, strings in events, scripts, flowcharts, timelines, properties, CSS font declarations) instead of reporting every file asset as unused (#34).
-- `analyze_performance` counts the frames of editor-saved animations, animation subfolders included (#34).
 - The built-in `Functions` object class (e.g. *Set return value*) is accepted by the event tools and no longer reported as a broken object reference by `validate_project` (#32).
 - `groupPath` finds groups whose titles have leading or trailing whitespace (#32).
 - `update_event_block` no longer warns that all conditions were removed on blocks that never had conditions, such as function blocks (#32).
+- `get_asset_usage` reads sprite animations as the editor saves them (`animations.items` and animation subfolders), lists single-image object types as images, and counts an image as used by the same rule as `find_orphaned_objects` (#34).
+- `get_asset_usage` matches sounds, music, fonts, videos and project files to their real uses (Audio file parameters, strings in events, scripts, flowcharts, timelines, properties, CSS font declarations) instead of reporting every file asset as unused (#34).
+- `analyze_performance` counts the frames of editor-saved animations, animation subfolders included (#34).
 - Placeholder image files are named all lowercase, as the editor names them (`images/<object>-<animation>-000.png`), instead of keeping the case of the animation name (#33).
 - `replace_sprite_image` on a frame stored in another format (e.g. JPEG) sets the frame's `fileType` to PNG to match the new `.png` file and names the old file in a warning (#33).
 - `update_object_properties` and `update_family` no longer remove an instance variable, behavior or family member that conditions, actions or expressions still use: they refuse, list the uses, and go ahead only with `force` (#37).

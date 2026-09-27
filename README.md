@@ -2,11 +2,24 @@
 
 > A Model Context Protocol (MCP) server that enables AI assistants (Claude, Cursor, Antigravity, and any MCP-compatible tool) to safely read, analyze, and modify Construct 3 game engine projects.
 
-> **v1.8.1** — Full M1 primitive surface. See the [Roadmap](#roadmap) and [CHANGELOG](CHANGELOG.md) for details.
+> **v1.9.0** — Writes follow what the Construct 3 editor itself saves and checks: load-time rules before every event sheet write, the editor's event shapes and name rules, and a `validate_project` without the false reports it gave on editor-saved projects. See [What's new in 1.9.0](#whats-new-in-190) and the [CHANGELOG](CHANGELOG.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
+
+## What's new in 1.9.0
+
+- **Editor load-time checks** — `validate_project` checks the rules the Construct 3 editor enforces when it opens a project, and event sheet writes that would add such an error are refused.
+- **Behavior conditions and actions the editor reads** — written with `behaviorType`; `fix_legacy_behavior_keys` repairs sheets from older versions (`behavior-type` is still accepted as a deprecated input alias).
+- **Find events by editor number** — `locate_event` and `get_eventsheet_outline` turn "sheet, event N, action M" into the event's JSON path.
+- **Runtime traps** — `find_runtime_traps`, the `construct3://docs/pitfalls` resource and the `debug_stuck_game` prompt for logic that loads but hangs or fails silently.
+- **Editor-faithful event shapes** — else-if and OR blocks, events without conditions, positional function calls, script lines and the Functions object as the editor saves them; `fix_legacy_event_shapes` converts older sheets.
+- **Safer deletes and editor name rules** — deletes and removals of used behaviors, instance variables and family members are refused, ambiguous SIDs are refused (pick one with `eventPath`), case-only name clashes are refused, and nested sub-layers are supported everywhere.
+- **Accurate reports** — `validate_project`, `find_orphaned_objects`, `get_asset_usage` and `analyze_performance` read editor-saved projects correctly (Transitions folder, animation folders, file assets, non-world instances, sub-layers) instead of reporting false problems.
+- **Byte-faithful writes** — line endings, trailing newline, BOM and file-name case are kept; lowercase image file names and per-instance behavior entries match the editor; every write result carries an `editorNote`.
+
+Full list: [CHANGELOG](CHANGELOG.md).
 
 ## Quick Start
 
@@ -542,6 +555,13 @@ We welcome contributions! Here's how to get started:
 - [x] Addon registry tools (`list_addons`, `register_addon`, `unregister_addon`)
 - [x] Project integrity validation and event group settings
 - [x] `.c3p` packing (`pack_project`) and an end-to-end acceptance test
+
+### Editor Fidelity ✅ (v1.9)
+- [x] Editor load-time checks in `validate_project` and before event sheet writes
+- [x] Event shapes, names, image file names and instance behavior entries as the editor writes them, with repair tools for older sheets
+- [x] Event locator and outline by editor event number, runtime trap analysis and curated pitfalls
+- [x] Reference-checked deletes, ambiguous-SID protection and nested sub-layers in every layout tool
+- [x] Byte-faithful writes (line endings, BOM, file-name case)
 
 ### Phase 7: Advanced Features
 - [ ] Opening .c3p (zipped) projects directly
