@@ -4,6 +4,7 @@ import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerEventTools } from '../../src/tools/event-tools.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -214,30 +215,194 @@ describe('add_event_block', () => {
     expect(data.generatedSid).toBeDefined();
   });
 
-  it('rejects block without conditions', async () => {
-    const { server } = setup({
-      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 10 }]]),
+  it('accepts a top-level block without conditions and warns that it runs every tick', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1',
+        events: [{ eventType: 'group', sid: 50, title: 'Group1', children: [] }],
+        sid: 10,
+      }]]),
     });
-    const result = await server.callTool('add_event_block', {
-      sheetName: 'MainSheet',
-      conditions: [],
-      actions: [],
-    });
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('At least one condition');
+    for (const groupPath of ['Group1', undefined]) {
+      const result = await server.callTool('add_event_block', {
+        sheetName: 'Sheet1',
+        ...(groupPath ? { groupPath } : {}),
+        conditions: [],
+        actions: [{ id: 'set-position', objectClass: 'Sprite1', parameters: { x: '1', y: '2' } }],
+      });
+      const data = parseResult(result);
+      expect(data.success).toBe(true);
+      expect(data.warnings.some((w: string) => w.includes('every tick'))).toBe(true);
+    }
+    const written = writer.callsFor('writeEntityFile').at(-1)!.args[2] as any;
+    expect(written.events[0].children[0].conditions).toEqual([]);
+    expect(written.events[1].conditions).toEqual([]);
+    expect(written.events[1]).not.toHaveProperty('isElse');
   });
 
-  it('allows else block without conditions', async () => {
-    const { server } = setup({
-      eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 10 }]]),
+  it('writes condition-less sub-events without a warning', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', events: [], sid: 10 }]]),
     });
     const result = await server.callTool('add_event_block', {
-      sheetName: 'MainSheet',
-      conditions: [],
-      actions: [{ id: 'log', objectClass: 'System' }],
-      isElse: true,
+      sheetName: 'Sheet1',
+      conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      children: [{ conditions: [], actions: [{ id: 'set-position', objectClass: 'Sprite1', parameters: { x: '1', y: '2' } }] }],
     });
-    expect(parseResult(result).success).toBe(true);
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+    const child = (writer.callsFor('writeEntityFile')[0].args[2] as any).events.at(-1).children[0];
+    expect(child.conditions).toEqual([]);
+    expect(typeof child.actions[0].sid).toBe('number');
+    expect(child).not.toHaveProperty('isElse');
+  });
+
+  it('does not tell callers to set isElse', () => {
+    const { server } = setup();
+    const tool = (server as any).tools.get('add_event_block');
+    expect(tool.description).not.toMatch(/set isElse/);
+    expect(JSON.stringify(Object.values(tool.schema).map((s: any) => s.description))).not.toMatch(/conditions become optional/);
+  });
+
+  it('writes else blocks as a System "else" first condition, with else-if conditions after it', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', events: [], sid: 10 }]]),
+    });
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      children: [
+        { conditions: [{ id: 'is-visible', objectClass: 'Sprite1' }] },
+        { isElse: true, conditions: [{ id: 'compare-two-values', objectClass: 'System', parameters: { 'first-value': '1', comparison: 0, 'second-value': '1' } }] },
+        { isElse: true, actions: [{ id: 'set-visible', objectClass: 'Sprite1', parameters: { visibility: 'visible' } }] },
+      ],
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.warnings?.some((w: string) => /ignores conditions/.test(w)) ?? false).toBe(false);
+
+    const block = (writer.callsFor('writeEntityFile')[0].args[2] as any).events.at(-1);
+    for (const child of block.children.slice(1)) {
+      expect(child.conditions[0]).toEqual({ id: 'else', objectClass: 'System', sid: expect.any(Number) });
+    }
+    expect(block.children[1].conditions[1].id).toBe('compare-two-values');
+    expect(JSON.stringify(block)).not.toContain('isElse');
+  });
+
+  it('warns when an else block has no block before it', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1',
+        events: [{ eventType: 'block', sid: 20, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 21 }], actions: [] }],
+        sid: 10,
+      }]]),
+    });
+    const atStart = parseResult(await server.callTool('add_event_block', { sheetName: 'Sheet1', isElse: true, position: 'start' }));
+    expect(atStart.success).toBe(true);
+    expect(atStart.warnings.some((w: string) => w.includes('no event comes before it'))).toBe(true);
+
+    const afterBlock = parseResult(await server.callTool('add_event_block', { sheetName: 'Sheet1', isElse: true }));
+    expect(afterBlock.warnings?.some((w: string) => w.includes('before it')) ?? false).toBe(false);
+  });
+
+  it('writes OR blocks with isOrBlock and no per-condition isOr key', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', events: [], sid: 10 }]]),
+    });
+    const viaFlag = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [{ id: 'is-visible', objectClass: 'Sprite1' }, { id: 'is-on-screen', objectClass: 'Sprite1' }],
+      isOrBlock: true,
+    }));
+    expect(viaFlag.success).toBe(true);
+    const legacy = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [{ id: 'is-visible', objectClass: 'Sprite1' }, { id: 'is-on-screen', objectClass: 'Sprite1', isOr: true }],
+    }));
+    expect(legacy.success).toBe(true);
+    expect(legacy.warnings.some((w: string) => w.includes('isOrBlock: true'))).toBe(true);
+
+    const events = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events;
+    for (const block of events) {
+      expect(block.isOrBlock).toBe(true);
+      expect(block.conditions.some((c: any) => 'isOr' in c)).toBe(false);
+    }
+  });
+
+  it('refuses mixed isOr flags and writes nothing', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', events: [], sid: 10 }]]),
+    });
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [
+        { id: 'is-visible', objectClass: 'Sprite1' },
+        { id: 'is-on-screen', objectClass: 'Sprite1' },
+        { id: 'is-mirrored', objectClass: 'Sprite1', isOr: true },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('isOrBlock: true');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('writes function calls, script actions and comment rows in the editor shapes', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1',
+        events: [{
+          eventType: 'function-block', functionName: 'fn1', sid: 5, conditions: [], actions: [],
+          functionParameters: [
+            { name: 'p1', type: 'number', initialValue: '0', comment: '', sid: 6 },
+            { name: 'p2', type: 'boolean', initialValue: 'false', comment: '', sid: 7 },
+          ],
+        }],
+        sid: 10,
+      }]]),
+    });
+    const data = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [
+        { callFunction: 'fn1', parameters: ['1', true] },
+        { type: 'script', script: 'const a = 1;\nconsole.log(a);' },
+        { type: 'comment', text: 'note' },
+      ],
+    }));
+    expect(data.success).toBe(true);
+    const actions = (writer.callsFor('writeEntityFile')[0].args[2] as any).events.at(-1).actions;
+    expect(Object.keys(actions[0])).toEqual(['callFunction', 'sid', 'parameters']);
+    expect(actions[0].parameters).toEqual(['1', true]);
+    expect(actions[1]).toEqual({ type: 'script', language: 'javascript', script: ['const a = 1;', 'console.log(a);'] });
+    expect(actions[2]).toEqual({ type: 'comment', text: 'note' });
+  });
+
+  it('lints the positional arguments of function calls before writing', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1',
+        events: [{
+          eventType: 'function-block', functionName: 'fn1', sid: 5, conditions: [], actions: [],
+          functionParameters: [{ name: 'p1', type: 'string', initialValue: '', comment: '', sid: 6 }],
+        }],
+        sid: 10,
+      }]]),
+    });
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+      actions: [{ callFunction: 'fn1', parameters: ['"unterminated'] }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('unterminated string literal');
+    expect(result.content[0].text).toContain('call function "fn1"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 
   it('errors on missing event sheet', async () => {
@@ -914,7 +1079,67 @@ describe('update_event_block', () => {
     const data = parseResult(result);
     expect(data.success).toBe(true);
     expect(data.warnings).toBeDefined();
-    expect(data.warnings.some((w: string) => w.includes('unconditionally'))).toBe(true);
+    expect(data.warnings.some((w: string) => w.includes('conditions were removed') && w.includes('runs whenever'))).toBe(true);
+  });
+
+  it('does not warn about removed conditions on a function block that never had any', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [{
+          eventType: 'function-block', functionName: 'fn1', functionParameters: [], sid: 100, conditions: [],
+          actions: [{ id: 'a', objectClass: 'System', sid: 20, parameters: { v: '1' } }],
+        }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 100, updateActions: [{ index: 0, parameters: { v: '2' } }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings?.some((w: string) => w.includes('conditions were removed')) ?? false).toBe(false);
+  });
+
+  it('does not warn about removed conditions when toggling a condition-less sub-event', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [{
+          eventType: 'block', sid: 100, conditions: [{ id: 'x', objectClass: 'System', sid: 10 }], actions: [],
+          children: [{ eventType: 'block', sid: 200, conditions: [], actions: [] }],
+        }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 200, disabled: true }));
+    expect(data.success).toBe(true);
+    expect(data.warnings?.some((w: string) => w.includes('conditions were removed')) ?? false).toBe(false);
+  });
+
+  it('warns when removing the else condition leaves no condition', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [
+          { eventType: 'block', sid: 200, conditions: [{ id: 'x', objectClass: 'System', sid: 20 }], actions: [] },
+          { eventType: 'block', sid: 300, conditions: [{ id: 'else', objectClass: 'System', sid: 30 }], actions: [] },
+        ],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 300, removeConditionIndices: [0] }));
+    expect(data.warnings.some((w: string) => w.includes('conditions were removed'))).toBe(true);
+  });
+
+  it('uses function wording when a function block loses its last condition', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [{
+          eventType: 'function-block', functionName: 'fn1', functionParameters: [], sid: 100,
+          conditions: [{ id: 'x', objectClass: 'System', sid: 10 }], actions: [],
+        }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 100, removeConditionIndices: [0] }));
+    expect(data.warnings.some((w: string) => w.includes('function body'))).toBe(true);
   });
 
   it('does not falsely warn when removing all conditions but adding new ones', async () => {
@@ -939,8 +1164,158 @@ describe('update_event_block', () => {
     const data = parseResult(result);
     expect(data.success).toBe(true);
     // Should NOT warn about unconditional — we added a replacement condition
-    const hasUnconditionalWarning = data.warnings?.some((w: string) => w.includes('unconditionally')) ?? false;
+    const hasUnconditionalWarning = data.warnings?.some((w: string) => w.includes('conditions were removed')) ?? false;
     expect(hasUnconditionalWarning).toBe(false);
+  });
+
+  it('writes disabled right after sid when toggling actions and conditions', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [{
+          eventType: 'block', sid: 10,
+          conditions: [{ id: 'is-visible', objectClass: 'Sprite1', sid: 3, parameters: { a: '1' } }],
+          actions: [
+            { id: 'set-position', objectClass: 'Sprite1', sid: 2, parameters: { x: '1', y: '2' } },
+            { type: 'script', language: 'javascript', script: ['1;'] },
+          ],
+        }],
+      }]]),
+    });
+    await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 10,
+      updateActions: [{ index: 0, disabled: true }, { index: 1, disabled: true }],
+      updateConditions: [{ index: 0, disabled: true }],
+    });
+    let block = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events[0];
+    expect(Object.keys(block.actions[0])).toEqual(['id', 'objectClass', 'sid', 'disabled', 'parameters']);
+    expect(Object.keys(block.actions[1])).toEqual(['type', 'language', 'script', 'disabled']);
+    expect(Object.keys(block.conditions[0])).toEqual(['id', 'objectClass', 'sid', 'disabled', 'parameters']);
+
+    await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 0, disabled: false }] });
+    block = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events[0];
+    expect(Object.keys(block.actions[0])).toEqual(['id', 'objectClass', 'sid', 'parameters']);
+  });
+
+  it('adds actions in the editor shapes and keeps existing script lines as they are', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [
+          {
+            eventType: 'function-block', functionName: 'fn1', sid: 5, conditions: [], actions: [],
+            functionParameters: [{ name: 'p1', type: 'number', initialValue: '0', comment: '', sid: 6 }],
+          },
+          {
+            eventType: 'block', sid: 10,
+            conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 11 }],
+            actions: [
+              { type: 'script', language: 'javascript', script: ['tag1();', ''] },
+              { id: 'wait', objectClass: 'System', sid: 12, parameters: { seconds: '1' } },
+            ],
+          },
+        ],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 10,
+      updateActions: [{ index: 1, parameters: { seconds: '2' } }],
+      addActions: [
+        { type: 'script', script: 'a();\nb();' },
+        { callFunction: 'fn1', parameters: ['1'] },
+        { id: 'call-function', objectClass: 'System', callFunction: 'fn1', parameters: { p1: '2' } },
+      ],
+    }));
+    expect(data.success).toBe(true);
+    const actions = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[1].actions;
+    expect(actions[0]).toEqual({ type: 'script', language: 'javascript', script: ['tag1();', ''] });
+    expect(actions[2]).toEqual({ type: 'script', language: 'javascript', script: ['a();', 'b();'] });
+    expect(Object.keys(actions[3])).toEqual(['callFunction', 'sid', 'parameters']);
+    expect(actions[4]).toEqual({ callFunction: 'fn1', sid: expect.any(Number), parameters: ['2'] });
+  });
+
+  it('merges function call arguments by position or name and keeps them an array', async () => {
+    const sheet = () => new Map([['Sheet1', {
+      name: 'Sheet1', sid: 1,
+      events: [
+        {
+          eventType: 'function-block', functionName: 'fn1', sid: 5, conditions: [], actions: [],
+          functionParameters: [
+            { name: 'p1', type: 'number', initialValue: '0', comment: '', sid: 1 },
+            { name: 'p2', type: 'boolean', initialValue: 'false', comment: '', sid: 2 },
+          ],
+        },
+        { eventType: 'block', sid: 10, conditions: [], actions: [{ callFunction: 'fn1', sid: 11, parameters: ['1', true] }] },
+      ],
+    }]]);
+    let ctx = setup({ eventSheets: sheet() });
+    let data = parseResult(await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 0, parameters: { 0: '2' } }] }));
+    expect(data.success).toBe(true);
+    let act = (ctx.writer.callsFor('writeEntityFile')[0].args[2] as any).events[1].actions[0];
+    expect(act.parameters).toEqual(['2', true]);
+
+    ctx = setup({ eventSheets: sheet() });
+    await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 0, parameters: { p2: false } }] });
+    act = (ctx.writer.callsFor('writeEntityFile')[0].args[2] as any).events[1].actions[0];
+    expect(act.parameters).toEqual(['1', false]);
+
+    ctx = setup({ eventSheets: sheet() });
+    await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 0, parameters: ['3', true] }] });
+    act = (ctx.writer.callsFor('writeEntityFile')[0].args[2] as any).events[1].actions[0];
+    expect(act).toEqual({ callFunction: 'fn1', sid: 11, parameters: ['3', true] });
+
+    ctx = setup({ eventSheets: sheet() });
+    const bad = await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 0, parameters: { p9: '1' } }] });
+    expect(bad.isError).toBe(true);
+    expect(ctx.writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('makes a block an else block and back, dropping a legacy isElse key', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [
+          { eventType: 'block', sid: 10, conditions: [{ id: 'x', objectClass: 'System', sid: 11 }], actions: [] },
+          { eventType: 'block', sid: 20, conditions: [{ id: 'y', objectClass: 'System', sid: 21 }], actions: [], isElse: true },
+        ],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 20, isElse: true }));
+    expect(data.success).toBe(true);
+    let block = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events[1];
+    expect(block.conditions.map((c: any) => c.id)).toEqual(['else', 'y']);
+    expect(block).not.toHaveProperty('isElse');
+    expect(data.warnings.some((w: string) => w.includes('dropped the block-level "isElse" key'))).toBe(true);
+
+    await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 20, isElse: false });
+    block = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events[1];
+    expect(block.conditions.map((c: any) => c.id)).toEqual(['y']);
+  });
+
+  it('toggles isOrBlock and refuses isOr on added conditions of an AND block', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [{ eventType: 'block', sid: 10, conditions: [{ id: 'x', objectClass: 'System', sid: 11 }], actions: [] }],
+      }]]),
+    });
+    const refused = await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 10, addConditions: [{ id: 'y', objectClass: 'System', isOr: true }],
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('isOrBlock: true');
+
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 10, isOrBlock: true, addConditions: [{ id: 'y', objectClass: 'System', isOr: true }],
+    }));
+    expect(data.success).toBe(true);
+    let block = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events[0];
+    expect(block.isOrBlock).toBe(true);
+    expect(block.conditions.some((c: any) => 'isOr' in c)).toBe(false);
+
+    await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, isOrBlock: false });
+    block = (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events[0];
+    expect(block).not.toHaveProperty('isOrBlock');
   });
 });
 
@@ -1150,6 +1525,52 @@ describe('update_event_block_action', () => {
     const block = (group.children as Record<string, unknown>[])[0];
     const action = (block.actions as Record<string, unknown>[])[0];
     expect((action.parameters as Record<string, unknown>).speed).toBe('200');
+  });
+
+  function callSheet(call: Record<string, unknown>) {
+    return new Map([['Sheet1', {
+      name: 'Sheet1', sid: 1,
+      events: [
+        {
+          eventType: 'function-block', functionName: 'fn1', sid: 5, conditions: [], actions: [],
+          functionParameters: [
+            { name: 'p1', type: 'number', initialValue: '0', comment: '', sid: 1 },
+            { name: 'p2', type: 'boolean', initialValue: 'false', comment: '', sid: 2 },
+          ],
+        },
+        { eventType: 'block', sid: 10, conditions: [], actions: [call, { id: 'wait', objectClass: 'System', sid: 12, parameters: { seconds: '1' } }] },
+      ],
+    }]]);
+  }
+
+  it('writes function call arguments as an array, from an array or a keyed object', async () => {
+    for (const parameters of [['3', false], { 0: '3', 1: false }, { p1: '3', p2: false }]) {
+      const { server, writer } = setup({ eventSheets: callSheet({ callFunction: 'fn1', sid: 11, parameters: ['1', true] }) });
+      const data = parseResult(await server.callTool('update_event_block_action', { sheetName: 'Sheet1', blockSid: 10, actionIndex: 0, parameters }));
+      expect(data.success).toBe(true);
+      expect(data.callFunction).toBe('fn1');
+      const act = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[1].actions[0];
+      expect(act).toEqual({ callFunction: 'fn1', sid: 11, parameters: ['3', false] });
+    }
+  });
+
+  it('rewrites a call stored in the old shape into the editor shape', async () => {
+    const { server, writer } = setup({
+      eventSheets: callSheet({ id: 'call-function', objectClass: 'System', sid: 11, parameters: { 0: '1', 1: true }, callFunction: 'fn1' }),
+    });
+    const data = parseResult(await server.callTool('update_event_block_action', { sheetName: 'Sheet1', blockSid: 10, actionIndex: 0, parameters: ['2', true] }));
+    expect(data.warnings.some((w: string) => w.includes('old shape'))).toBe(true);
+    const act = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[1].actions[0];
+    expect(Object.keys(act)).toEqual(['callFunction', 'sid', 'parameters']);
+    expect(act.parameters).toEqual(['2', true]);
+  });
+
+  it('refuses an argument array for an action that is not a function call', async () => {
+    const { server, writer } = setup({ eventSheets: callSheet({ callFunction: 'fn1', sid: 11, parameters: ['1', true] }) });
+    const result = await server.callTool('update_event_block_action', { sheetName: 'Sheet1', blockSid: 10, actionIndex: 1, parameters: ['2'] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not a function call');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 });
 
@@ -1926,6 +2347,295 @@ describe('fix_legacy_behavior_keys', () => {
   });
 });
 
+describe('fix_legacy_event_shapes', () => {
+  /** A sheet with every legacy shape: two convertible, one needing a decision by hand. */
+  function legacyShapes() {
+    return new Map([['Sheet1', {
+      name: 'Sheet1', sid: 1,
+      events: [
+        { eventType: 'block', sid: 10, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 11 }], actions: [] },
+        { eventType: 'block', sid: 20, conditions: [], actions: [{ id: 'a', objectClass: 'System', sid: 21 }], isElse: true },
+        {
+          eventType: 'block', sid: 30,
+          conditions: [
+            { id: 'is-visible', objectClass: 'Sprite1', sid: 31 },
+            { id: 'is-on-screen', objectClass: 'Sprite1', sid: 32, isOr: true },
+          ],
+          actions: [],
+        },
+      ],
+    }], ['Sheet2', {
+      name: 'Sheet2', sid: 2,
+      events: [{ eventType: 'block', sid: 40, conditions: [], actions: [], isElse: true }],
+    }]]);
+  }
+
+  it('registers the tool', () => {
+    const { server } = setup();
+    expect(server.hasTool('fix_legacy_event_shapes')).toBe(true);
+  });
+
+  it('defaults to a dry run that lists both flags without writing', async () => {
+    const { server, writer } = setup({ eventSheets: legacyShapes() });
+    const data = parseResult(await server.callTool('fix_legacy_event_shapes', {}));
+    expect(data.dryRun).toBe(true);
+    expect(data.totalConverted).toBe(2);
+    expect(data.totalManual).toBe(1);
+    expect(data.sheets[0].changes.map((c: any) => c.kind)).toEqual(['isElse', 'isOr']);
+    expect(data.sheets[1].manual[0]).toMatchObject({ kind: 'isElse', path: 'events[0]', sid: 40 });
+    expect(data.message).toContain('Run again with dryRun: false');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('converts the unambiguous shapes and leaves the rest', async () => {
+    const { server, writer } = setup({ eventSheets: legacyShapes() });
+    const data = parseResult(await server.callTool('fix_legacy_event_shapes', { dryRun: false }));
+    expect(data.success).toBe(true);
+    expect(data.totalConverted).toBe(2);
+    // Only the sheet with convertible shapes is written (and backed up)
+    const writes = writer.callsFor('writeEntityFile');
+    expect(writes.map(w => w.args[1])).toEqual(['Sheet1']);
+    expect(data.sheets[0].backupFile).toBeDefined();
+
+    const events = (writes[0].args[2] as any).events;
+    expect(events[1].conditions[0]).toEqual({ id: 'else', objectClass: 'System', sid: expect.any(Number) });
+    expect(events[1]).not.toHaveProperty('isElse');
+    expect(events[2].isOrBlock).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('"isOr"');
+  });
+
+  it('says which conversions can change what the game does', async () => {
+    const { server } = setup({ eventSheets: legacyShapes() });
+    const data = parseResult(await server.callTool('fix_legacy_event_shapes', {}));
+    expect(data.totalBehaviorChanges).toBe(2);
+    expect(data.sheets[0].changes.every((c: any) => c.changesBehavior === true)).toBe(true);
+    expect(data.sheets[0].changes[0].detail).toMatch(/Test the event in the game/);
+    expect(data.message).toContain('2 of them (else and OR blocks) can change how the event runs');
+  });
+
+  it('converts scripts stored as one string, without a behavior note', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [{
+          eventType: 'block', sid: 10, conditions: [], actions: [{ type: 'script', script: 'a();\nb();', disabled: true }],
+        }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('fix_legacy_event_shapes', { dryRun: false }));
+    expect(data.totalConverted).toBe(1);
+    expect(data.totalBehaviorChanges).toBe(0);
+    expect(data.message).not.toContain('change how the event runs');
+    const action = (writer.callsFor('writeEntityFile')[0].args[2] as any).events[0].actions[0];
+    expect(action).toEqual({ type: 'script', language: 'javascript', script: ['a();', 'b();'], disabled: true });
+    expect(Object.keys(action)).toEqual(['type', 'language', 'script', 'disabled']);
+  });
+
+  it('leaves an isElse block after a triggered block for a decision by hand', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 1,
+        events: [
+          { eventType: 'block', sid: 10, conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 11 }], actions: [] },
+          { eventType: 'block', sid: 20, conditions: [], actions: [], isElse: true },
+        ],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('fix_legacy_event_shapes', { dryRun: false }));
+    expect(data.totalConverted).toBe(0);
+    expect(data.sheets[0].manual[0].detail).toContain('triggered by "on-start-of-layout"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('reports a clean project without writing', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', sid: 1, events: [{ eventType: 'block', sid: 10, conditions: [], actions: [] }] }]]),
+    });
+    const data = parseResult(await server.callTool('fix_legacy_event_shapes', { dryRun: false }));
+    expect(data.totalConverted).toBe(0);
+    expect(data.message).toBe('No legacy event shapes found.');
+    expect(data.editorNote).toBeUndefined();
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+});
+
+describe('event tool fixes from the #32 review', () => {
+  const every = (sid: number) => ({ id: 'every-tick', objectClass: 'System', sid });
+  const onStart = (sid: number) => ({ id: 'on-start-of-layout', objectClass: 'System', sid });
+  const written = (writer: MockWriter) => (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events;
+
+  it('warns when add_event_block puts an else block after a triggered event', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 1 }]]),
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 2, events: [{ eventType: 'block', sid: 10, conditions: [onStart(11)], actions: [] }],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', isElse: true, actions: [{ id: 'set-visible', objectClass: 'Sprite1', parameters: { visibility: 'visible' } }],
+    }));
+    expect(data.success).toBe(true);
+    const warning = data.warnings.find((w: string) => w.includes('Else block'));
+    expect(warning).toContain('triggered by "on-start-of-layout"');
+    expect(warning).toContain('Else can only follow normal (non-triggered) events');
+    expect(writtenEvents(writer)[1].conditions[0].id).toBe('else');
+  });
+
+  it('gives else-aware advice for an else-if holding a trigger', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', sid: 2, events: [{ eventType: 'block', sid: 10, conditions: [every(11)], actions: [] }] }]]),
+    });
+    const data = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', isElse: true, conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toHaveLength(1);
+    expect(data.warnings[0]).toContain('holds the trigger "on-start-of-layout"');
+    expect(data.warnings[0]).not.toContain('Put the trigger first');
+  });
+
+  it('warns about an else block as first sub-event, once', async () => {
+    const { server } = setup({ eventSheets: new Map([['Sheet1', { name: 'Sheet1', sid: 2, events: [] }]]) });
+    const data = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      children: [{ isElse: true }, { conditions: [{ id: 'every-tick', objectClass: 'System' }] }, { isElse: true }],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.filter((w: string) => w.includes('Else block'))).toHaveLength(1);
+    expect(data.warnings[0]).toContain('no event comes before it');
+  });
+
+  it('adds an else block after a block and a trailing comment without an else-placement warning', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 2, events: [
+          { eventType: 'block', sid: 10, conditions: [every(11)], actions: [] },
+          { eventType: 'comment', text: 'otherwise' },
+        ],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('add_event_block', { sheetName: 'Sheet1', isElse: true, position: 'end' }));
+    expect(data.success).toBe(true);
+    expect((data.warnings ?? []).filter((w: string) => w.includes('Else block'))).toEqual([]);
+    expect(writtenEvents(writer).map((e: any) => e.eventType)).toEqual(['block', 'comment', 'block']);
+    expect(writtenEvents(writer)[2].conditions[0].id).toBe('else');
+  });
+
+  it('warns when update_event_block makes a block after a trigger an else block', async () => {
+    const { server } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 2,
+        events: [
+          { eventType: 'block', sid: 10, conditions: [onStart(11)], actions: [] },
+          { eventType: 'block', sid: 20, conditions: [], actions: [] },
+        ],
+      }]]),
+    });
+    const data = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 20, isElse: true }));
+    expect(data.success).toBe(true);
+    expect(data.warnings.filter((w: string) => w.includes('triggered by "on-start-of-layout"'))).toHaveLength(1);
+  });
+
+  it('writes a block\'s disabled right after sid, also with children and isOrBlock', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 2,
+        events: [{
+          eventType: 'block', conditions: [every(11), every(12)], actions: [], sid: 10,
+          children: [{ eventType: 'block', conditions: [], actions: [], sid: 13 }], isOrBlock: true,
+        }],
+      }]]),
+    });
+    expect(parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, disabled: true })).success).toBe(true);
+    expect(Object.keys(writtenEvents(writer)[0])).toEqual(['eventType', 'conditions', 'actions', 'sid', 'disabled', 'children', 'isOrBlock']);
+  });
+
+  it('refuses parameters on comment rows and script actions, and disabling comment rows', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 2,
+        events: [{
+          eventType: 'block', sid: 10, conditions: [every(11)],
+          actions: [{ type: 'comment', text: 'note' }, { type: 'script', language: 'javascript', script: ['x();'] }],
+        }],
+      }]]),
+    });
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ['update_event_block_action', { blockSid: 10, actionIndex: 0, parameters: { x: '1' } }],
+      ['update_event_block_action', { blockSid: 10, actionIndex: 1, parameters: { x: '1' } }],
+      ['update_event_block', { sid: 10, updateActions: [{ index: 0, parameters: { x: '1' } }] }],
+      ['update_event_block', { sid: 10, updateActions: [{ index: 1, parameters: { x: '1' } }] }],
+      ['update_event_block', { sid: 10, updateActions: [{ index: 0, disabled: true }] }],
+    ];
+    for (const [tool, args] of calls) {
+      const result = await server.callTool(tool, { sheetName: 'Sheet1', ...args });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/comment row|script action/);
+    }
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    // Disabling a script action is fine: editor saves carry "disabled" on script actions
+    const ok = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 1, disabled: true }] }));
+    expect(ok.success).toBe(true);
+    expect(writtenEvents(writer)[0].actions[1]).toEqual({ type: 'script', language: 'javascript', script: ['x();'], disabled: true });
+  });
+
+  it('handles an added else condition by where it lands', async () => {
+    const sheets = () => new Map([['Sheet1', {
+      name: 'Sheet1', sid: 2,
+      events: [
+        { eventType: 'block', sid: 10, conditions: [every(11)], actions: [] },
+        { eventType: 'block', sid: 20, conditions: [], actions: [] },
+        { eventType: 'block', sid: 30, conditions: [every(31)], actions: [] },
+      ],
+    }]]);
+    const elseCond = { id: 'else', objectClass: 'System' };
+
+    // On a block without conditions it lands first: no warning
+    let ctx = setup({ eventSheets: sheets() });
+    let data = parseResult(await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 20, isElse: true, addConditions: [elseCond] }));
+    expect(data.warnings).toBeUndefined();
+    expect(written(ctx.writer)[1].conditions.map((c: any) => c.id)).toEqual(['else']);
+
+    // With isElse: true on a block with conditions it would be a second one: dropped
+    ctx = setup({ eventSheets: sheets() });
+    data = parseResult(await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 30, isElse: true, addConditions: [elseCond] }));
+    expect(written(ctx.writer)[2].conditions.map((c: any) => c.id)).toEqual(['else', 'every-tick']);
+    expect(data.warnings.some((w: string) => w.includes('dropped the added System "else" condition'))).toBe(true);
+
+    // Otherwise it lands after the existing conditions, with a warning
+    ctx = setup({ eventSheets: sheets() });
+    data = parseResult(await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 30, addConditions: [elseCond] }));
+    expect(data.warnings.some((w: string) => w.includes('goes after the existing conditions'))).toBe(true);
+  });
+
+  it('writes a call with the function\'s spelling of its name in the update tools', async () => {
+    const sheets = () => new Map([['Sheet1', {
+      name: 'Sheet1', sid: 2,
+      events: [
+        {
+          eventType: 'function-block', functionName: 'DoThing', sid: 5, conditions: [], actions: [],
+          functionParameters: [{ name: 'p1', type: 'number', initialValue: '0', comment: '', sid: 6 }],
+        },
+        { eventType: 'block', sid: 10, conditions: [every(11)], actions: [{ callFunction: 'dothing', sid: 12, parameters: ['1'] }] },
+      ],
+    }]]);
+    let ctx = setup({ eventSheets: sheets() });
+    let data = parseResult(await ctx.server.callTool('update_event_block_action', { sheetName: 'Sheet1', blockSid: 10, actionIndex: 0, parameters: ['2'] }));
+    expect(written(ctx.writer)[1].actions[0]).toEqual({ callFunction: 'DoThing', sid: 12, parameters: ['2'] });
+    expect(data.warnings.some((w: string) => w.includes('defined as "DoThing"'))).toBe(true);
+    expect(data.callFunction).toBe('DoThing');
+
+    ctx = setup({ eventSheets: sheets() });
+    data = parseResult(await ctx.server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 10, updateActions: [{ index: 0, parameters: ['3'] }], addActions: [{ callFunction: 'DOTHING', parameters: ['4'] }],
+    }));
+    const actions = written(ctx.writer)[1].actions;
+    expect(actions.map((a: any) => a.callFunction)).toEqual(['DoThing', 'DoThing']);
+    expect(data.warnings.filter((w: string) => w.includes('defined as "DoThing"'))).toHaveLength(2);
+  });
+});
+
 describe('editor load-time rules (pre-write)', () => {
   /** Keyboard + Player (Sprite) objects, both Scirra addons, and the given sheet events. */
   function setupSheet(events: unknown[], extra: Record<string, unknown> = {}) {
@@ -2050,19 +2760,40 @@ describe('editor load-time rules (pre-write)', () => {
     expect(data.warnings.some((w: string) => w.includes('on-collision-with-another-object'))).toBe(true);
   });
 
-  it('add_event_block rejects triggers combined with isOr and says what to do instead', async () => {
+  it('add_event_block rejects two triggers in an AND block and names both ways out', async () => {
     const { server } = setupSheet([]);
     const result = await server.callTool('add_event_block', {
       sheetName: 'MainSheet',
       conditions: [
         { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } },
-        { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 38 }, isOr: true },
+        { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 38 } },
       ],
     });
     expect(result.isError).toBe(true);
     const text = result.content[0].text;
     expect(text).toContain('separate events');
-    expect(text).not.toContain('"isOrBlock": true');
+    expect(text).toContain('isOrBlock: true');
+  });
+
+  it('add_event_block accepts several triggers in an OR block, also from the legacy isOr flags', async () => {
+    for (const input of [
+      { isOrBlock: true, second: {} },
+      { second: { isOr: true } },
+    ]) {
+      const { server, writer } = setupSheet([]);
+      const result = await server.callTool('add_event_block', {
+        sheetName: 'MainSheet',
+        ...(input.isOrBlock ? { isOrBlock: true } : {}),
+        conditions: [
+          { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 32 } },
+          { id: 'on-key-pressed', objectClass: 'Keyboard', parameters: { key: 38 }, ...input.second },
+        ],
+      });
+      expect(parseResult(result).success).toBe(true);
+      const block = (writer.callsFor('writeEntityFile')[0].args[2] as any).events.at(-1);
+      expect(block.isOrBlock).toBe(true);
+      expect(JSON.stringify(block)).not.toContain('"isOr"');
+    }
   });
 
   it('add_event_block rejects a trigger sub-event under a trigger', async () => {
@@ -2853,5 +3584,508 @@ describe('SID-addressed tools with duplicate event SIDs (issue #30)', () => {
         'refuse this SID in "TargetSheet" unless eventPath names one of the events.',
       ]);
     });
+  });
+});
+
+// ─── More editor shapes (#32) ────────────────────────────────
+
+const writtenEvents = (writer: MockWriter) => (writer.callsFor('writeEntityFile').at(-1)!.args[2] as any).events;
+
+/** One sheet "Sheet1" with the given events and an object type "Hero". */
+function sheetWith(events: unknown[], extra: Record<string, unknown> = {}) {
+  return setup({
+    objects: new Map([['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 1 }]]),
+    eventSheets: new Map([['Sheet1', { name: 'Sheet1', sid: 2, events }]]),
+    ...extra,
+  });
+}
+
+describe('built-in Functions object (#32)', () => {
+  const setReturn = (value: string) => ({ id: 'set-function-return-value', objectClass: 'Functions', parameters: { value } });
+  const onStart = (sid: number) => ({ id: 'on-start-of-layout', objectClass: 'System', sid });
+  /** A function block that returns a number, in the editor's key order. */
+  const fnBlock = (sid: number, children: unknown[] = []) => ({
+    functionName: 'Twice', functionDescription: '', functionCategory: '', functionReturnType: 'number',
+    functionCopyPicked: false, functionIsAsync: false,
+    functionParameters: [{ name: 'n', type: 'number', initialValue: '0', comment: '', sid: sid + 1 }],
+    eventType: 'function-block', conditions: [], actions: [], sid, children,
+  });
+
+  it('update_event_block adds Set return value to a function block in the editor\'s shape', async () => {
+    const { server, writer } = sheetWith([fnBlock(10)]);
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 10, addActions: [setReturn('n * 2')],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+    const action = writtenEvents(writer)[0].actions[0];
+    expect(Object.keys(action)).toEqual(['id', 'objectClass', 'sid', 'parameters']);
+    expect(action).toMatchObject(setReturn('n * 2'));
+  });
+
+  it('update_event_block adds it to a sub-event of a function without a warning', async () => {
+    const { server } = sheetWith([fnBlock(10, [{ eventType: 'block', sid: 20, conditions: [], actions: [] }])]);
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 20, addActions: [setReturn('0')],
+    }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+  });
+
+  it('warns (does not refuse) when Set return value goes outside a function block', async () => {
+    const { server, writer } = sheetWith([{ eventType: 'block', sid: 30, conditions: [], actions: [] }]);
+    const updated = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 30, addActions: [setReturn('1')],
+    }));
+    expect(updated.success).toBe(true);
+    expect(updated.warnings).toEqual([expect.stringContaining('is not inside a function block')]);
+
+    const added = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', conditions: [{ id: 'every-tick', objectClass: 'System' }], actions: [setReturn('1')],
+    }));
+    expect(added.success).toBe(true);
+    expect(added.warnings).toEqual([expect.stringContaining('is not inside a function block')]);
+    expect(writtenEvents(writer).at(-1).actions[0]).toMatchObject(setReturn('1'));
+  });
+
+  it('accepts the function map actions and refuses "Functions" when the project names the object differently', async () => {
+    const { server, reader } = sheetWith([fnBlock(10)]);
+    const map = { id: 'map-function', objectClass: 'Functions', parameters: { name: '"ops"', string: '"twice"', function: 'Twice' } };
+    const ok = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, addActions: [map] }));
+    expect(ok.success).toBe(true);
+
+    const base = (reader as any).getProject.bind(reader);
+    (reader as any).getProject = () => ({ ...base(), functionsName: 'Fn' });
+    const refused = await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 10, addActions: [setReturn('1')] });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('This project names the built-in Functions object "Fn"');
+  });
+
+  it('keeps a function registered in a function map from being deleted without force', async () => {
+    resetProjectIndex();
+    const { server, writer } = sheetWith([
+      fnBlock(10),
+      { eventType: 'block', sid: 90, conditions: [onStart(91)], actions: [
+        { id: 'map-function', objectClass: 'Functions', sid: 92, parameters: { name: '"ops"', string: '"twice"', function: 'Twice' } },
+      ] },
+    ]);
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10 }));
+    expect(data.success).toBe(false);
+    expect(data.action).toBe('delete_blocked');
+    expect(data.message).toContain('Function "Twice" is still referenced 1 time(s) outside the deleted events (1 function map registration(s))');
+    expect(data.references.callers).toEqual([
+      { function: 'Twice', via: 'function-map', sheet: 'Sheet1', path: 'block > action:0', sid: 90 },
+    ]);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    resetProjectIndex();
+  });
+
+  it('writes the mapped function with its defined spelling and warns about an unknown one', async () => {
+    const map = (fn: string) => ({ id: 'map-function', objectClass: 'Functions', parameters: { name: '"ops"', string: '"x"', function: fn } });
+    const { server, writer } = sheetWith([fnBlock(10), { eventType: 'block', sid: 30, conditions: [onStart(31)], actions: [] }]);
+    const cased = parseResult(await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 30, addActions: [map('twice')] }));
+    expect(cased.success).toBe(true);
+    expect(cased.warnings).toEqual([expect.stringContaining('the function is defined as "Twice", so the function map was written with that spelling')]);
+    expect(writtenEvents(writer)[1].actions[0].parameters).toEqual({ name: '"ops"', string: '"x"', function: 'Twice' });
+
+    const unknown = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', conditions: [{ id: 'on-start-of-layout', objectClass: 'System' }], actions: [map('Nowhere')],
+    }));
+    expect(unknown.success).toBe(true);
+    expect(unknown.warnings).toEqual([expect.stringContaining('no function block named "Nowhere" was found')]);
+    expect(unknown.warnings[0]).toContain('throws "cannot find function"');
+  });
+
+  it('checks the mapped function when the parameters of a function map are updated', async () => {
+    const events = () => [fnBlock(10), { eventType: 'block', sid: 30, conditions: [onStart(31)], actions: [
+      { id: 'map-function', objectClass: 'Functions', sid: 32, parameters: { name: '"ops"', string: '"x"', function: 'Twice' } },
+    ] }];
+    const viaBlock = sheetWith(events());
+    const merged = parseResult(await viaBlock.server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 30, updateActions: [{ index: 0, parameters: { function: 'TWICE' } }],
+    }));
+    expect(merged.warnings).toEqual([expect.stringContaining('defined as "Twice"')]);
+    expect(writtenEvents(viaBlock.writer)[1].actions[0].parameters.function).toBe('Twice');
+
+    const viaAction = sheetWith(events());
+    const replaced = parseResult(await viaAction.server.callTool('update_event_block_action', {
+      sheetName: 'Sheet1', blockSid: 30, actionIndex: 0, parameters: { name: '"ops"', string: '"y"', function: 'twice' },
+    }));
+    expect(replaced.warnings).toEqual([expect.stringContaining('defined as "Twice"')]);
+    expect(writtenEvents(viaAction.writer)[1].actions[0].parameters).toEqual({ name: '"ops"', string: '"y"', function: 'Twice' });
+  });
+});
+
+describe('group paths with outer whitespace in titles (#32)', () => {
+  it('add_event_block targets a group whose title has trailing whitespace', async () => {
+    const { server, writer } = sheetWith([
+      { eventType: 'group', disabled: false, title: 'HUD ', description: '', isActiveOnStart: true, children: [], sid: 40 },
+    ]);
+    for (const groupPath of ['HUD', 'HUD ']) {
+      const data = parseResult(await server.callTool('add_event_block', {
+        sheetName: 'Sheet1', groupPath, conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      }));
+      expect(data.success).toBe(true);
+    }
+    expect(writtenEvents(writer)[0].children).toHaveLength(2);
+  });
+
+  it('refuses a group path that fits several whitespace variants, listing them', async () => {
+    const { server, writer } = sheetWith([
+      { eventType: 'group', title: 'HUD ', children: [], sid: 40 },
+      { eventType: 'group', title: ' HUD', children: [], sid: 41 },
+    ]);
+    const result = await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', groupPath: 'HUD', conditions: [{ id: 'every-tick', objectClass: 'System' }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Group path "HUD" is ambiguous in "Sheet1"');
+    expect(result.content[0].text).toContain('"HUD ", " HUD"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('reaches a group whose title differs from a sibling\'s only by trailing whitespace', async () => {
+    const { server, writer } = sheetWith([
+      { eventType: 'group', title: 'HUD', children: [], sid: 30 },
+      { eventType: 'group', title: 'HUD ', children: [], sid: 31 },
+    ]);
+    for (const groupPath of ['HUD ', 'HUD', 'HUD ']) {
+      const data = parseResult(await server.callTool('add_event_block', {
+        sheetName: 'Sheet1', groupPath, conditions: [{ id: 'every-tick', objectClass: 'System' }],
+      }));
+      expect(data.success).toBe(true);
+    }
+    const [plain, spaced] = writtenEvents(writer);
+    expect(plain.children).toHaveLength(1);
+    expect(spaced.children).toHaveLength(2);
+
+    // Leading whitespace fits neither title as typed: refused, listing both
+    const refused = await server.callTool('add_event_block', {
+      sheetName: 'Sheet1', groupPath: ' HUD', conditions: [{ id: 'every-tick', objectClass: 'System' }],
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('"HUD", "HUD "');
+  });
+
+  it('move_events_between_sheets targets such a group too', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([
+        ['SheetA', { name: 'SheetA', sid: 10, events: [{ eventType: 'block', sid: 100, conditions: [], actions: [] }] }],
+        ['SheetB', { name: 'SheetB', sid: 20, events: [{ eventType: 'group', title: ' Menus', sid: 200, children: [] }] }],
+      ]),
+    });
+    const data = parseResult(await server.callTool('move_events_between_sheets', {
+      sourceSheet: 'SheetA', targetSheet: 'SheetB', sids: [100], targetGroupPath: 'Menus',
+    }));
+    expect(data.success).toBe(true);
+    const target = writer.callsFor('writeEntityFile')[0].args[2] as any;
+    expect(target.events[0].children.map((e: any) => e.sid)).toEqual([100]);
+  });
+});
+
+describe('condition key order (#32)', () => {
+  it('writes isInverted as the last key of a condition, as the editor does', async () => {
+    const { server, writer } = setup({
+      objects: new Map([['Hero', { name: 'Hero', 'plugin-id': 'Sprite', sid: 1, behaviorTypes: [{ behaviorId: 'Tween', name: 'Tween', sid: 3 }] }]]),
+      eventSheets: new Map([['Sheet1', { name: 'Sheet1', sid: 2, events: [] }]]),
+    });
+    const data = parseResult(await server.callTool('add_event_block', {
+      sheetName: 'Sheet1',
+      conditions: [{ isInverted: true, parameters: { tag: '"x"' }, behaviorType: 'Tween', disabled: true, id: 'is-playing', objectClass: 'Hero' }],
+    }));
+    expect(data.success).toBe(true);
+    expect(Object.keys(writtenEvents(writer)[0].conditions[0]))
+      .toEqual(['id', 'objectClass', 'sid', 'disabled', 'behaviorType', 'parameters', 'isInverted']);
+  });
+
+  it('update_event_block puts parameters added to an inverted condition before isInverted', async () => {
+    const { server, writer } = sheetWith([{
+      eventType: 'block', sid: 50, actions: [],
+      conditions: [
+        { id: 'is-visible', objectClass: 'Hero', sid: 51, isInverted: true },
+        { id: 'compare-x', objectClass: 'Hero', sid: 52, parameters: { comparison: 0, 'x-co-ordinate': '0' } },
+      ],
+    }]);
+    const data = parseResult(await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: 50,
+      updateConditions: [{ index: 0, parameters: { layer: '"HUD"' } }, { index: 1, isInverted: true }],
+    }));
+    expect(data.success).toBe(true);
+    const [first, second] = writtenEvents(writer)[0].conditions;
+    expect(Object.keys(first)).toEqual(['id', 'objectClass', 'sid', 'parameters', 'isInverted']);
+    expect(Object.keys(second)).toEqual(['id', 'objectClass', 'sid', 'parameters', 'isInverted']);
+  });
+});
+
+describe('delete_event_from_sheet and the load-time rules (#32)', () => {
+  const every = (sid: number) => ({ id: 'every-tick', objectClass: 'System', sid });
+  const onStart = (sid: number) => ({ id: 'on-start-of-layout', objectClass: 'System', sid });
+  const elseCond = (sid: number) => ({ id: 'else', objectClass: 'System', sid });
+
+  it('reports an else block the delete leaves behind, in the dry run too', async () => {
+    const events = () => [
+      { eventType: 'block', sid: 60, conditions: [onStart(61)], actions: [] },
+      { eventType: 'block', sid: 62, conditions: [every(63)], actions: [] },
+      { eventType: 'block', sid: 64, conditions: [elseCond(65)], actions: [] },
+    ];
+    const dry = sheetWith(events());
+    const preview = parseResult(await dry.server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 62, dryRun: true }));
+    expect(preview.action).toBe('would_delete');
+    expect(preview.warnings).toEqual([expect.stringContaining('triggered by "on-start-of-layout"')]);
+    expect(dry.writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    const { server, writer } = sheetWith(events());
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 62 }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toEqual([expect.stringContaining('Else block')]);
+    expect(writtenEvents(writer).map((e: any) => e.sid)).toEqual([60, 64]);
+  });
+
+  it('looks past comments for the block an else belongs to', async () => {
+    const events = () => [
+      { eventType: 'block', sid: 60, conditions: [every(61)], actions: [] },
+      { eventType: 'comment', text: 'c' },
+      { eventType: 'block', sid: 64, conditions: [elseCond(65)], actions: [] },
+      { eventType: 'block', sid: 66, conditions: [every(67)], actions: [] },
+    ];
+    // Deleting an unrelated block leaves [block, comment, else]: no warning
+    const unrelated = sheetWith(events());
+    const kept = parseResult(await unrelated.server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 66 }));
+    expect(kept.success).toBe(true);
+    expect(kept.warnings).toBeUndefined();
+
+    // Deleting the block itself leaves [comment, else]: the else has no block
+    const { server, writer } = sheetWith(events());
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 60 }));
+    expect(data.success).toBe(true);
+    expect(data.warnings).toEqual([expect.stringContaining('no event comes before it (comments aside)')]);
+    expect(writtenEvents(writer).map((e: any) => e.eventType)).toEqual(['comment', 'block', 'block']);
+  });
+
+  it('leaves the sheet as it was after a dry run', async () => {
+    const { server, writer, reader } = sheetWith([
+      { eventType: 'group', title: 'G', sid: 90, children: [
+        { eventType: 'block', sid: 91, conditions: [every(92)], actions: [] },
+        { eventType: 'block', sid: 93, conditions: [every(94)], actions: [] },
+      ] },
+    ]);
+    const before = JSON.stringify((await reader.readEventSheet('Sheet1')).events);
+    await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 91, dryRun: true });
+    expect(JSON.stringify((await reader.readEventSheet('Sheet1')).events)).toBe(before);
+
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 93 }));
+    expect(data.success).toBe(true);
+    expect(writtenEvents(writer)[0].children.map((e: any) => e.sid)).toEqual([91]);
+  });
+
+  it('deletes a triggered event with its sub-events, and events next to a sheet\'s existing load-time errors', async () => {
+    const { server, writer } = sheetWith([
+      // A trigger nested under a trigger: a load-time error that is already in the sheet
+      { eventType: 'block', sid: 70, conditions: [onStart(71)], actions: [], children: [
+        { eventType: 'block', sid: 72, conditions: [onStart(73)], actions: [] },
+      ] },
+      { eventType: 'block', sid: 74, conditions: [every(75)], actions: [] },
+      { eventType: 'block', sid: 76, conditions: [onStart(77)], actions: [], children: [
+        { eventType: 'block', sid: 78, conditions: [every(79)], actions: [] },
+        { eventType: 'block', sid: 80, conditions: [elseCond(81)], actions: [] },
+      ] },
+    ]);
+    const unrelated = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 74 }));
+    expect(unrelated.success).toBe(true);
+    expect(unrelated.warnings).toBeUndefined();
+
+    const withChildren = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 76 }));
+    expect(withChildren.success).toBe(true);
+    expect(withChildren.childrenRemoved).toBe(2);
+    expect(withChildren.warnings).toEqual([expect.stringContaining('2 child event(s)')]);
+    expect(writtenEvents(writer).map((e: any) => e.sid)).toEqual([70]);
+  });
+});
+
+describe('delete_event_from_sheet and names left dangling', () => {
+  const onStart = (sid: number) => ({ id: 'on-start-of-layout', objectClass: 'System', sid });
+  const fn = (name: string, sid: number, extra: Record<string, unknown> = {}) => ({
+    functionName: name, functionDescription: '', functionCategory: '', functionReturnType: 'none',
+    functionCopyPicked: false, functionIsAsync: false, functionParameters: [],
+    eventType: 'function-block', conditions: [], actions: [], sid, ...extra,
+  });
+  const variable = (name: string, sid: number) => ({
+    eventType: 'variable', name, type: 'number', initialValue: '0', comment: '', isStatic: false, isConstant: false, sid,
+  });
+  const setVar = (name: string, sid: number) => ({ id: 'set-eventvar-value', objectClass: 'System', sid, parameters: { variable: name, value: '1' } });
+
+  it('refuses to delete a group whose function is called from outside it, and deletes it with force and a warning', async () => {
+    const events = () => [
+      { eventType: 'group', title: 'Helpers', sid: 10, children: [fn('Reset', 11)] },
+      { eventType: 'block', sid: 20, conditions: [onStart(21)], actions: [{ callFunction: 'Reset', sid: 22 }] },
+    ];
+    const blocked = sheetWith(events());
+    const refused = parseResult(await blocked.server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true }));
+    expect(refused.action).toBe('delete_blocked');
+    expect(refused.message).toContain('Function "Reset" is still referenced 1 time(s) outside the deleted events (1 Call function action(s))');
+    expect(refused.message).toContain('"invalid function name"');
+    expect(refused.references).toEqual({ callers: [{ function: 'Reset', via: 'callFunction', sheet: 'Sheet1', path: 'block > action:0', sid: 20 }] });
+    expect(blocked.writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    const { server, writer } = sheetWith(events());
+    const forced = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, force: true }));
+    expect(forced.success).toBe(true);
+    expect(forced.warnings[0]).toContain('Deleted with force=true: Function "Reset" is still referenced 1 time(s)');
+    expect(forced.references).toEqual({ callers: [{ function: 'Reset', via: 'callFunction', sheet: 'Sheet1', path: 'block > action:0', sid: 20 }] });
+    expect(writtenEvents(writer).map((e: any) => e.sid)).toEqual([20]);
+  });
+
+  it('lists what a forced delete would leave dangling on a dry run, and writes nothing', async () => {
+    const { server, writer, reader } = sheetWith([
+      fn('Helper', 10),
+      { eventType: 'block', sid: 20, conditions: [onStart(21)], actions: [{ callFunction: 'Helper', sid: 22, parameters: [] }] },
+    ]);
+    const before = JSON.stringify(await reader.readEventSheet('Sheet1'));
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true, force: true }));
+    expect(data).toMatchObject({ success: true, dryRun: true, action: 'would_delete', deletedFunction: 'Helper' });
+    expect(data.references.callers).toHaveLength(1);
+    expect(data.references.callers[0]).toMatchObject({ function: 'Helper', via: 'callFunction', path: 'block > action:0', sid: 20 });
+    expect(data.warnings.some((w: string) => /Would delete with force=true: Function "Helper" is still referenced 1 time\(s\)/.test(w))).toBe(true);
+    expect(data.warnings.some((w: string) => w.startsWith('Deleted'))).toBe(false);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(JSON.stringify(await reader.readEventSheet('Sheet1'))).toBe(before);
+  });
+
+  it('reports on a dry run that the reference check stopped at its traversal limit', async () => {
+    // More events than the reference scan visits (100,000 nodes), in another sheet: the
+    // SID lookup walks the whole sheet it deletes from (to find shared SIDs), with the same limit
+    const filler = Array.from({ length: 100_001 }, () => ({ eventType: 'comment', text: '' }));
+    const { server, writer } = setup({
+      eventSheets: new Map([
+        ['Sheet1', { name: 'Sheet1', sid: 2, events: [variable('Unused', 10)] }],
+        ['Sheet2', { name: 'Sheet2', sid: 3, events: filler }],
+      ]),
+    });
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true }));
+    expect(data.action).toBe('would_delete');
+    expect(data.references).toBeUndefined();
+    expect(data.warnings).toEqual([expect.stringContaining('stopped at its traversal limit')]);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('names the sub-events a dry run would remove in its warnings, as the delete does', async () => {
+    const { server } = sheetWith([
+      { eventType: 'group', title: 'G', sid: 10, children: [
+        { eventType: 'block', sid: 11, conditions: [onStart(12)], actions: [] },
+      ] },
+    ]);
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true }));
+    expect(data.childrenCount).toBe(1);
+    expect(data.warnings).toEqual(['The group contains 1 child event(s) that would also be removed.']);
+  });
+
+  it('counts Functions.Name(...) expression calls, in any case, as references', async () => {
+    const { server, writer } = sheetWith([
+      fn('Twice', 10, { functionReturnType: 'number' }),
+      { eventType: 'block', sid: 20, conditions: [
+        { id: 'compare-x', objectClass: 'Hero', sid: 21, parameters: { comparison: 0, 'x-co-ordinate': 'functions.twice(2)' } },
+      ], actions: [{ id: 'set-x', objectClass: 'Hero', sid: 22, parameters: { x: 'Functions.Twice(Hero.X)' } }] },
+    ]);
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10 }));
+    expect(data.action).toBe('delete_blocked');
+    expect(data.message).toContain('Function "Twice" is still referenced 2 time(s) outside the deleted events (2 expression call(s))');
+    expect(data.references.callers.map((c: any) => c.path)).toEqual(['block > condition:0', 'block > action:0']);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('protects a function that a function map names in another case', async () => {
+    const { server } = sheetWith([
+      fn('Mapped', 70),
+      { eventType: 'block', sid: 80, conditions: [onStart(81)], actions: [
+        { id: 'map-function', objectClass: 'Functions', sid: 82, parameters: { name: '"m"', string: '"x"', function: 'mapped' } },
+      ] },
+    ]);
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 70, dryRun: true }));
+    expect(data.action).toBe('delete_blocked');
+    expect(data.references.callers[0]).toMatchObject({ function: 'Mapped', via: 'function-map' });
+  });
+
+  it('ignores calls inside the deleted events, e.g. a function calling itself', async () => {
+    const { server } = sheetWith([
+      fn('Recurse', 10, { actions: [{ callFunction: 'Recurse', sid: 12 }] }),
+      { eventType: 'group', title: 'G', sid: 20, children: [
+        fn('Inner', 21),
+        { eventType: 'block', sid: 22, conditions: [onStart(23)], actions: [{ callFunction: 'Inner', sid: 24 }] },
+      ] },
+    ]);
+    expect(parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10 })).success).toBe(true);
+    expect(parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 20 })).success).toBe(true);
+  });
+
+  it('refuses to delete a global variable that events in other sheets still use', async () => {
+    const { server, writer } = setup({
+      eventSheets: new Map([
+        ['Globals', { name: 'Globals', sid: 1, events: [variable('Score', 10), variable('Lives', 11)] }],
+        ['Game', { name: 'Game', sid: 2, events: [
+          { eventType: 'block', sid: 20, conditions: [
+            { id: 'compare-eventvar', objectClass: 'System', sid: 21, parameters: { variable: 'score', comparison: 0, value: '0' } },
+          ], actions: [setVar('Score', 22)] },
+        ] }],
+      ]),
+    });
+    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Globals', sid: 10 }));
+    expect(data.action).toBe('delete_blocked');
+    expect(data.message).toContain('Event variable "Score" is still used 2 time(s) outside the deleted events (2 condition(s)/action(s) reading or setting it)');
+    expect(data.message).toContain('"cannot find event variable"');
+    expect(data.references).toEqual({ variableReferences: [
+      { variable: 'Score', via: 'event-variable', sheet: 'Game', path: 'block > condition:0', sid: 20 },
+      { variable: 'Score', via: 'event-variable', sheet: 'Game', path: 'block > action:0', sid: 20 },
+    ] });
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    // A variable nothing uses is deleted as before
+    const unused = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Globals', sid: 11 }));
+    expect(unused.success).toBe(true);
+    expect(unused.warnings).toBeUndefined();
+  });
+
+  it('refuses to delete a local variable that later events beside it use, but not one another variable of the name replaces', async () => {
+    const { server } = sheetWith([
+      variable('Count', 5),
+      { eventType: 'group', title: 'G', sid: 10, children: [
+        variable('Count', 11),
+        variable('Tally', 12),
+        { eventType: 'block', sid: 13, conditions: [onStart(14)], actions: [setVar('Tally', 15), setVar('Count', 16)] },
+      ] },
+    ]);
+    const tally = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 12, dryRun: true }));
+    expect(tally.action).toBe('delete_blocked');
+    expect(tally.references.variableReferences).toEqual([{ variable: 'Tally', via: 'event-variable', sheet: 'Sheet1', path: 'group:G > block > action:0', sid: 13 }]);
+
+    // The global "Count" still resolves the reference once the local one is gone
+    const count = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 11, dryRun: true }));
+    expect(count.action).toBe('would_delete');
+  });
+
+  it('refuses to delete a global variable used only by name in an expression, and deletes it with force', async () => {
+    const events = () => [
+      variable('Score', 10),
+      { eventType: 'block', sid: 20, conditions: [onStart(21)], actions: [
+        { id: 'set-x', objectClass: 'Hero', sid: 22, parameters: { x: 'Score * 2' } },
+        // Names, not expressions: not uses of the variable
+        { id: 'set-instvar-value', objectClass: 'Hero', sid: 23, parameters: { 'instance-variable': 'Score', value: '"Score"' } },
+      ] },
+    ];
+    const blocked = sheetWith(events());
+    const refused = parseResult(await blocked.server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10 }));
+    expect(refused.success).toBe(false);
+    expect(refused.action).toBe('delete_blocked');
+    expect(refused.message).toContain('Event variable "Score" is still used 1 time(s) outside the deleted events (1 expression(s) using it by name)');
+    expect(refused.references.variableReferences).toEqual([
+      { variable: 'Score', via: 'expression', sheet: 'Sheet1', path: 'block > action:0', sid: 20 },
+    ]);
+    expect(blocked.writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    const { server, writer } = sheetWith(events());
+    const forced = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, force: true }));
+    expect(forced.success).toBe(true);
+    expect(forced.warnings[0]).toContain('Deleted with force=true: Event variable "Score" is still used 1 time(s)');
+    expect(forced.references.variableReferences[0].via).toBe('expression');
+    expect(writtenEvents(writer).map((e: any) => e.sid)).toEqual([20]);
   });
 });

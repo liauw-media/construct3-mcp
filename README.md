@@ -98,12 +98,12 @@ node dist/index.js /path/to/your/project.c3proj
 | Tool | Description |
 |------|-------------|
 | `get_eventsheet_flow` | Event sheet include hierarchy and layout bindings (Mermaid or JSON) |
-| `get_function_map` | Function definitions and call sites across event sheets |
+| `get_function_map` | Function definitions and call sites across event sheets (Call function actions, `Functions.Name(...)` expression calls, function map registrations) |
 | `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families) |
 | `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances) |
 | `get_asset_usage` | Track sound, image, font, video and project file usage (used, unused or not analysed) |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
-| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Some warnings can be false positives (known ones in [API.md](docs/API.md#validate_project)) |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, missing addons, legacy `"behavior-type"` keys, event shapes older versions wrote that the editor never writes, scripts in the one-string shape of older Construct 3 releases, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger and else placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Rules verified only in part are reported as warnings (details in [API.md](docs/API.md#validate_project)) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 | `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
 | `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
@@ -115,7 +115,7 @@ node dist/index.js /path/to/your/project.c3proj
 
 | Tool | Description |
 |------|-------------|
-| `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.); refuses names that clash with an object type or family, ignoring case |
+| `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.); refuses names that clash with an object type, a family, System or the Functions object, ignoring case |
 | `update_object_properties` | Add/remove instance variables and behaviors, change global status |
 | `delete_object` | Delete an object; refused while anything uses it (events, instances on any layer or sub-layer, families), listing where, unless forced |
 | `create_family` | Create a family; refuses name clashes and members of mixed plugins (load-time checked) |
@@ -128,15 +128,16 @@ node dist/index.js /path/to/your/project.c3proj
 |------|-------------|
 | `create_event_sheet` | Create a new event sheet with optional includes; refuses names that differ from an existing sheet only in case |
 | `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); the names of a new (global) variable and of function parameters are checked like in the editor |
-| `add_event_block` | Add a block event with conditions + actions (gameplay logic); refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) |
-| `update_event_block` | Update an existing block: modify/add/remove actions and conditions (load-time checked) |
-| `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; load-time checked) |
+| `add_event_block` | Add a block event with conditions + actions (gameplay logic), written in the editor's own shapes: sub-events (also without conditions), else/else-if blocks, OR blocks, function calls, script actions, comment rows; refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) and warns where Else cannot stand (after a triggered event) |
+| `update_event_block` | Update an existing block: modify/add/remove actions and conditions, make it an else or OR block (load-time checked) |
+| `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; function call arguments as an array; load-time checked) |
 | `update_event_variable` | Rename a variable or change its type, initial value, static or constant flag; a new name is checked like in the editor |
 | `move_events_between_sheets` | Copy or move top-level events between sheets by SID (optionally into a group); load-time checked, so copying an event that breaks a load-time rule is refused; a copy or move that would clash event variable names (e.g. a copied global variable) is refused |
-| `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
+| `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force); refuses while functions or event variables it removes are still referenced elsewhere (by calls, function maps, System variable ACEs or by name in expressions); warns about an else block the delete leaves behind |
 | `remove_event_from_sheet` | Remove an include from a sheet by included sheet name |
 | `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
 | `fix_legacy_behavior_keys` | Rename legacy `"behavior-type"` keys (written by older versions) to `"behaviorType"` in all event sheets, checking each name against the object's behaviors (dry-run by default) |
+| `fix_legacy_event_shapes` | Convert event shapes written by older versions into the editor's own (block `isElse` to a System else condition, condition `isOr` to `isOrBlock`, old-shape function calls to positional arguments, one-string scripts, as older Construct 3 releases also saved them, to lines) where the result is unambiguous; reports the rest and which conversions can change how an event runs (dry-run by default) |
 
 Event SIDs are not always unique in editor-saved sheets. The tools that find an event by SID refuse a SID shared by several events in the sheet and list the candidates; pass `eventPath` (the JSON path that `locate_event` returns, e.g. `events[3].children[1]`) to pick one. `move_events_between_sheets` keeps SIDs and warns when a copy leaves such a shared SID in the target sheet. See [API.md](docs/API.md#mutation-tools).
 
@@ -387,6 +388,7 @@ construct3-mcp/
 │   │   ├── project-writer.ts       # Safe write operations with backup
 │   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
 │   │   ├── templates.ts            # Object, event sheet, layout templates
+│   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
@@ -407,6 +409,8 @@ construct3-mcp/
 │   │       ├── integrity.ts        # Project integrity checks (validate_project)
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
 │   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
+│   │       ├── legacy-event-shapes.ts # Legacy isElse/isOr/function call/script shape scan and repair
+│   │       ├── delete-references.ts # Function and variable names an event delete would leave dangling
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
 │   │       ├── group-settings.ts   # Event group settings (get_group_settings)
 │   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
@@ -424,7 +428,7 @@ construct3-mcp/
 │   │   ├── mutations.ts            # Registers the domain tool modules below
 │   │   ├── shared.ts               # Shared validation, result/error helpers, editor reload note
 │   │   ├── object-tools.ts         # Object and family tools (6)
-│   │   ├── event-tools.ts          # Event sheet tools (11)
+│   │   ├── event-tools.ts          # Event sheet tools (12)
 │   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators
 │   │   ├── layout-tools.ts         # Layout, layer and instance tools (9)
 │   │   ├── animation-tools.ts      # Sprite animation and frame tools (8)
@@ -514,7 +518,7 @@ We welcome contributions! Here's how to get started:
 - [x] Object class validation against project entities
 
 ### Phase 5: Event & Layout Operations ✅
-- [x] Delete events from sheets by SID or include name (dry-run, force, function caller checking)
+- [x] Delete events from sheets by SID or include name (dry-run, force, checks for references to the functions and event variables it removes)
 - [x] Update existing event blocks (modify/add/remove conditions and actions)
 - [x] Delete layouts (with reference checking, startup layout protection)
 - [x] Update layout properties (event sheet binding, dimensions)
@@ -549,7 +553,7 @@ We welcome contributions! Here's how to get started:
 - **Editor Holds the Project in Memory**: Close and reopen the project in Construct 3 after MCP edits and before saving there, or the editor can overwrite them
 - **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned, see Phase 7)
 - **Runtime Bridge Requires Browser Automation**: The runtime tools inject a bridge script but need an external tool (Playwright, curl, or any CDP-capable tool) to drive the browser and interact with the running game
-- **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs). Only the editor load-time rules listed under `validate_project` are checked; triggers are recognised by the `on-` id convention, which third-party addons do not always follow, so their trigger problems are warnings only. OR blocks cannot be created: conditions are always AND-combined
+- **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs). Only the editor load-time rules listed under `validate_project` are checked; triggers are recognised by the `on-` id convention, which third-party addons do not always follow, so their trigger problems are warnings only. OR blocks are created with `isOrBlock`
 
 ## License
 

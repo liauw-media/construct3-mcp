@@ -13,6 +13,8 @@ import { isNamelessFolder, transitionsFolderIndex } from '../timeline-folders.js
 import { forEachLayoutInstance, layerEntries, layerPath, layerPathLabel, repeatedLayerNames, type LayerEntry } from '../layers.js';
 import { findOrphanedObjects } from './object-deps.js';
 import { scanLegacyBehaviorKeys, hasOnlyLegacyBehaviorName, describeLegacyHit } from './legacy-behavior-keys.js';
+import { scanLegacyEventShapes, describeLegacyEventShapeHit } from './legacy-event-shapes.js';
+import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.js';
 import { checkBehaviorName } from './behavior-refs.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import {
@@ -87,12 +89,14 @@ export async function validateProjectIntegrity(
   checkNameConsistency(objects, eventSheets, layouts, errors);
   checkSubfolderStructure(project, errors);
   await checkLegacyBehaviorKeys(reader, eventSheets, objects, families, errors, warnings);
+  await checkLegacyEventShapes(eventSheets, warnings);
 
   // Editor load-time rules (errors, or warnings where only partly verified)
   const aceOrigin = createAceOriginResolver({
     objects: objects as Map<string, Record<string, unknown>>,
     families,
     usedAddons: reader.getUsedAddons(),
+    functionsName: functionsObjectName(reader),
   });
   for (const [name, sheet] of eventSheets) {
     if (!Array.isArray(sheet.events)) continue;
@@ -117,10 +121,11 @@ export async function validateProjectIntegrity(
   await checkBackupFiles(reader, info);
   await checkOrphanedObjects(reader, info);
 
-  // 13 original checks + legacy-behavior-key + expression-syntax,
-  // empty-expression, trigger-placement, duplicate-object-name,
-  // family-plugin-mismatch, file-name-case-mismatch, duplicate-layer-name
-  const checksRun = 21;
+  // 13 original checks + legacy-behavior-key + legacy-event-shape +
+  // expression-syntax, empty-expression, trigger-placement, else-placement,
+  // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
+  // duplicate-layer-name
+  const checksRun = 23;
 
   return {
     valid: errors.length === 0,
@@ -477,6 +482,80 @@ async function checkLegacyBehaviorKeys(
 function listExamples(items: string[], separator: string, max = 3): string {
   const shown = items.slice(0, max).join(separator);
   return items.length > max ? `${shown}${separator}and ${items.length - max} more` : shown;
+}
+
+// ─── Check 3d: Legacy Event Shapes ──────────────────────────
+
+/**
+ * Event shapes that differ from what the current editor saves (issue #32),
+ * one warning per sheet:
+ * - block-level "isElse", per-condition "isOr" and function calls with
+ *   id/objectClass or keyed parameters: written by construct3-mcp 1.8.1 and
+ *   earlier, never by the editor. Whether Construct 3 ignores or refuses them
+ *   is not verified.
+ * - scripts stored as one string or without "language": the shape older
+ *   Construct 3 releases saved (construct3-mcp 1.8.1 and earlier also wrote
+ *   it). Converting them to lines is harmless, so the message says so rather
+ *   than warning that the event may not run.
+ */
+async function checkLegacyEventShapes(
+  sheets: Map<string, EventSheet>,
+  warnings: IntegrityIssue[]
+): Promise<void> {
+  const functions = collectFunctionSignatures(sheets.values());
+  for (const [name, sheet] of sheets) {
+    if (!Array.isArray(sheet.events)) continue;
+    const scan = await scanLegacyEventShapes(sheet.events, { functions });
+    const entity = `eventSheets/${name}`;
+    const hits = [...scan.fixable, ...scan.manual];
+    const truncatedNote = scan.truncated ? ' The scan stopped at its size limit, so there may be more.' : '';
+    if (hits.length === 0) {
+      if (scan.truncated) {
+        warnings.push({
+          check: 'legacy-event-shape',
+          entity,
+          message: 'The legacy event shape scan stopped at its size limit (100,000 events or nesting depth 50); part of this sheet was not checked.',
+        });
+      }
+      continue;
+    }
+
+    const steps: string[] = [];
+    if (scan.fixable.length > 0) {
+      steps.push(`Run fix_legacy_event_shapes (a dry run first, then dryRun: false) to convert ${scan.fixable.length} of them to the editor's shapes (each sheet is backed up first).`);
+      const retest = scan.fixable.filter(h => h.changesBehavior).length;
+      if (retest > 0) {
+        steps.push(`${retest} of the conversions (else and OR blocks) can change how the event runs; test those events in the game afterwards.`);
+      }
+    }
+    if (scan.manual.length > 0) {
+      steps.push(`${scan.manual.length} need a decision by hand: ` +
+        `${listExamples(scan.manual.map(h => `${describeLegacyEventShapeHit(h)}: ${h.detail}`), '; ')}.`);
+    }
+    const toolShapes = hits.filter(h => h.kind !== 'script');
+    const scripts = hits.filter(h => h.kind === 'script');
+    const parts: string[] = [];
+    if (toolShapes.length > 0) {
+      parts.push(
+        `${toolShapes.length} event(s)/call(s) use shapes written by construct3-mcp 1.8.1 and earlier that Construct 3 itself never writes: ` +
+        `${listExamples(toolShapes.map(describeLegacyEventShapeHit), ', ')}. The editor saves Else as a System "else" first condition, ` +
+        'OR blocks with the block key "isOrBlock" and function calls as { callFunction, sid, parameters: [...] }. ' +
+        'It may ignore the old keys, so these events may not run as intended.');
+    }
+    if (scripts.length > 0) {
+      parts.push(
+        `${scripts.length} script(s) are stored as one string or without "language", the shape older Construct 3 releases saved ` +
+        `(construct3-mcp 1.8.1 and earlier also wrote it): ${listExamples(scripts.map(describeLegacyEventShapeHit), ', ')}. ` +
+        'Current releases save { type: "script", language: "javascript", script: [lines] }; converting them with ' +
+        'fix_legacy_event_shapes is harmless.');
+    }
+    warnings.push({
+      check: 'legacy-event-shape',
+      entity,
+      message: `${parts.join(' ')}${truncatedNote}`,
+      suggestion: steps.join(' '),
+    });
+  }
 }
 
 // ─── Check 4: Duplicate SIDs ─────────────────────────────────
@@ -847,10 +926,15 @@ async function checkBrokenObjectReferences(
   warnings: IntegrityIssue[]
 ): Promise<void> {
   const index = await getProjectIndex(reader);
+  // "System" and the built-in Functions object (named by functionsName in
+  // project.c3proj), on which the editor saves "Set return value" and the
+  // function map actions, are not object types or families.
+  const functionsName = functionsObjectName(reader);
   const validNames = new Set<string>([
     ...index.allObjects,
     ...families.keys(),
     'System',
+    functionsName,
   ]);
 
   for (const [objName, refs] of index.objectToEventSheets) {
@@ -859,7 +943,7 @@ async function checkBrokenObjectReferences(
       warnings.push({
         check: 'broken-object-reference',
         entity: `objectReference/${objName}`,
-        message: `Object "${objName}" is referenced in events but does not exist as an object, family, or "System"`,
+        message: `Object "${objName}" is referenced in events but does not exist as an object, family, "System" or the Functions object ("${functionsName}")`,
         suggestion: `Check for typos or deleted objects. Referenced in event sheet(s): ${listFew(sheets)}.`,
       });
     }

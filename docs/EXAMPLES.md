@@ -447,6 +447,7 @@ Returns success with a warning that names the remaining uses (references are NOT
   ]
 }
 ```
+The script is written the way the editor saves it: `{ "type": "script", "language": "javascript", "script": ["console.log('Game started');"] }`, one array entry per line. `script` may also be passed as that array.
 
 ### Sub-Event (Nested Block)
 
@@ -491,23 +492,30 @@ Returns success with a warning that names the remaining uses (references are NOT
 ### Else Block
 
 **Query:**
-> "If score >= 100, show the WinText. Otherwise, show the TryAgainText."
+> "At the start of the layout: if score >= 100, show the WinText. Otherwise, show the TryAgainText."
+
+An else block belongs after the block it is the else of, at the same level (only comments may stand between them). Else can only follow a normal (non-triggered) event, so here both are sub-events of the trigger rather than an else after the trigger itself.
 
 **Claude uses**: `add_event_block` with:
 ```json
 {
   "sheetName": "GameSheet",
   "conditions": [
-    {
-      "id": "compare-instance-variable",
-      "objectClass": "Player",
-      "parameters": { "variable": "score", "comparison": "≥", "value": "100" }
-    }
-  ],
-  "actions": [
-    { "id": "set-visible", "objectClass": "WinText", "parameters": { "visible": true } }
+    { "id": "on-start-of-layout", "objectClass": "System" }
   ],
   "children": [
+    {
+      "conditions": [
+        {
+          "id": "compare-instance-variable",
+          "objectClass": "Player",
+          "parameters": { "variable": "score", "comparison": "≥", "value": "100" }
+        }
+      ],
+      "actions": [
+        { "id": "set-visible", "objectClass": "WinText", "parameters": { "visible": true } }
+      ]
+    },
     {
       "isElse": true,
       "actions": [
@@ -517,20 +525,23 @@ Returns success with a warning that names the remaining uses (references are NOT
   ]
 }
 ```
+`isElse` is written the way Construct 3 saves Else: a System condition `{ "id": "else", "objectClass": "System", "sid": ... }` first in the else block's `conditions`. Conditions given together with `isElse` follow it and make an else-if.
 
 ### Either of Two Triggers
 
 **Query:**
 > "When the player presses Space OR presses the up arrow, jump"
 
-Construct 3 allows one trigger per event, except in an OR block, and the event tools cannot create OR blocks (the per-condition `isOr` flag does not make one). So each trigger gets its own event.
+Construct 3 allows one trigger per event, except in an OR block, which may hold several. `isOrBlock: true` makes one.
 
-**Claude uses**: `add_event_block` twice, once per key:
+**Claude uses**: `add_event_block` with:
 ```json
 {
   "sheetName": "PlayerControls",
+  "isOrBlock": true,
   "conditions": [
-    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": 32 } }
+    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": 32 } },
+    { "id": "on-key-pressed", "objectClass": "Keyboard", "parameters": { "key": 38 } }
   ],
   "actions": [
     {
@@ -542,7 +553,25 @@ Construct 3 allows one trigger per event, except in an OR block, and the event t
   ]
 }
 ```
-and the same call with `"key": 38` for the up arrow. When the shared actions grow, move them into a function (`add_event_to_sheet` with `eventType: "function"`) and call it from both events.
+
+### Function Call
+
+**Query:**
+> "On start of layout, call the SpawnWave function with wave 1 and boss mode off"
+
+**Claude uses**: `add_event_block` with:
+```json
+{
+  "sheetName": "GameSheet",
+  "conditions": [
+    { "id": "on-start-of-layout", "objectClass": "System" }
+  ],
+  "actions": [
+    { "callFunction": "SpawnWave", "parameters": ["1", false] }
+  ]
+}
+```
+Arguments follow the order of the function's parameters: expressions as strings, `true`/`false` for boolean parameters. It is written as `{ "callFunction": "SpawnWave", "sid": ..., "parameters": ["1", false] }`, without `id`/`objectClass`, as the editor saves calls.
 
 ### Disabled Action
 

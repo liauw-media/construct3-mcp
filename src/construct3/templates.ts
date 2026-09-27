@@ -403,22 +403,28 @@ export function createCommentEvent(text: string): CommentEvent {
 
 // ─── Block Event Template ──────────────────────────────────
 
+/**
+ * A block event in the editor's on-disk shape. Key order follows editor-saved
+ * sheets: eventType, conditions, actions, sid, disabled, children, isOrBlock.
+ * It leaves out false flags and an empty children array, as editor saves
+ * almost always do (a few editor-saved blocks carry "children": []; the
+ * editor loads both forms).
+ * Else is not a block key: it is a System "else" first condition.
+ */
 export function createBlockEvent(
   sid: number,
   conditions: Condition[],
   actions: Action[],
-  disabled?: boolean,
-  children?: C3Event[],
-  isElse?: boolean,
+  options: { disabled?: boolean; children?: C3Event[]; isOrBlock?: boolean } = {},
 ): BlockEvent {
   return {
     eventType: 'block',
     conditions,
     actions,
-    children: children ?? [],
     sid,
-    ...(disabled ? { disabled: true } : {}),
-    ...(isElse ? { isElse: true } : {}),
+    ...(options.disabled ? { disabled: true } : {}),
+    ...(options.children && options.children.length > 0 ? { children: options.children } : {}),
+    ...(options.isOrBlock ? { isOrBlock: true } : {}),
   };
 }
 

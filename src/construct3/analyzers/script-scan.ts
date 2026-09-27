@@ -26,7 +26,8 @@ export interface ScriptToken {
 /**
  * Return the source text of a script action or script block.
  * Construct 3 saves `script` as an array of lines (next to a `language` key);
- * older saves and this server's own writer use a single string. Accept both.
+ * older Construct 3 releases, and construct3-mcp 1.8.1 and earlier, saved a
+ * single string (fix_legacy_event_shapes converts it). Accept both.
  */
 export function getScriptSource(script: unknown): string | null {
   if (typeof script === 'string') return script;

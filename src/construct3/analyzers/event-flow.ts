@@ -3,7 +3,7 @@
  */
 
 import type { Construct3ProjectReader } from '../project-reader.js';
-import type { ProjectIndex } from './index-builder.js';
+import type { ProjectIndex, FunctionCallSite } from './index-builder.js';
 import { getProjectIndex } from './index-builder.js';
 import type { EventSheetFlowNode } from '../types.js';
 
@@ -20,7 +20,8 @@ export interface FunctionMapResult {
     name: string;
     sheet: string;
     params: string[];
-    callSites: Array<{ sheet: string; path: string }>;
+    /** Call function actions, Functions.Name(...) expression calls and function map registrations (see FunctionCallSite.via) */
+    callSites: FunctionCallSite[];
     callCount: number;
   }>;
   summary: {
@@ -203,7 +204,7 @@ export async function getFunctionMap(
   for (const [funcName, def] of index.functionDefinitions) {
     if (options.eventsheet && def.sheet !== options.eventsheet) continue;
 
-    const callSites = index.functionCalls.get(funcName) || [];
+    const callSites = index.getFunctionCalls(funcName);
     totalCallSites += callSites.length;
 
     if (callSites.length === 0) {

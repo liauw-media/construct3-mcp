@@ -7,8 +7,32 @@
 import { z } from 'zod';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { IdGenerator } from '../construct3/id-generator.js';
-import type { Condition, Action, BlockEvent, StandardAction, C3Event } from '../construct3/types.js';
+import type {
+  Condition,
+  Action,
+  BlockEvent,
+  StandardAction,
+  ScriptAction,
+  C3Event,
+} from '../construct3/types.js';
 import { createBlockEvent } from '../construct3/templates.js';
+import {
+  isElseCondition,
+  createElseCondition,
+  isFunctionCall,
+  collectFunctionSignatures,
+  toPositionalArguments,
+  checkFunctionCallArguments,
+  createFunctionCallAction,
+  resolveCallName,
+  resolveMappedFunctionName,
+  mappedFunctionName,
+  toScriptLines,
+  functionsObjectName,
+  DEFAULT_FUNCTIONS_OBJECT_NAME,
+  FUNCTIONS_OBJECT_ACTION_IDS,
+  type FunctionSignature,
+} from '../construct3/event-shapes.js';
 import { checkBehaviorName } from '../construct3/analyzers/behavior-refs.js';
 import type { BehaviorLookupData } from '../construct3/analyzers/behavior-refs.js';
 import {
@@ -43,64 +67,104 @@ const behaviorTypeDescription =
 const legacyBehaviorTypeDescription =
   'DEPRECATED alias for behaviorType — still accepted, but written as behaviorType. Use behaviorType.';
 
+// Event shapes below follow editor-saved sheets (Construct 3 r449; issue #32):
+// Else is a System "else" condition at index 0 (conditions after it make an
+// else-if), OR blocks carry the block key "isOrBlock", function calls are
+// { callFunction, sid, parameters: [positional] } without id/objectClass, and
+// script actions are { type: "script", language: "javascript", script: [lines] }.
+
+/** Descriptions shared by add_event_block, its sub-events and update_event_block. */
+export const EVENT_INPUT_DESCRIPTIONS = {
+  conditions: 'AND-combined (OR-combined with isOrBlock). [] = an event with no conditions: it runs every tick at the top level, and whenever its parent runs as a sub-event.',
+  isElse: 'Make this an else block: a System "else" condition is written as the first condition, the way Construct 3 saves Else. Conditions given here follow it and make an else-if. Place it after the block it is the else of (only comments may stand between them); Else cannot follow a triggered event (to branch inside a trigger, use sub-events of it).',
+  isOrBlock: 'Make this an OR block: the event runs when any of its conditions is true (Construct 3 "Make \'Or\' block"). An OR block may hold several triggers.',
+} as const;
+
 /** Condition schema shared by top-level and child events */
 export const conditionSchema = z.object({
   id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
-  objectClass: z.string().describe('Object name or "System"'),
+  objectClass: z.string().describe('Object name, family name or "System"'),
   behaviorType: z.string().optional().describe(behaviorTypeDescription),
   'behavior-type': z.string().optional().describe(legacyBehaviorTypeDescription),
   parameters: boundedRecord()
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
     .optional().describe('Condition parameters as key-value pairs (max 100 keys, depth 6)'),
   isInverted: z.boolean().optional().describe('Negate the condition'),
-  isOr: z.boolean().optional().describe('Legacy flag, written as given. It does NOT make a Construct 3 OR: C3 ORs a whole event (an OR block), which these tools cannot create, and conditions stay AND-combined. Do not use it to combine triggers: put each trigger in its own event.'),
+  disabled: z.boolean().optional().describe('Disable this individual condition'),
+  isOr: z.boolean().optional().describe('DEPRECATED: use the block\'s isOrBlock. Never written. If every condition after the first carries isOr, the block is written as an OR block; isOr on only some of them is refused (Construct 3 ORs whole events).'),
 });
 
 /** Standard action schema */
 export const standardActionSchema = z.object({
   id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
-  objectClass: z.string().describe('Object name or "System"'),
+  objectClass: z.string().describe('Object name, family name, "System", or "Functions" for the built-in Functions object ("set-function-return-value" = Set return value, "map-function", "map-function-default", "call-mapped-function")'),
   behaviorType: z.string().optional().describe(behaviorTypeDescription),
   'behavior-type': z.string().optional().describe(legacyBehaviorTypeDescription),
   parameters: boundedRecord()
     .refine(obj => JSON.stringify(obj).length <= 50_000, 'Parameters payload too large (max 50KB)')
     .optional().describe('Action parameters as key-value pairs (max 100 keys, depth 6)'),
-  callFunction: z.string().optional().describe('For function call actions'),
+  callFunction: z.string().optional().describe('DEPRECATED function call form; use { callFunction, parameters: [...] } without id/objectClass. Still accepted: written in the editor\'s shape, with parameters keyed "0", "1", … or by the function\'s parameter names turned into a positional array.'),
+  disabled: z.boolean().optional().describe('Disable this individual action'),
+});
+
+/** A function call argument: an expression string, or true/false for a boolean parameter. */
+export const functionCallArgumentSchema = z.union([z.string().max(10_000), z.number(), z.boolean()]);
+
+/** Function call action, in the editor's shape (no id/objectClass) */
+export const functionCallActionSchema = z.object({
+  callFunction: z.string().min(1).max(200).describe('Name of the event function to call'),
+  parameters: z.array(functionCallArgumentSchema).max(100).optional()
+    .describe('Arguments in the order of the function\'s parameters: expressions as strings (e.g. "1", "\\"text\\"", "Player.X"; numbers are written as strings), true/false for boolean parameters'),
   disabled: z.boolean().optional().describe('Disable this individual action'),
 });
 
 /** Script action schema */
 export const scriptActionSchema = z.object({
   type: z.literal('script').describe('Script action type'),
-  script: z.string().describe('Inline JavaScript code'),
+  language: z.literal('javascript').optional().describe('Script language (default and only value: "javascript")'),
+  script: z.union([z.string(), z.array(z.string())])
+    .describe('Inline JavaScript: an array of lines, as Construct 3 saves it, or one string (split into lines)'),
   disabled: z.boolean().optional().describe('Disable this individual script action'),
 });
 
-/** Union of standard and script actions */
-export const actionSchema = z.union([standardActionSchema, scriptActionSchema]);
+/** Comment row among a block's actions */
+export const commentActionSchema = z.object({
+  type: z.literal('comment').describe('Comment row among the actions'),
+  text: z.string().max(10_000).describe('Comment text'),
+});
+
+/** Union of standard, function call, script and comment actions */
+export const actionSchema = z.union([standardActionSchema, functionCallActionSchema, scriptActionSchema, commentActionSchema]);
+
+export type ConditionInput = z.infer<typeof conditionSchema>;
+export type ActionInput = z.infer<typeof actionSchema>;
 
 // ─── Recursive Child Event Schema ───────────────────────────
 
 export interface ChildEventInput {
-  conditions?: Array<z.infer<typeof conditionSchema>>;
-  actions?: Array<z.infer<typeof standardActionSchema> | z.infer<typeof scriptActionSchema>>;
+  conditions?: ConditionInput[];
+  actions?: ActionInput[];
   disabled?: boolean;
   isElse?: boolean;
+  isOrBlock?: boolean;
   children?: ChildEventInput[];
 }
 
 export const childEventSchema: z.ZodType<ChildEventInput> = z.lazy(() => z.object({
-  conditions: z.array(conditionSchema).optional().default([]),
+  conditions: z.array(conditionSchema).optional().default([]).describe(EVENT_INPUT_DESCRIPTIONS.conditions),
   actions: z.array(actionSchema).optional().default([]),
   disabled: z.boolean().optional(),
-  isElse: z.boolean().optional(),
+  isElse: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isElse),
+  isOrBlock: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isOrBlock),
   children: z.array(childEventSchema).optional().default([]),
 }));
 
 // ─── Safety Limits ──────────────────────────────────────────
 
-export const MAX_NESTING_DEPTH = 5;
-export const MAX_TOTAL_EVENTS = 50;
+// Editor-saved sheets nest sub-events up to 7 levels below a top-level block,
+// with up to 74 events in one block tree.
+export const MAX_NESTING_DEPTH = 10;
+export const MAX_TOTAL_EVENTS = 200;
 export const MAX_ITEMS_PER_BLOCK = 100;
 
 // Limits for SID-search traversal (matching index-builder.ts)
@@ -385,6 +449,35 @@ export const eventPathSchema = z.string().max(500).optional().describe(
 );
 
 /**
+ * True when `target` (an event object of `events`, e.g. the one a SID lookup
+ * returned) is a function block or lies inside one (as a sub-event at any
+ * depth). Matched by identity, so events that share a SID cannot be mixed up.
+ * Same traversal limits as findEventsBySid.
+ */
+export function isInFunctionBlock(
+  events: Record<string, unknown>[],
+  target: Record<string, unknown>,
+): boolean {
+  const stack: Array<{ events: Record<string, unknown>[]; inFunction: boolean; depth: number }> = [
+    { events, inFunction: false, depth: 0 },
+  ];
+  let nodeCount = 0;
+  while (stack.length > 0) {
+    if (++nodeCount > MAX_SEARCH_NODES) return false;
+    const { events: currentEvents, inFunction, depth } = stack.pop()!;
+    if (depth > MAX_SEARCH_DEPTH) continue;
+    for (const event of currentEvents) {
+      const here = inFunction || event.eventType === 'function-block';
+      if (event === target) return here;
+      if (Array.isArray(event.children)) {
+        stack.push({ events: event.children as Record<string, unknown>[], inFunction: here, depth: depth + 1 });
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Count all descendant events inside an event (groups, blocks with children).
  * Iterative to match safety pattern.
  */
@@ -468,23 +561,70 @@ export function summarizeEvents(
 
 // ─── Group Path Traversal ───────────────────────────────────
 
-/** Traverse event tree to find a group by title path (e.g., "Movement > Collision").
- *  Two-pass: verify the full path resolves before mutating any data. */
-export function findGroupByPath(
+/** Why a group path did not resolve (see resolveGroupPath). */
+export interface GroupPathProblem {
+  kind: 'not-found' | 'ambiguous';
+  /** The path segment that failed, trimmed */
+  segment: string;
+  /** Titles of the groups before it on the path (empty: the segment is looked up at the top level) */
+  parents: string[];
+  /** not-found: every group title at that level; ambiguous: the titles that match the segment */
+  titles: string[];
+}
+
+export type GroupPathResolution =
+  | { children: Record<string, unknown>[]; problem?: undefined }
+  | { children?: undefined; problem: GroupPathProblem };
+
+function groupTitle(e: Record<string, unknown>): string | undefined {
+  return e.eventType === 'group' && typeof e.title === 'string' ? e.title : undefined;
+}
+
+/**
+ * Traverse the event tree to find a group by title path (e.g. "Movement > Collision").
+ * Segments are split at ">". Each segment first matches a group title at its level
+ * exactly as typed (the first such group wins), its whitespace kept except one space
+ * on each side of a ">", which belongs to the separator: "UI " and "Parent > UI " both
+ * name the title "UI ", and "UI" or "Parent > UI" the title "UI". The editor also saves
+ * titles with leading or trailing whitespace, so a segment without such a match falls
+ * back to the groups whose trimmed title equals the trimmed segment: exactly one is
+ * taken, several make the path ambiguous (so "HUD " next to "HUD" and " HUD" is refused
+ * rather than silently taking one).
+ * Two-pass: verify the full path resolves before mutating any data.
+ */
+export function resolveGroupPath(
   events: Record<string, unknown>[],
   groupPath: string,
-): Record<string, unknown>[] | null {
-  const segments = groupPath.split('>').map(s => s.trim());
+): GroupPathResolution {
+  const rawSegments = groupPath.split('>');
 
   // First pass: verify all segments resolve without mutating
   let current = events;
   const groups: Array<Record<string, unknown>> = [];
-  for (const seg of segments) {
-    const group = current.find(
-      (e) => e.eventType === 'group' && e.title === seg,
-    ) as Record<string, unknown> | undefined;
-    if (!group) return null;
+  const parents: string[] = [];
+  for (let i = 0; i < rawSegments.length; i++) {
+    const seg = rawSegments[i].trim();
+    let typed = rawSegments[i];
+    if (i > 0 && typed.startsWith(' ')) typed = typed.slice(1);
+    if (i < rawSegments.length - 1 && typed.endsWith(' ')) typed = typed.slice(0, -1);
+    const levelGroups = current.filter(e => groupTitle(e) !== undefined);
+    let group = levelGroups.find(e => groupTitle(e) === typed);
+    if (!group) {
+      const loose = levelGroups.filter(e => groupTitle(e)!.trim() === seg);
+      if (loose.length === 1) group = loose[0];
+      else {
+        return {
+          problem: {
+            kind: loose.length > 1 ? 'ambiguous' : 'not-found',
+            segment: seg,
+            parents: [...parents],
+            titles: (loose.length > 1 ? loose : levelGroups).map(e => groupTitle(e)!),
+          },
+        };
+      }
+    }
     groups.push(group);
+    parents.push(groupTitle(group)!);
     current = Array.isArray(group.children) ? group.children as Record<string, unknown>[] : [];
   }
 
@@ -493,7 +633,33 @@ export function findGroupByPath(
     if (!Array.isArray(g.children)) g.children = [];
   }
 
-  return groups[groups.length - 1].children as Record<string, unknown>[];
+  return { children: groups[groups.length - 1].children as Record<string, unknown>[] };
+}
+
+/** The children array of the group a title path names, or null when it does not resolve (see resolveGroupPath). */
+export function findGroupByPath(
+  events: Record<string, unknown>[],
+  groupPath: string,
+): Record<string, unknown>[] | null {
+  return resolveGroupPath(events, groupPath).children ?? null;
+}
+
+/** Error text for a group path that did not resolve, naming the groups there (titles quoted, so outer whitespace shows). */
+export function describeGroupPathProblem(problem: GroupPathProblem, groupPath: string, sheetName: string): string {
+  const where = problem.parents.length === 0
+    ? 'at the top level'
+    : `inside group ${problem.parents.map(t => JSON.stringify(t)).join(' > ')}`;
+  const quoted = problem.titles.map(t => JSON.stringify(t)).join(', ');
+  if (problem.kind === 'ambiguous') {
+    return `Group path "${groupPath}" is ambiguous in "${sheetName}": ${problem.titles.length} groups ${where} have the title ` +
+      `"${problem.segment}" once leading/trailing whitespace is ignored: ${quoted}. ` +
+      'Write that segment with the title\'s exact whitespace; one space on each side of ">" belongs to the separator ' +
+      '(e.g. "UI " or "Parent > UI " for the title "UI ").';
+  }
+  const hint = problem.titles.length > 0
+    ? `\nGroups ${where}: ${quoted}`
+    : `\nNo groups ${where}${problem.parents.length === 0 ? ' of this event sheet' : ''}.`;
+  return `Group path "${groupPath}" not found in "${sheetName}": no group titled "${problem.segment}" ${where}.${hint}`;
 }
 
 // ─── Behavior Key Resolution ────────────────────────────────
@@ -504,6 +670,9 @@ export interface ObjectRef {
   behaviorType?: string;
   /** True when the input used the deprecated "behavior-type" alias */
   usedLegacyKey?: boolean;
+  /** ACE id of the condition/action (for the checks on the built-in Functions object) */
+  aceId?: string;
+  kind?: 'condition' | 'action';
 }
 
 /**
@@ -531,9 +700,13 @@ export function resolveBehaviorType(
 }
 
 /** Build an ObjectRef from a condition/action input. */
-function toObjectRef(ace: Readonly<Record<string, unknown>> & { objectClass: string }): ObjectRef {
+function toObjectRef(
+  ace: Readonly<Record<string, unknown>> & { objectClass: string },
+  kind: 'condition' | 'action',
+): ObjectRef {
   const { behaviorType, usedLegacyKey } = resolveBehaviorType(ace);
-  const ref: ObjectRef = { objectClass: ace.objectClass };
+  const ref: ObjectRef = { objectClass: ace.objectClass, kind };
+  if (typeof ace.id === 'string') ref.aceId = ace.id;
   if (behaviorType) ref.behaviorType = behaviorType;
   if (usedLegacyKey) ref.usedLegacyKey = true;
   return ref;
@@ -541,16 +714,60 @@ function toObjectRef(ace: Readonly<Record<string, unknown>> & { objectClass: str
 
 // ─── Object Class Validation ────────────────────────────────
 
-/** Validate objectClass references against project objects, families, and "System".
+const FUNCTIONS_ACTION_LIST = [...FUNCTIONS_OBJECT_ACTION_IDS].join(', ');
+
+/**
+ * Warnings for conditions/actions on the built-in Functions object that no
+ * editor save on record has: conditions, unknown action ids, behaviors. Also
+ * for its actions given on System, where editor saves never put them.
+ * Unverified whether the editor refuses them, so they never block a write.
+ */
+function checkFunctionsObjectRefs(refs: ObjectRef[], functionsName: string): string[] {
+  const warnings = new Set<string>();
+  for (const ref of refs) {
+    const id = ref.aceId ?? '?';
+    if (ref.objectClass === functionsName) {
+      if (ref.kind === 'condition') {
+        warnings.add(`Condition "${id}" on "${functionsName}": the built-in Functions object has no conditions on record (its actions are ${FUNCTIONS_ACTION_LIST}). System conditions use objectClass "System".`);
+      } else if (ref.kind === 'action' && !FUNCTIONS_OBJECT_ACTION_IDS.has(id)) {
+        warnings.add(`Action "${id}" on "${functionsName}" is not a known action of the built-in Functions object (${FUNCTIONS_ACTION_LIST}). Other built-in actions use objectClass "System".`);
+      }
+      if (ref.behaviorType) {
+        warnings.add(`behaviorType "${ref.behaviorType}" on "${functionsName}": the built-in Functions object has no behaviors — omit behaviorType.`);
+      }
+    } else if (ref.objectClass === 'System' && ref.kind === 'action' && FUNCTIONS_OBJECT_ACTION_IDS.has(id)) {
+      warnings.add(`Action "${id}" on "System": Construct 3 saves it on the built-in Functions object (objectClass "${functionsName}"), not on System.`);
+    }
+  }
+  return [...warnings];
+}
+
+/** Options of validateObjectClasses. */
+export interface ObjectClassCheckOptions {
+  /**
+   * Whether the checked conditions/actions end up inside a function block (or
+   * one of its sub-events). When false, "Set return value" gets a warning:
+   * it sets the return value of the function its event runs in.
+   */
+  insideFunction?: boolean;
+}
+
+/** Validate objectClass references against project objects, families, "System"
+ *  and the built-in Functions object (named by the project's functionsName).
  *  Unknown objectClass → error. Behavior problems → warnings only (never block a write). */
 export async function validateObjectClasses(
   reader: Construct3ProjectReader,
   refs: ObjectRef[],
+  options: ObjectClassCheckOptions = {},
 ): Promise<{ errors: string[]; warnings: string[] }> {
   const objects = await reader.listObjectTypes();
   // listFamilies() reads from an in-memory Map and never throws — no try/catch needed.
   const families = await reader.listFamilies();
-  const validClasses = new Set([...objects, ...families, 'System']);
+  // The built-in Functions object is named by the project's functionsName. No
+  // object type or family can share its name: the project would not load
+  // (duplicate-object-name), so an objectClass of that name is always it.
+  const functionsName = functionsObjectName(reader);
+  const validClasses = new Set([...objects, ...families, 'System', functionsName]);
 
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -561,14 +778,26 @@ export async function validateObjectClasses(
       const hint = suggestions.length > 0
         ? ` Did you mean: ${suggestions.join(', ')}?`
         : '';
-      errors.push(`Unknown objectClass "${ref.objectClass}".${hint}`);
+      const functionsHint = ref.objectClass === DEFAULT_FUNCTIONS_OBJECT_NAME
+        ? ` This project names the built-in Functions object "${functionsName}" (functionsName in project.c3proj).`
+        : '';
+      errors.push(`Unknown objectClass "${ref.objectClass}".${hint}${functionsHint}`);
     }
+  }
+
+  warnings.push(...checkFunctionsObjectRefs(refs, functionsName));
+  if (options.insideFunction === false
+    && refs.some(r => r.objectClass === functionsName && r.kind === 'action' && r.aceId === 'set-function-return-value')) {
+    warnings.push(
+      `"set-function-return-value" (Set return value) sets the return value of the function its event runs in, but this event is not inside a function block. ` +
+      'Every editor save on record uses it in a function block or one of its sub-events; add it there (update_event_block addActions on the function block or a sub-event).',
+    );
   }
 
   // Soft-validate behaviors: warn when behaviorType names no behavior on the
   // object type or any family it belongs to (family behaviors are usable on
-  // member objects in C3 events).
-  const behaviorRefs = refs.filter(r => r.behaviorType && validClasses.has(r.objectClass));
+  // member objects in C3 events). The Functions object has none (checked above).
+  const behaviorRefs = refs.filter(r => r.behaviorType && validClasses.has(r.objectClass) && r.objectClass !== functionsName);
   if (behaviorRefs.length > 0) {
     const lookup = await loadBehaviorLookup(reader, behaviorRefs.map(r => r.objectClass));
     const checked = new Set<string>();
@@ -698,7 +927,12 @@ async function loadAceOriginResolver(
     }
   }
 
-  return createAceOriginResolver({ objects, families, usedAddons: reader.getUsedAddons() });
+  return createAceOriginResolver({
+    objects,
+    families,
+    usedAddons: reader.getUsedAddons(),
+    functionsName: functionsObjectName(reader),
+  });
 }
 
 /**
@@ -813,11 +1047,13 @@ export function collectObjectRefs(
     throw new Error(`collectObjectRefs nesting exceeds maximum depth of ${MAX_NESTING_DEPTH}`);
   }
   for (const c of conditions) {
-    refs.push(toObjectRef(c));
+    refs.push(toObjectRef(c, 'condition'));
   }
   for (const a of actions) {
+    // Function calls name no object: the legacy form's id/objectClass are dropped when written
+    if (isFunctionCallInput(a)) continue;
     if ('objectClass' in a && typeof a.objectClass === 'string') {
-      refs.push(toObjectRef(a as Record<string, unknown> & { objectClass: string }));
+      refs.push(toObjectRef(a as Record<string, unknown> & { objectClass: string }, 'action'));
     }
   }
   for (const child of children) {
@@ -831,57 +1067,196 @@ export function collectObjectRefs(
   }
 }
 
+// ─── Else / OR ──────────────────────────────────────────────
+
+/**
+ * Decide whether a block is an OR block. `isOrBlock` is the input; the
+ * deprecated per-condition `isOr` flags (never written) are mapped onto it
+ * when that is unambiguous: every condition after the first carries isOr (the
+ * flag on the first one never had an effect). Construct 3 ORs a whole event, so
+ * isOr on only some of the later conditions is refused.
+ */
+export function resolveOrBlock(
+  isOrBlock: boolean | undefined,
+  conditions: ReadonlyArray<{ isOr?: boolean }>,
+  where: string,
+  warnings: string[],
+): boolean {
+  const flags = conditions.map(c => c.isOr === true);
+  if (!flags.some(Boolean)) return isOrBlock === true;
+
+  if (isOrBlock === true) {
+    warnings.push(`${where}: the deprecated per-condition isOr flag is not written; isOrBlock: true already makes this an OR block.`);
+    return true;
+  }
+  const later = flags.slice(1);
+  if (later.length > 0 && later.every(Boolean)) {
+    if (isOrBlock === false) {
+      throw new Error(`${where}: the conditions carry isOr, but isOrBlock is false. Use isOrBlock: true for an OR block and drop the deprecated isOr flags.`);
+    }
+    warnings.push(`${where}: the deprecated per-condition isOr flags were written as the block's isOrBlock: true, the flag Construct 3 reads. Pass isOrBlock: true instead.`);
+    return true;
+  }
+  if (!later.some(Boolean)) {
+    warnings.push(`${where}: isOr on the first condition has no effect (there is no condition before it) and was not written. Use isOrBlock: true to OR a block's conditions.`);
+    return false;
+  }
+  throw new Error(
+    `${where}: only some conditions carry isOr. Construct 3 ORs a whole event, not single conditions: ` +
+    'set isOrBlock: true to OR all of the block\'s conditions, or move the alternatives into sub-events.',
+  );
+}
+
 // ─── Condition / Action Builders ────────────────────────────
 
-/** Build a condition. The keys C3 defines follow its on-disk order:
- *  id, objectClass, sid, behaviorType, parameters, isInverted.
- *  `isOr` is this server's own flag, not a C3 key (real sheets mark OR
- *  blocks with `isOrBlock` on the block); its encoding is tracked separately. */
-export function buildCondition(c: z.infer<typeof conditionSchema>, sid: number): Condition {
+/** Build a condition in the editor's key order: id, objectClass, sid, disabled,
+ *  behaviorType, parameters, isInverted. The deprecated `isOr` input is never
+ *  written (see resolveOrBlock). */
+export function buildCondition(c: ConditionInput, sid: number): Condition {
   const cond: Condition = {
     id: c.id,
     objectClass: c.objectClass,
     sid,
   };
+  if (c.disabled) cond.disabled = true;
   const { behaviorType } = resolveBehaviorType(c);
   if (behaviorType) cond.behaviorType = behaviorType;
   if (c.parameters) cond.parameters = c.parameters;
   if (c.isInverted) cond.isInverted = true;
-  if (c.isOr) cond.isOr = true;
   return cond;
 }
 
-/** Build a standard (non-script) action in C3's on-disk shape. */
+/** Build a plugin/behavior/System action in the editor's key order:
+ *  id, objectClass, sid, disabled, behaviorType, parameters. */
 export function buildStandardAction(a: z.infer<typeof standardActionSchema>, sid: number): StandardAction {
   const act: StandardAction = {
     id: a.id,
     objectClass: a.objectClass,
     sid,
   };
+  if (a.disabled) act.disabled = true;
   const { behaviorType } = resolveBehaviorType(a);
   if (behaviorType) act.behaviorType = behaviorType;
   if (a.parameters) act.parameters = a.parameters;
-  if (a.callFunction) act.callFunction = a.callFunction;
+  return act;
+}
+
+/**
+ * Build a script action as the editor saves it: { type, language, script: [lines], disabled? }.
+ * A string is split into lines (a trailing newline leaves a last empty line, as in editor saves).
+ */
+export function buildScriptAction(a: { script: string | string[]; disabled?: boolean }): ScriptAction {
+  const act: ScriptAction = {
+    type: 'script',
+    language: 'javascript',
+    script: toScriptLines(a.script),
+  };
   if (a.disabled) act.disabled = true;
   return act;
 }
 
+/** True when an action input or stored action is a function call. */
+export const isFunctionCallInput = isFunctionCall;
+
+/** Event functions of the project by lower-cased name, so a call spelled in another case still finds its function. */
+export async function loadFunctionSignatures(reader: Construct3ProjectReader): Promise<Map<string, FunctionSignature>> {
+  try {
+    return collectFunctionSignatures((await reader.readAllEventSheets()).values());
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * For a function map action of the Functions object ("Map function", "Map
+ * function default"), check the function its "function" parameter names and
+ * write the defined spelling (resolveMappedFunctionName). Other actions are
+ * left alone. `signatures` loads the project's function signatures on demand.
+ */
+export async function resolveFunctionMapParameter(
+  reader: Construct3ProjectReader,
+  action: Record<string, unknown>,
+  label: string,
+  warnings: string[],
+  signatures: () => Promise<Map<string, FunctionSignature>>,
+): Promise<void> {
+  const mapped = mappedFunctionName(action, functionsObjectName(reader));
+  if (mapped === undefined) return;
+  const spelled = resolveMappedFunctionName(mapped, (await signatures()).get(mapped.toLowerCase()), label, warnings);
+  if (spelled !== mapped) action.parameters = { ...(action.parameters as Record<string, unknown>), function: spelled };
+}
+
+/** What building actions needs besides the input: SIDs, warnings and (lazily) function signatures. */
+export interface ActionBuildContext {
+  warnings: string[];
+  functions?: Map<string, FunctionSignature>;
+}
+
+/**
+ * Build one action from tool input in the editor's shape: plugin/behavior
+ * actions, function calls ({ callFunction, sid, parameters: [...] }, also from
+ * the legacy { id, objectClass, callFunction, parameters: {...} } input),
+ * script actions and comment rows.
+ */
+export async function buildAction(
+  reader: Construct3ProjectReader,
+  idGen: IdGenerator,
+  a: ActionInput,
+  ctx: ActionBuildContext,
+  where: string,
+): Promise<Action> {
+  if ('type' in a && a.type === 'script') return buildScriptAction(a);
+  if ('type' in a && a.type === 'comment') return { type: 'comment', text: a.text };
+
+  const rec = a as Record<string, unknown>;
+  if (isFunctionCallInput(rec)) {
+    const name = rec.callFunction as string;
+    const label = `${where}, call to "${name}"`;
+    ctx.functions ??= await loadFunctionSignatures(reader);
+    const signature = ctx.functions.get(name.toLowerCase());
+    const args = toPositionalArguments(rec.parameters, signature, label);
+    ctx.warnings.push(...checkFunctionCallArguments(args, signature, name, label));
+    const callName = resolveCallName(name, signature, label, ctx.warnings);
+    if ('id' in rec || 'objectClass' in rec) {
+      ctx.warnings.push(`${label}: written in the editor's function call shape { callFunction, sid, parameters: [...] }; id/objectClass were dropped. Pass { callFunction, parameters: [...] } in future calls.`);
+    }
+    const sid = await idGen.generateSid(reader);
+    return createFunctionCallAction(callName, sid, args, rec.disabled === true);
+  }
+
+  const sid = await idGen.generateSid(reader);
+  const action = buildStandardAction(a as z.infer<typeof standardActionSchema>, sid);
+  await resolveFunctionMapParameter(reader, action as unknown as Record<string, unknown>, `${where}, "${action.id}"`, ctx.warnings, async () => {
+    ctx.functions ??= await loadFunctionSignatures(reader);
+    return ctx.functions;
+  });
+  return action;
+}
+
 // ─── Recursive Block Builder ────────────────────────────────
+
+/** Tool input for one block event (top level or sub-event). */
+export interface BlockInput {
+  conditions: ConditionInput[];
+  actions: ActionInput[];
+  disabled?: boolean;
+  isElse?: boolean;
+  isOrBlock?: boolean;
+  children: ChildEventInput[];
+}
+
+function locationLabel(depth: number): string {
+  return depth === 1 ? 'Block' : `Sub-event at depth ${depth}`;
+}
 
 /** Recursively build a block event with conditions, actions, and children.
  *  Returns the built block and increments the counter (for safety limit). */
 export async function buildBlockEvent(
   reader: Construct3ProjectReader,
   idGen: IdGenerator,
-  block: {
-    conditions: Array<z.infer<typeof conditionSchema>>;
-    actions: Array<z.infer<typeof standardActionSchema> | z.infer<typeof scriptActionSchema>>;
-    disabled?: boolean;
-    isElse?: boolean;
-    children: ChildEventInput[];
-  },
+  block: BlockInput,
   depth: number,
-  counter: { count: number; warnings: string[] },
+  counter: { count: number; warnings: string[]; functions?: Map<string, FunctionSignature> },
 ): Promise<BlockEvent> {
   if (depth > MAX_NESTING_DEPTH) {
     throw new Error(`Sub-event nesting exceeds maximum depth of ${MAX_NESTING_DEPTH}`);
@@ -889,11 +1264,6 @@ export async function buildBlockEvent(
   counter.count++;
   if (counter.count > MAX_TOTAL_EVENTS) {
     throw new Error(`Total event count exceeds maximum of ${MAX_TOTAL_EVENTS}`);
-  }
-
-  // Validate: non-else blocks must have at least one condition
-  if (!block.isElse && block.conditions.length === 0) {
-    throw new Error(`Non-else event block at depth ${depth} has no conditions. Add conditions or set isElse: true.`);
   }
 
   // Cap conditions and actions per block to prevent SID amplification
@@ -904,42 +1274,55 @@ export async function buildBlockEvent(
     throw new Error(`Block has ${block.actions.length} actions (max ${MAX_ITEMS_PER_BLOCK})`);
   }
 
-  // Warn: isElse blocks with conditions (C3 ignores them)
-  if (block.isElse && block.conditions.length > 0) {
-    counter.warnings.push(`Else block at depth ${depth} has ${block.conditions.length} condition(s) — C3 ignores conditions on else blocks.`);
+  const where = locationLabel(depth);
+
+  // Else is the System "else" condition at index 0; conditions after it make an else-if.
+  const hasElseCondition = isElseCondition(block.conditions[0]);
+  const isElse = block.isElse === true || hasElseCondition;
+  // A block holds one "else" condition, first. In an else block a further one
+  // is a duplicate and is dropped; elsewhere it is written, with a warning.
+  const conditions = block.conditions.filter((c, i) => {
+    if (i === 0 || !isElseCondition(c)) return true;
+    if (isElse) {
+      const why = hasElseCondition ? 'the block already starts with one' : 'isElse: true writes it as the first condition';
+      counter.warnings.push(`${where}: dropped the System "else" condition given as condition ${i}: ${why}, and Construct 3 saves Else once, as the first condition.`);
+      return false;
+    }
+    counter.warnings.push(`${where}: the System "else" condition is condition ${i}. Construct 3 saves Else as the first condition of a block; use isElse: true or put it first.`);
+    return true;
+  });
+
+  const isOrBlock = resolveOrBlock(block.isOrBlock, conditions, where, counter.warnings);
+  if (isElse && isOrBlock) {
+    counter.warnings.push(`${where}: an else block that is also an OR block. No editor-saved sheet on record combines the two, so check the event in Construct 3.`);
   }
 
-  // Warn: isOr on the first condition is meaningless
-  if (block.conditions.length > 0 && block.conditions[0].isOr) {
-    counter.warnings.push(`First condition at depth ${depth} has isOr: true — this is ignored by C3 (no previous condition to OR with).`);
+  // Events without conditions are normal (the editor writes and loads them);
+  // at the top level such a block runs every tick, which is worth a note.
+  if (!isElse && conditions.length === 0 && depth === 1) {
+    counter.warnings.push('Block has no conditions: it runs every tick (as a sub-event, an event without conditions runs whenever its parent runs).');
   }
 
   const blockSid = await idGen.generateSid(reader);
 
   // Build conditions with SIDs
   const builtConditions: Condition[] = [];
-  for (const c of block.conditions) {
+  if (block.isElse === true && !hasElseCondition) {
+    builtConditions.push(createElseCondition(await idGen.generateSid(reader)));
+  }
+  for (const c of conditions) {
     const condSid = await idGen.generateSid(reader);
     builtConditions.push(buildCondition(c, condSid));
   }
 
-  // Build actions with SIDs (or as script actions)
+  // Build actions (SIDs for all but script and comment rows, which the editor saves without one)
   const builtActions: Action[] = [];
   for (const a of block.actions) {
-    if ('type' in a && a.type === 'script') {
-      const scriptAct: Action = {
-        type: 'script' as const,
-        script: a.script,
-      };
-      if (a.disabled) scriptAct.disabled = true;
-      builtActions.push(scriptAct);
-    } else if ('id' in a) {
-      const actSid = await idGen.generateSid(reader);
-      builtActions.push(buildStandardAction(a, actSid));
-    }
+    builtActions.push(await buildAction(reader, idGen, a, counter, where));
   }
 
-  // Recursively build children
+  // Recursively build children. Where an else block stands (after a block
+  // without a trigger) is checked on the whole sheet by the load-time gate.
   const builtChildren: BlockEvent[] = [];
   for (const child of block.children) {
     const childBlock = await buildBlockEvent(
@@ -950,6 +1333,7 @@ export async function buildBlockEvent(
         actions: child.actions ?? [],
         disabled: child.disabled,
         isElse: child.isElse,
+        isOrBlock: child.isOrBlock,
         children: child.children ?? [],
       },
       depth + 1,
@@ -958,12 +1342,9 @@ export async function buildBlockEvent(
     builtChildren.push(childBlock);
   }
 
-  return createBlockEvent(
-    blockSid,
-    builtConditions,
-    builtActions,
-    block.disabled || undefined,
-    builtChildren.length > 0 ? builtChildren : undefined,
-    block.isElse || undefined,
-  );
+  return createBlockEvent(blockSid, builtConditions, builtActions, {
+    disabled: block.disabled,
+    children: builtChildren,
+    isOrBlock,
+  });
 }

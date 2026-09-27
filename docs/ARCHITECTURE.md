@@ -13,13 +13,13 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  MCP Protocol Layer                                      │  │
 │  │  Resources (9) · Query Tools (9) · Analysis (11)         │  │
-│  │  Mutations (43) · Runtime (7) · Prompts (7)              │  │
+│  │  Mutations (44) · Runtime (7) · Prompts (7)              │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
 │  ┌──────────▼───────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                    │  │
 │  │  ProjectReader · ProjectWriter · IdGenerator             │  │
-│  │  Templates · Analyzers (12) · Cross-Reference Index      │  │
+│  │  Templates · Analyzers (15) · Cross-Reference Index      │  │
 │  │  Runtime bridge · ZIP writer · PNG generator             │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
@@ -42,7 +42,7 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
 └────────────────────────────────┘
 ```
 
-The server registers 70 tools, 9 resources and 7 prompts. The layer counts follow the module that registers each tool, so the read-only `list_addons`, `list_timelines` and `get_timeline_details` count as mutations: they live in the project and timeline modules.
+The server registers 71 tools, 9 resources and 7 prompts. The layer counts follow the module that registers each tool, so the read-only `list_addons`, `list_timelines` and `get_timeline_details` count as mutations: they live in the project and timeline modules.
 
 ## Core Components
 
@@ -192,6 +192,7 @@ Supporting modules next to the templates:
 
 | Module | Purpose |
 |--------|---------|
+| `construct3/event-shapes.ts` | The event shapes the editor saves: System else condition, OR blocks, positional function calls, script lines |
 | `construct3/atomic-write.ts` | Temp-file-and-rename writes that keep an existing file's name on disk; case-insensitive file lookup |
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
 | `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
@@ -206,7 +207,7 @@ Supporting modules next to the templates:
 
 ### 6. Analyzers (`src/construct3/analyzers/`)
 
-A shared cross-reference index and thirteen analysis modules, several of which build on the index:
+A shared cross-reference index and fifteen analysis modules, several of which build on the index:
 
 | Module | Purpose |
 |--------|---------|
@@ -217,8 +218,10 @@ A shared cross-reference index and thirteen analysis modules, several of which b
 | `animations.ts` | Sprite animation trees as the editor saves them (items and animation subfolders); frame counts for the asset and performance analyses |
 | `performance.ts` | Heuristic performance audit (info/warning/critical) |
 | `integrity.ts` | Project integrity checks behind `validate_project` |
-| `load-rules.ts` | Rules the Construct 3 editor enforces when it opens a project (expression syntax, empty parameters, trigger placement, name and SID clashes, family plugins); used by `validate_project` and the pre-write checks |
+| `load-rules.ts` | Rules the Construct 3 editor enforces when it opens a project (expression syntax, empty parameters, trigger and else placement, name and SID clashes, family plugins); used by `validate_project` and the pre-write checks |
 | `legacy-behavior-keys.ts` | Scan and repair of the legacy `"behavior-type"` key |
+| `legacy-event-shapes.ts` | Scan and repair of event shapes older versions wrote (block `isElse`, condition `isOr`, old function calls, one-string scripts) |
+| `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event would leave pointing at nothing (`delete_event_from_sheet`) |
 | `behavior-refs.ts` | Behavior name checks against objects and families |
 | `group-settings.ts` | Event group settings (`get_group_settings`) |
 | `event-outline.ts` | Editor event numbers, `locate_event` and the paged `get_eventsheet_outline` |
@@ -234,7 +237,7 @@ The cross-reference index (`ProjectIndex`) is cached and reset when writes occur
 | Resources | `resources/project.ts` (6), `resources/docs.ts` (3; the pitfalls text lives in `resources/pitfalls.ts`) | 9 | Read-only data access, Construct 3 docs, curated pitfalls |
 | Query Tools | `tools/query.ts` | 9 | List, search, get details |
 | Analysis Tools | `tools/analysis.ts` | 11 | Deep analysis, validation, event locating, runtime traps |
-| Mutation Tools | `tools/mutations.ts` → `object-tools.ts` (6), `event-tools.ts` (11), `layout-tools.ts` (9), `animation-tools.ts` (8), `timeline-tools.ts` (5), `project-tools.ts` (4) | 43 | Safe create, update, delete |
+| Mutation Tools | `tools/mutations.ts` → `object-tools.ts` (6), `event-tools.ts` (12), `layout-tools.ts` (9), `animation-tools.ts` (8), `timeline-tools.ts` (5), `project-tools.ts` (4) | 44 | Safe create, update, delete |
 | Runtime Tools | `tools/runtime-tools.ts` | 7 | Runtime bridge, preview checks, project clone, `.c3p` packing |
 | Prompts | `prompts/workflows.ts` | 7 | Workflow templates |
 

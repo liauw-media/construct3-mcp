@@ -6,12 +6,17 @@ import { describe, it, expect } from 'vitest';
 import {
   lintExpression,
   checkEventLoadRules,
+  elsePlacementProblem,
+  describeElsePlacementProblem,
+  previousNonComment,
   checkObjectClassNames,
   checkFamilyPlugins,
   classifySidDuplicate,
   collectTriggerObjectClasses,
   createAceOriginResolver,
   findObjectClassNameClash,
+  findBuiltinObjectClassClash,
+  builtinObjectClassNames,
   isLoadBreakingSidDuplicate,
   newLoadRuleIssues,
   systemOnlyAceOrigin,
@@ -160,10 +165,10 @@ describe('checkEventLoadRules — trigger placement', () => {
     const issues = check([block(1, [cond('on-key-pressed', 2, 'Keyboard'), cond('on-click', 3, 'Mouse', { isOr: true })])]);
     expect(issues).toHaveLength(1);
     expect(issues[0].severity).toBe('error');
-    // The suggestion is something the event tools can do: they cannot create OR blocks
+    // The suggestion names what the event tools can do: split, or make an OR block
     expect(issues[0].suggestion).toContain('separate events');
-    expect(issues[0].suggestion).toContain('cannot create OR blocks');
-    expect(issues[0].suggestion).not.toContain('"isOrBlock": true');
+    expect(issues[0].suggestion).toContain('isOrBlock: true in add_event_block or update_event_block');
+    expect(issues[0].suggestion).toContain('"isOr" flag does not make one');
   });
 
   it('allows several triggers in any position in an OR block', () => {
@@ -260,6 +265,123 @@ describe('checkEventLoadRules — trigger placement', () => {
     const issues = check([block(1, [null, cond('compare-eventvar', 2), cond('on-start-of-layout', 3)], [null])]);
     expect(issues).toHaveLength(1);
     expect(issues[0].location).toContain('condition 2');
+  });
+});
+
+// ─── Rule 4: else placement ─────────────────────────────────
+
+describe('elsePlacementProblem', () => {
+  const elseConds = (...rest: unknown[]) => [cond('else', 90), ...rest];
+
+  it('accepts an else right after a block without a trigger, also an else-if chain', () => {
+    expect(elsePlacementProblem(block(1, [cond('every-tick', 2)]), elseConds())).toBeNull();
+    expect(elsePlacementProblem(block(1, elseConds(cond('compare-two-values', 3))), elseConds())).toBeNull();
+    expect(elsePlacementProblem(block(1, []), elseConds(cond('trigger-once-while-true', 3)))).toBeNull();
+  });
+
+  it('names what is wrong', () => {
+    expect(elsePlacementProblem(undefined, elseConds())).toEqual({ kind: 'no-block-before' });
+    expect(elsePlacementProblem({ eventType: 'comment', text: '' }, elseConds())).toEqual({ kind: 'no-block-before', previousType: 'comment' });
+    expect(elsePlacementProblem(block(1, [cond('on-start-of-layout', 2)]), elseConds())).toMatchObject({ kind: 'after-trigger', trigger: { id: 'on-start-of-layout' } });
+    expect(elsePlacementProblem(block(1, [cond('every-tick', 2), cond('on-layout-end', 3)], [], { isOrBlock: true }), elseConds()))
+      .toMatchObject({ kind: 'after-trigger', trigger: { id: 'on-layout-end' } });
+    expect(elsePlacementProblem(block(1, []), elseConds(cond('on-start-of-layout', 3)))).toMatchObject({ kind: 'holds-trigger' });
+  });
+
+  it('finds the event an else block belongs to past comments', () => {
+    const comment = { eventType: 'comment', text: '' };
+    const head = block(1, []);
+    expect(previousNonComment([head, comment, comment, block(2, [])], 3)).toBe(head);
+    expect(previousNonComment([comment, block(2, [])], 1)).toBeUndefined();
+    expect(previousNonComment([block(2, [])], 0)).toBeUndefined();
+    expect(previousNonComment([null, comment, block(2, [])], 2)).toBeNull();
+  });
+
+  it('describes each problem', () => {
+    expect(describeElsePlacementProblem({ kind: 'no-block-before' })).toContain('no event comes before it');
+    expect(describeElsePlacementProblem({ kind: 'after-trigger', trigger: { id: 'on-x' } })).toContain('Else can only follow normal (non-triggered) events');
+    expect(describeElsePlacementProblem({ kind: 'holds-trigger', trigger: { id: 'on-x' } })).toContain('take Else off the first place');
+  });
+});
+
+describe('checkEventLoadRules — else placement', () => {
+  const elseBlock = (sid: number, ...rest: unknown[]) => block(sid, [cond('else', sid + 1), ...rest]);
+
+  it('warns about an else after a triggered block, at any depth, keyed by the else block', () => {
+    const issues = check([
+      block(1, [cond('every-tick', 2)], [], { children: [
+        block(3, [cond('on-start-of-layout', 4)]),
+        elseBlock(5),
+      ] }),
+    ]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ rule: 'else-placement', severity: 'warning', key: 'else-placement|eventSheets/Main|5' });
+    expect(issues[0].location).toBe('eventSheets/Main > block (sid 1) > block (sid 5)');
+    expect(issues[0].message).toContain('triggered by "on-start-of-layout"');
+  });
+
+  it('warns about an else that is first in its list or follows a non-block event, not counting comments', () => {
+    const issues = check([
+      elseBlock(1),
+      { eventType: 'group', title: 'G', sid: 3, children: [{ eventType: 'comment', text: 'c' }, elseBlock(4)] },
+      { eventType: 'variable', name: 'v', sid: 6 },
+      { eventType: 'comment', text: 'c' },
+      elseBlock(7),
+    ]);
+    expect(issues.map(i => [i.rule, i.key])).toEqual([
+      ['else-placement', 'else-placement|eventSheets/Main|1'],
+      ['else-placement', 'else-placement|eventSheets/Main|4'],
+      ['else-placement', 'else-placement|eventSheets/Main|7'],
+    ]);
+    expect(issues[1].message).toContain('no event comes before it (comments aside)');
+    expect(issues[1].message).not.toContain('is a comment');
+    expect(issues[2].message).toContain('the event before it is a variable');
+    expect(issues[2].suggestion).toContain('only comments may stand between them');
+  });
+
+  it('accepts comments between a block and its else block, as editor saves have them', () => {
+    expect(check([
+      block(1, [cond('every-tick', 2)]),
+      { eventType: 'comment', text: 'c' },
+      elseBlock(4),
+      block(6, [cond('compare-two-values', 7)]),
+      { eventType: 'comment', text: 'one' },
+      { eventType: 'comment', text: 'two' },
+      elseBlock(8, cond('compare-two-values', 10)),
+      { eventType: 'comment', text: 'three' },
+      elseBlock(11),
+    ])).toEqual([]);
+  });
+
+  it('still looks through comments for a trigger on the block before the else', () => {
+    const issues = check([block(1, [cond('on-start-of-layout', 2)]), { eventType: 'comment', text: 'c' }, elseBlock(4)]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('triggered by "on-start-of-layout"');
+  });
+
+  it('reports a trigger after "else" once, as else-placement, not as "put the trigger first"', () => {
+    const issues = check([block(1, [cond('every-tick', 2)]), elseBlock(3, cond('on-start-of-layout', 5))]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].rule).toBe('else-placement');
+    expect(issues[0].message).toContain('holds the trigger "on-start-of-layout"');
+    expect(issues[0].suggestion).toContain('own event');
+    expect(issues[0].suggestion).not.toMatch(/Put the trigger first/);
+  });
+
+  it('marks third-party addon triggers as possible triggers', () => {
+    const addon: AceOriginResolver = ace => (ace.objectClass === 'System' ? 'builtin' : 'addon');
+    const issues = check([block(1, [cond('on-thing', 2, 'AddonObj')]), elseBlock(3)], addon);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('(if this addon condition is a trigger)');
+  });
+
+  it('accepts the shapes editor saves use: an if / else-if / else chain after non-triggered blocks', () => {
+    expect(check([
+      block(1, [cond('compare-two-values', 2)]),
+      elseBlock(3, cond('compare-two-values', 5)),
+      elseBlock(6),
+      block(8, [cond('on-start-of-layout', 9)], [], { children: [block(10, [cond('every-tick', 11)]), elseBlock(12)] }),
+    ])).toEqual([]);
   });
 });
 
@@ -403,6 +525,31 @@ describe('createAceOriginResolver', () => {
     expect(resolver({ id: 'on-created', objectClass: 'Missing' })).toBe('unknown');
     expect(resolver({ id: 'on-x', objectClass: 'Player', behaviorType: 'Nope' })).toBe('unknown');
   });
+
+  it('treats the built-in Functions object as built in, under the project\'s functionsName', () => {
+    expect(resolver({ id: 'set-function-return-value', objectClass: 'Functions' })).toBe('builtin');
+
+    const renamed = createAceOriginResolver({ objects: new Map(), families: new Map(), usedAddons: [], functionsName: 'Fn' });
+    expect(renamed({ id: 'set-function-return-value', objectClass: 'Fn' })).toBe('builtin');
+    expect(renamed({ id: 'set-function-return-value', objectClass: 'Functions' })).toBe('unknown');
+  });
+});
+
+describe('checkEventLoadRules — built-in Functions object', () => {
+  it('lints the parameters of its actions like any other action', () => {
+    const fn = (actions: unknown[]) => ({
+      eventType: 'function-block', functionName: 'Label', functionReturnType: 'string', functionParameters: [],
+      sid: 1, conditions: [], actions,
+    });
+    expect(check([fn([{ id: 'set-function-return-value', objectClass: 'Functions', sid: 2, parameters: { value: '"a" & "b"' } }])])).toEqual([]);
+
+    const issues = check([fn([
+      { id: 'set-function-return-value', objectClass: 'Functions', sid: 2, parameters: { value: '' } },
+      { id: 'map-function', objectClass: 'Functions', sid: 3, parameters: { name: '"ops', string: '"x"', function: 'Label' } },
+    ])]);
+    expect(issues.map(i => i.rule).sort()).toEqual(['empty-expression', 'expression-syntax']);
+    expect(issues.find(i => i.rule === 'empty-expression')!.location).toContain('action 0 "set-function-return-value" (Functions)');
+  });
 });
 
 // ─── Rule 4: object class names ─────────────────────────────
@@ -449,6 +596,35 @@ describe('findObjectClassNameClash', () => {
     expect(findObjectClassNameClash('enemy', ['Enemy'], [])).toEqual({ name: 'Enemy', kind: 'object type' });
     expect(findObjectClassNameClash('Foes', ['Player'], ['foes'])).toEqual({ name: 'foes', kind: 'family' });
     expect(findObjectClassNameClash('Hero', ['Player'], ['Foes'])).toBeUndefined();
+  });
+});
+
+describe('built-in object class names (System, the Functions object)', () => {
+  const tree = (items: string[]) => ({ items, subfolders: [] } as never);
+
+  it('reports an object type or family named like System or the Functions object, ignoring case', () => {
+    const issues = checkObjectClassNames({ objectTypes: tree(['functions', 'Hero']), families: tree(['SYSTEM']) });
+    expect(issues).toHaveLength(2);
+    expect(issues.every(i => i.rule === 'duplicate-object-name' && i.severity === 'error')).toBe(true);
+    expect(issues[0].message).toContain('object type "functions" has the name of the built-in Functions object ("Functions", functionsName in project.c3proj)');
+    expect(issues[0].message).toContain("object class name 'functions' already used");
+    expect(issues[1].message).toContain('family "SYSTEM" has the name of the built-in System object');
+  });
+
+  it('uses the project\'s functionsName', () => {
+    expect(checkObjectClassNames({ objectTypes: tree(['Functions']), families: tree([]), functionsName: 'Fn' })).toEqual([]);
+    const issues = checkObjectClassNames({ objectTypes: tree(['FN']), families: tree([]), functionsName: 'Fn' });
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('("Fn", functionsName in project.c3proj)');
+  });
+
+  it('names the clashing built-in for create_object and create_family', () => {
+    expect(findBuiltinObjectClassClash('system', undefined)).toBe('System');
+    expect(findBuiltinObjectClassClash('FUNCTIONS', undefined)).toBe('Functions');
+    expect(findBuiltinObjectClassClash('Functions', 'Fn')).toBeUndefined();
+    expect(findBuiltinObjectClassClash('fn', 'Fn')).toBe('Fn');
+    expect(findBuiltinObjectClassClash('Hero', 'Fn')).toBeUndefined();
+    expect(builtinObjectClassNames('')).toEqual(['System', 'Functions']);
   });
 });
 

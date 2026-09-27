@@ -238,15 +238,21 @@ export interface EventSheet {
   [key: string]: unknown;
 }
 
-/** Condition within an event block */
+/**
+ * Condition within an event block. Else is the System condition
+ * { id: "else", objectClass: "System", sid } at index 0; conditions after it
+ * make an else-if.
+ */
 export interface Condition {
   id: string;
   objectClass: string;
   sid: number;
+  disabled?: boolean;
   /** Behavior name (as defined on the object type or one of its families) for behavior conditions */
   behaviorType?: string;
   parameters?: Record<string, unknown>;
   isInverted?: boolean;
+  /** Legacy per-condition OR flag written by construct3-mcp 1.8.1 and earlier; Construct 3 uses the block's isOrBlock. */
   isOr?: boolean;
   [key: string]: unknown;
 }
@@ -256,33 +262,39 @@ export interface StandardAction {
   id: string;
   objectClass: string;
   sid: number;
+  disabled?: boolean;
   /** Behavior name (as defined on the object type or one of its families) for behavior actions */
   behaviorType?: string;
   parameters?: Record<string, unknown>;
-  disabled?: boolean;
   [key: string]: unknown;
 }
 
-/** Function call action */
+/** Function call action, as the editor saves it: no id/objectClass, positional parameters */
 export interface FunctionCallAction {
-  id: string;
-  objectClass: string;
+  callFunction: string;
   sid: number;
-  callFunction?: string;
-  parameters?: Record<string, unknown>;
   disabled?: boolean;
+  parameters?: Array<string | number | boolean>;
   [key: string]: unknown;
 }
 
-/** Script action */
+/** Script action. The current editor saves the code as an array of lines; older Construct 3 releases (and construct3-mcp 1.8.1 and earlier) saved one string. */
 export interface ScriptAction {
   type: 'script';
-  script: string;
+  language?: string;
+  script: string | string[];
   disabled?: boolean;
   [key: string]: unknown;
 }
 
-export type Action = StandardAction | FunctionCallAction | ScriptAction;
+/** Comment row among a block's actions */
+export interface CommentAction {
+  type: 'comment';
+  text: string;
+  [key: string]: unknown;
+}
+
+export type Action = StandardAction | FunctionCallAction | ScriptAction | CommentAction;
 
 /** Block event — the most common: has conditions, actions, optional children */
 export interface BlockEvent {
@@ -292,6 +304,9 @@ export interface BlockEvent {
   children?: C3Event[];
   sid?: number;
   disabled?: boolean;
+  /** OR block: the conditions are ORed instead of ANDed */
+  isOrBlock?: boolean;
+  /** Legacy block flag written by construct3-mcp 1.8.1 and earlier; Construct 3 uses a System "else" condition. */
   isElse?: boolean;
   [key: string]: unknown;
 }
@@ -353,10 +368,11 @@ export interface CommentEvent {
   [key: string]: unknown;
 }
 
-/** Script block event — inline JavaScript */
+/** Script block event — inline JavaScript (array of lines, as the editor saves it) */
 export interface ScriptEvent {
   eventType: 'script';
-  script: string;
+  language?: string;
+  script: string | string[];
   [key: string]: unknown;
 }
 

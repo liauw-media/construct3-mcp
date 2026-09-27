@@ -129,6 +129,22 @@ describe('create_object', () => {
     expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 
+  it('rejects the names of the built-in System and Functions objects, ignoring case', async () => {
+    const { server, writer, reader } = setup();
+    for (const name of ['functions', 'SYSTEM']) {
+      const result = await server.callTool('create_object', { name, pluginId: 'Sprite' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(`"${name}" is the name of the built-in`);
+      expect(result.content[0].text).toContain(`object class name '${name}' already used`);
+    }
+    // The Functions object goes by the project's functionsName
+    const base = (reader as any).getProject.bind(reader);
+    (reader as any).getProject = () => ({ ...base(), functionsName: 'Fn' });
+    expect((await server.callTool('create_object', { name: 'fn', pluginId: 'Sprite' })).isError).toBe(true);
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(parseResult(await server.callTool('create_object', { name: 'Functions', pluginId: 'Sprite' })).success).toBe(true);
+  });
+
   it('rejects invalid name', async () => {
     const { server } = setup();
     const result = await server.callTool('create_object', { name: '123bad', pluginId: 'Sprite' });
@@ -476,6 +492,14 @@ describe('create_family', () => {
     const result = await server.callTool('create_family', { name: 'ENEMY', pluginId: 'Sprite' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('object type "Enemy"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('rejects the name of the built-in Functions object', async () => {
+    const { server, writer } = setup();
+    const result = await server.callTool('create_family', { name: 'Functions', pluginId: 'Sprite' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('the built-in Functions object ("Functions", functionsName in project.c3proj)');
     expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 

@@ -10,7 +10,10 @@
  *    literals (cannot be analyzed statically). Signals raised from scripts via
  *    runtime.signal("tag") count as emitters. A tag that is just a function
  *    parameter (a "signal helper" function) is resolved through the literal
- *    arguments at the function's call sites. A non-literal tag that starts
+ *    arguments at the function's call sites; a function registered in a
+ *    function map (Functions object "Map function") can also be called by
+ *    "Call mapped function" with any arguments, so its forwarded tag may be
+ *    anything. A non-literal tag that starts
  *    with a literal (`"button_" & Button.type`) may produce any tag with that
  *    prefix.
  * 2. signal-order — a System "Wait for signal" whose tag was already raised
@@ -54,6 +57,13 @@ import {
   findScriptSignalCalls,
   collectImportsForEventsNames,
 } from './script-scan.js';
+import {
+  functionsObjectName,
+  FUNCTION_MAP_ACTION_IDS,
+  c3StringEnd,
+  findExpressionCalls,
+  parameterValues,
+} from '../event-shapes.js';
 
 // System ACEs (objectClass "System"); each takes one `tag` expression parameter.
 const SIGNAL_ACTION_ID = 'signal';
@@ -61,6 +71,8 @@ const WAIT_FOR_SIGNAL_ACTION_ID = 'wait-for-signal';
 const ON_SIGNAL_CONDITION_ID = 'on-signal';
 /** System actions that defer the rest of their event (remaining actions and sub-events) */
 const WAIT_ACTION_IDS = new Set(['wait', WAIT_FOR_SIGNAL_ACTION_ID, 'wait-for-previous-actions']);
+/** Functions object action that calls the function a function map holds for a string (chosen at runtime) */
+const CALL_MAPPED_FUNCTION_ACTION_ID = 'call-mapped-function';
 
 const MAX_NODES = 100_000;
 const MAX_DEPTH = 50;
@@ -177,22 +189,6 @@ export function parseC3StringLiteral(expr: unknown): string | null {
   return end === s.length - 1 ? s.slice(1, end).replace(/""/g, '"') : null;
 }
 
-/** Index of the quote that closes the C3 string literal opening at `start`, or -1. */
-function c3StringEnd(s: string, start: number): number {
-  let i = start + 1;
-  while (i < s.length) {
-    if (s[i] === '"') {
-      if (s[i + 1] === '"') {
-        i += 2;
-        continue;
-      }
-      return i;
-    }
-    i++;
-  }
-  return -1;
-}
-
 /** Remove C3 string literals from an expression (keeps the quotes as `""`). */
 function stripC3Strings(expr: string): string {
   let out = '';
@@ -227,41 +223,6 @@ export function c3ConcatPrefix(expr: unknown): string | null {
   return prefix || null;
 }
 
-/**
- * Calls to event sheet functions inside a C3 expression, e.g.
- * `Functions.MyFunction(1, 2, 3)` (C3 manual, Functions: "Returning values").
- * Names are lower-cased (function names are case-insensitive). `args` holds
- * the raw argument expressions.
- */
-function findExpressionCalls(expr: string, functionsObject: string): Array<{ name: string; args: string[] }> {
-  const calls: Array<{ name: string; args: string[] }> = [];
-  const lowerObject = functionsObject.toLowerCase();
-  if (!expr.toLowerCase().includes(lowerObject)) return calls;
-  let i = 0;
-  while (i < expr.length) {
-    if (expr[i] === '"') {
-      const end = c3StringEnd(expr, i);
-      if (end === -1) break;
-      i = end + 1;
-      continue;
-    }
-    const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(expr.slice(i));
-    if (!word) {
-      i++;
-      continue;
-    }
-    i += word[0].length;
-    if (word[0].toLowerCase() !== lowerObject) continue;
-    const member = /^\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(expr.slice(i));
-    if (!member) continue;
-    i += member[0].length;
-    const open = /^\s*\(/.exec(expr.slice(i));
-    // Scanning resumes inside the argument list, so nested calls are found too
-    calls.push({ name: member[1].toLowerCase(), args: open ? splitC3Args(expr, i + open[0].length) : [] });
-  }
-  return calls;
-}
-
 /** Argument accessor for positional argument expressions of an event function call. */
 function eventArg(expressions: unknown[]): (i: number) => CallArg {
   return (i: number): CallArg => ({
@@ -270,36 +231,6 @@ function eventArg(expressions: unknown[]): (i: number) => CallArg {
   });
 }
 
-/** Expression parameters of an ACE: `parameters` is an object (ACEs) or an array (function calls). */
-function parameterValues(ace: Record<string, unknown>): unknown[] {
-  const params = ace.parameters;
-  return Array.isArray(params) ? params : params && typeof params === 'object' ? Object.values(params) : [];
-}
-
-/** Split the C3 argument list that starts at `start` (just after `(`) into raw expressions. */
-function splitC3Args(expr: string, start: number): string[] {
-  const args: string[] = [];
-  let depth = 0;
-  let argStart = start;
-  for (let k = start; k < expr.length; k++) {
-    const ch = expr[k];
-    if (ch === '"') {
-      const end = c3StringEnd(expr, k);
-      if (end === -1) break;
-      k = end;
-    } else if (ch === '(') {
-      depth++;
-    } else if (ch === ')' && depth > 0) {
-      depth--;
-    } else if ((ch === ',' || ch === ')') && depth === 0) {
-      const text = expr.slice(argStart, k).trim();
-      if (text || ch === ',') args.push(text);
-      if (ch === ')') break;
-      argStart = k + 1;
-    }
-  }
-  return args;
-}
 
 /**
  * Scan event sheets for runtime traps. Signal tags are matched across ALL
@@ -344,6 +275,9 @@ export async function findRuntimeTraps(
   const forwarded: Array<SignalSite & { role: SignalRole; expression: string; functionName: string; paramIndex: number }> = [];
   /** Function call sites by lower-cased name (C3 function names are case-insensitive) */
   const callSites = new Map<string, CallSite[]>();
+  /** Functions registered in a function map (lower-cased): Call mapped function can call them with any arguments */
+  const mappedFunctions = new Set<string>();
+  let mappedCalls = 0;
   const issues: RuntimeTrapIssue[] = [];
   const walkWarnings: string[] = [];
   let scriptsScanned = 0;
@@ -422,6 +356,18 @@ export async function findRuntimeTraps(
         if (typeof action.callFunction === 'string') {
           addCallSite(action.callFunction, site, eventArg(Array.isArray(action.parameters) ? action.parameters : []));
         }
+        // Function maps of the Functions object: which functions a mapped call may reach
+        if (action.objectClass === functionsObject && typeof action.id === 'string') {
+          if (FUNCTION_MAP_ACTION_IDS.has(action.id)) {
+            const params = action.parameters;
+            const mapped = params && typeof params === 'object' && !Array.isArray(params)
+              ? (params as Record<string, unknown>).function
+              : undefined;
+            if (typeof mapped === 'string' && mapped) mappedFunctions.add(mapped.toLowerCase());
+          } else if (action.id === CALL_MAPPED_FUNCTION_ACTION_ID) {
+            mappedCalls++;
+          }
+        }
         if (action.objectClass !== 'System') return;
         if (action.id === SIGNAL_ACTION_ID) {
           recordTagParam('emitter', 'Signal', action, site, scope);
@@ -477,8 +423,8 @@ export async function findRuntimeTraps(
   // ─── Resolve tags forwarded through function parameters ──
   for (const f of forwarded) {
     const calls = callSites.get(f.functionName.toLowerCase()) ?? [];
-    // No call site found: the tag can be anything
-    let prefixes: string[] | null = calls.length === 0 ? null : [];
+    // No call site found, or a function map lets Call mapped function pass any argument: the tag can be anything
+    let prefixes: string[] | null = calls.length === 0 || mappedFunctions.has(f.functionName.toLowerCase()) ? null : [];
     for (const call of calls) {
       const arg = call.arg(f.paramIndex);
       if (arg.tag !== null) {
@@ -590,6 +536,11 @@ export async function findRuntimeTraps(
     }
   }
 
+  if (mappedCalls > 0 || mappedFunctions.size > 0) {
+    notes.push(`Function maps: ${mappedCalls} Call mapped function action(s) call a function chosen at runtime, which `
+      + 'signal-order does not follow; parameters of the functions in a function map are treated as able to hold any value.');
+  }
+
   // ─── Signal order ───────────────────────────────────────
   const orderIssues = findSignalOrderIssues(sheets, filter, functionsObject, cap);
   if (orderIssues.length > 0) {
@@ -654,16 +605,6 @@ export async function findRuntimeTraps(
 }
 
 // ─── Project lookups ────────────────────────────────────────
-
-/** Name of the built-in Functions object (renamable; saved as `functionsName` in project.c3proj). */
-function functionsObjectName(reader: Construct3ProjectReader): string {
-  try {
-    const name = typeof reader.getProject === 'function' ? reader.getProject().functionsName : undefined;
-    return typeof name === 'string' && name ? name : 'Functions';
-  } catch {
-    return 'Functions';
-  }
-}
 
 /**
  * Names the project's "Imports for events" scripts make available to script

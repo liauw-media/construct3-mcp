@@ -51,7 +51,7 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
   // Tool: Function map
   server.tool(
     'get_function_map',
-    'Get function definitions and call sites across event sheets',
+    'Get function definitions and call sites across event sheets. Call sites are Call function actions, Functions.Name(...) calls in expressions and function map registrations (Map function / Map function default), each marked with "via"; function names match ignoring case.',
     {
       eventsheet: z.string().max(200).optional().describe('Filter to a specific event sheet'),
       detail: detailSchema,

@@ -62,7 +62,7 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(21);
+    expect(result.summary.checksRun).toBe(23);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 
@@ -324,6 +324,132 @@ describe('validateProjectIntegrity', () => {
     }]);
     const result = await validateProjectIntegrity(reader);
     expect(result.errors.filter(e => e.check === 'legacy-behavior-key')).toHaveLength(0);
+  });
+
+  // ─── Check 3d: legacy-event-shape ────────────────────────
+
+  it('warns about isElse, isOr and old-shape function calls left by older versions', async () => {
+    const reader = projectWithSheet([
+      { eventType: 'block', sid: 210, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 211 }], actions: [] },
+      { eventType: 'block', sid: 212, conditions: [], actions: [], isElse: true },
+      {
+        eventType: 'block', sid: 213,
+        conditions: [
+          { id: 'compare-two-values', objectClass: 'System', sid: 214 },
+          { id: 'compare-two-values', objectClass: 'System', sid: 215, isOr: true },
+        ],
+        actions: [{ id: 'call-function', objectClass: 'System', sid: 216, parameters: { 0: '1' }, callFunction: 'fn1' }],
+      },
+      { eventType: 'block', sid: 217, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 218 }], actions: [], isElse: true },
+    ]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(true);
+    const warns = result.warnings.filter(e => e.check === 'legacy-event-shape');
+    expect(warns).toHaveLength(1); // one entry per sheet
+    expect(warns[0].entity).toMatch(/^eventSheets\//);
+    expect(warns[0].message).toContain('4 event(s)/call(s)');
+    expect(warns[0].message).toContain('block-level "isElse" at events[1] (SID 212)');
+    expect(warns[0].message).toContain('per-condition "isOr" at events[2] (SID 213)');
+    expect(warns[0].message).toContain('System "else" first condition');
+    expect(warns[0].suggestion).toContain('fix_legacy_event_shapes');
+    expect(warns[0].suggestion).toContain('convert 3 of them');
+    expect(warns[0].suggestion).toContain('1 need a decision by hand');
+    expect(warns[0].suggestion).toContain('else-if');
+    expect(warns[0].suggestion).toContain('2 of the conversions (else and OR blocks) can change how the event runs');
+  });
+
+  it('warns about script actions stored as one string without language', async () => {
+    const reader = projectWithSheet([
+      {
+        eventType: 'block', sid: 210, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 211 }],
+        actions: [{ type: 'script', script: 'a();\nb();' }],
+      },
+    ]);
+    const result = await validateProjectIntegrity(reader);
+    const warns = result.warnings.filter(e => e.check === 'legacy-event-shape');
+    expect(warns).toHaveLength(1);
+    expect(warns[0].message).toContain('script in the old shape at events[0].actions[0]');
+    expect(warns[0].message).toContain('script: [lines]');
+    expect(warns[0].suggestion).toContain('convert 1 of them');
+    expect(warns[0].suggestion).not.toContain('can change how the event runs');
+  });
+
+  it('attributes one-string scripts to older Construct 3 releases, not only to this server, and does not call them risky', async () => {
+    const scriptOnly = projectWithSheet([
+      {
+        eventType: 'block', sid: 210, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 211 }],
+        actions: [{ type: 'script', script: 'a();' }],
+      },
+    ]);
+    const [scriptWarning] = (await validateProjectIntegrity(scriptOnly)).warnings.filter(e => e.check === 'legacy-event-shape');
+    expect(scriptWarning.message).toContain('1 script(s) are stored as one string or without "language"');
+    expect(scriptWarning.message).toContain('older Construct 3 releases');
+    expect(scriptWarning.message).toContain('harmless');
+    expect(scriptWarning.message).not.toContain('never writes');
+    expect(scriptWarning.message).not.toContain('may not run as intended');
+    expect(scriptWarning.message).not.toContain('event(s)/call(s)');
+
+    const elseOnly = projectWithSheet([
+      { eventType: 'block', sid: 210, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 211 }], actions: [] },
+      { eventType: 'block', sid: 212, conditions: [], actions: [], isElse: true },
+    ]);
+    const [elseWarning] = (await validateProjectIntegrity(elseOnly)).warnings.filter(e => e.check === 'legacy-event-shape');
+    expect(elseWarning.message).toContain('1 event(s)/call(s) use shapes written by construct3-mcp 1.8.1 and earlier that Construct 3 itself never writes');
+    expect(elseWarning.message).toContain('may not run as intended');
+    expect(elseWarning.message).not.toContain('older Construct 3 releases');
+
+    const both = projectWithSheet([
+      { eventType: 'block', sid: 210, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 211 }], actions: [] },
+      { eventType: 'block', sid: 212, conditions: [], actions: [{ type: 'script', script: ['a();'] }], isElse: true },
+    ]);
+    const bothWarnings = (await validateProjectIntegrity(both)).warnings.filter(e => e.check === 'legacy-event-shape');
+    expect(bothWarnings).toHaveLength(1);
+    expect(bothWarnings[0].message).toContain('1 event(s)/call(s) use shapes written by construct3-mcp 1.8.1 and earlier');
+    expect(bothWarnings[0].message).toContain('block-level "isElse" at events[1] (SID 212)');
+    expect(bothWarnings[0].message).toContain('1 script(s) are stored as one string or without "language"');
+    expect(bothWarnings[0].message).toContain('script in the old shape at events[1].actions[0]');
+    expect(bothWarnings[0].suggestion).toContain('convert 2 of them');
+  });
+
+  // ─── else-placement ──────────────────────────────────────
+
+  it('warns about else blocks that do not follow a non-triggered block', async () => {
+    const elseCond = (sid: number) => ({ id: 'else', objectClass: 'System', sid });
+    const reader = projectWithSheet([
+      { eventType: 'block', sid: 220, conditions: [elseCond(221)], actions: [] },
+      { eventType: 'block', sid: 222, conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 223 }], actions: [] },
+      { eventType: 'block', sid: 224, conditions: [elseCond(225)], actions: [] },
+      { eventType: 'block', sid: 226, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 227 }], actions: [] },
+      { eventType: 'block', sid: 228, conditions: [elseCond(229), { id: 'on-layout-end', objectClass: 'System', sid: 230 }], actions: [] },
+      { eventType: 'block', sid: 231, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 232 }], actions: [] },
+      { eventType: 'block', sid: 233, conditions: [elseCond(234), { id: 'compare-two-values', objectClass: 'System', sid: 235 }], actions: [] },
+      { eventType: 'block', sid: 236, conditions: [elseCond(237)], actions: [] },
+    ]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.filter(e => e.check === 'else-placement')).toEqual([]);
+    const warns = result.warnings.filter(w => w.check === 'else-placement');
+    expect(warns.map(w => w.entity.match(/sid (\d+)/)![1])).toEqual(['220', '224', '228']);
+    expect(warns[0].message).toContain('no event comes before it');
+    expect(warns[1].message).toContain('triggered by "on-start-of-layout"');
+    expect(warns[1].message).toContain('not verified');
+    expect(warns[1].suggestion).toContain('sub-events');
+    expect(warns[2].message).toContain('holds the trigger "on-layout-end"');
+    // The trigger after "else" is reported once, by else-placement, not as "put the trigger first"
+    expect(result.warnings.filter(w => w.check === 'trigger-placement')).toEqual([]);
+  });
+
+  it('does not warn about the shapes Construct 3 writes', async () => {
+    const reader = projectWithSheet([
+      { eventType: 'function-block', functionName: 'fn1', functionParameters: [], sid: 205, conditions: [], actions: [] },
+      { eventType: 'block', sid: 210, conditions: [{ id: 'every-tick', objectClass: 'System', sid: 211 }], actions: [] },
+      {
+        eventType: 'block', sid: 212, isOrBlock: true,
+        conditions: [{ id: 'else', objectClass: 'System', sid: 213 }],
+        actions: [{ callFunction: 'fn1', sid: 214 }, { type: 'script', language: 'javascript', script: ['x();'] }],
+      },
+    ]);
+    const result = await validateProjectIntegrity(reader);
+    expect(result.warnings.filter(e => e.check === 'legacy-event-shape')).toEqual([]);
   });
 
   it('produces no errors on the editor-verified c3-loadable-minimal fixture', async () => {
@@ -777,6 +903,54 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     const warn = result.warnings.find(w => w.check === 'broken-object-reference' && w.message.includes('Enemies'));
     expect(warn).toBeUndefined();
+  });
+
+  /** A function block that returns a value, with the actions the editor saves on the built-in Functions object. */
+  function functionsObjectProject(objectClass: string, functionsName?: string) {
+    const reader = createReader({
+      eventSheets: new Map([
+        ['MainSheet', {
+          name: 'MainSheet', sid: 200,
+          events: [{
+            eventType: 'function-block', functionName: 'Double', functionReturnType: 'number',
+            functionParameters: [{ name: 'n', type: 'number', initialValue: '0', comment: '', sid: 210 }],
+            sid: 201, conditions: [],
+            actions: [
+              { id: 'set-function-return-value', objectClass, sid: 202, parameters: { value: 'n * 2' } },
+            ],
+            children: [{
+              eventType: 'block', sid: 203, conditions: [],
+              actions: [{ id: 'map-function', objectClass, sid: 204, parameters: { name: '"ops"', string: '"double"', function: 'Double' } }],
+            }],
+          }],
+        }],
+      ]),
+      layouts: new Map([
+        ['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }],
+      ]),
+    });
+    if (functionsName !== undefined) {
+      const base = reader.getProject.bind(reader);
+      reader.getProject = () => ({ ...base(), functionsName });
+    }
+    return reader;
+  }
+
+  it('allows the built-in Functions object without warning', async () => {
+    const result = await validateProjectIntegrity(functionsObjectProject('Functions'));
+    expect(result.warnings.filter(w => w.check === 'broken-object-reference')).toEqual([]);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('takes the Functions object name from functionsName in project.c3proj', async () => {
+    const renamed = await validateProjectIntegrity(functionsObjectProject('Fn', 'Fn'));
+    expect(renamed.warnings.filter(w => w.check === 'broken-object-reference')).toEqual([]);
+
+    resetProjectIndex();
+    const stale = await validateProjectIntegrity(functionsObjectProject('Functions', 'Fn'));
+    const warn = stale.warnings.find(w => w.check === 'broken-object-reference');
+    expect(warn?.message).toContain('Object "Functions" is referenced in events');
+    expect(warn?.message).toContain('the Functions object ("Fn")');
   });
 
   // ─── Check 7: broken-eventsheet-reference ────────────────
@@ -1308,6 +1482,16 @@ describe('validateProjectIntegrity', () => {
     expect(err!.entity).toContain('family "enemy"');
   });
 
+  it('reports an object type named like the built-in Functions object as an error', async () => {
+    const reader = validProject();
+    const origGetProject = reader.getProject.bind(reader);
+    reader.getProject = () => ({ ...origGetProject(), objectTypes: { items: ['Sprite', 'functions'], subfolders: [] } });
+    const result = await validateProjectIntegrity(reader);
+    const err = result.errors.find(e => e.check === 'duplicate-object-name');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('has the name of the built-in Functions object');
+  });
+
   it('reports a family member with a different plugin as an error', async () => {
     const reader = createReader({
       objects: new Map([
@@ -1533,7 +1717,7 @@ describe('validateProjectIntegrity on real fixtures', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
-    const loadRuleChecks = ['expression-syntax', 'empty-expression', 'trigger-placement', 'duplicate-object-name', 'family-plugin-mismatch', 'duplicate-sid'];
+    const loadRuleChecks = ['expression-syntax', 'empty-expression', 'trigger-placement', 'else-placement', 'duplicate-object-name', 'family-plugin-mismatch', 'duplicate-sid'];
     expect(result.warnings.filter(w => loadRuleChecks.includes(w.check))).toEqual([]);
   });
 

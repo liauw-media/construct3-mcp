@@ -331,6 +331,43 @@ describe('findRuntimeTraps: signal pairing', () => {
     expect(result.issues[0].message).toContain('not a string literal (tag)');
   });
 
+  // Function maps (Scirra function-maps example): "Map function" registers a function
+  // under a string, "Call mapped function" calls it with arguments chosen at runtime.
+  const mapFunction = (name: string) => ({ id: 'map-function', objectClass: 'Functions', sid: nextSid(),
+    parameters: { name: lit('ops'), string: lit(name.toLowerCase()), function: name } });
+  const callMapped = () => ({ id: 'call-mapped-function', objectClass: 'Functions', sid: nextSid(),
+    parameters: { name: lit('ops'), string: 'Choice', 'forward-params': '0' } });
+
+  it('treats a forwarded tag of a function in a function map as able to hold any value', async () => {
+    const events = (mapped: boolean) => [
+      fn('EmitSignal', ['tag'], [signal('tag')]),
+      block([onStart()], [...(mapped ? [mapFunction('EmitSignal')] : []), callFunction('EmitSignal', [lit('a')])]),
+      block([], [callMapped()]),
+      block([onStart()], [waitForSignal(lit('done'))]),
+    ];
+    const plain = await findRuntimeTraps(readerWith({ Main: events(false) }));
+    expect(plain.issues.find(i => i.tag === 'done')!.severity).toBe('warning');
+
+    const result = await findRuntimeTraps(readerWith({ Main: events(true) }));
+    expect(result.summary.warning).toBe(0);
+    expect(result.issues.find(i => i.tag === 'done')!.severity).toBe('info');
+    expect(result.notes.some(n => n.startsWith('Function maps: 1 Call mapped function action(s)'))).toBe(true);
+    expect(plain.notes.some(n => n.startsWith('Function maps: 1 Call mapped function action(s)'))).toBe(true);
+  });
+
+  it('follows function calls in the value of Set return value', async () => {
+    const reader = readerWith({
+      Main: [
+        fn('Emit', ['tag'], [signal('tag')]),
+        fn('Wrapped', [], [{ id: 'set-function-return-value', objectClass: 'Functions', sid: nextSid(), parameters: { value: 'Functions.Emit("b")' } }]),
+        block([], [callFunction('Wrapped'), waitForSignal(lit('b'))]),
+      ],
+    });
+    const result = await findRuntimeTraps(reader);
+    // Paired through the expression call; Wrapped raises "b" before the wait starts
+    expect(result.issues.map(i => [i.check, i.tag])).toEqual([['signal-order', 'b']]);
+  });
+
   it('ignores signal-like ids on non-System objects', async () => {
     const reader = readerWith({
       Main: [block([], [{ id: 'wait-for-signal', objectClass: 'MyPlugin', sid: nextSid(), parameters: { tag: lit('x') } }])],

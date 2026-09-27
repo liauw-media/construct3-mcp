@@ -19,6 +19,9 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `validate_project` check `file-name-case-mismatch`: warns when an entity file's name differs from its registered name only in case, instead of reporting a live file as orphaned (#31).
 - `validate_project` check `duplicate-layer-name`: layers of one layout, sub-layers included, whose names are the same ignoring case (#35).
 - `delete_family` checks references before deleting (events, object properties, uses of its instance variables and behaviors through members) and takes `force` (#35).
+- `fix_legacy_event_shapes` tool: converts event shapes that older versions wrote (block `isElse`, condition `isOr`, old-shape function calls, one-string scripts) into the editor's own where the result is unambiguous, and flags conversions that can change how an event runs (dry-run by default) (#32).
+- `validate_project` checks `legacy-event-shape` (shapes the current editor never writes) and `else-placement` (an else block that does not follow a non-triggered block, or holds a trigger) (#32).
+- `add_event_block` and `update_event_block` write else-if blocks, OR blocks (`isOrBlock`), events without conditions, positional function calls, multi-line script actions and comment rows; `update_event_block` can make a block an else or OR block (#32).
 
 ### Changed
 
@@ -36,6 +39,10 @@ All notable changes to the Construct3 MCP Server are documented here.
 - Layout tools handle nested sub-layers (`layers[].subLayers`): `add_instance_to_layout`, `update_instance`, `delete_instance_from_layout`, `update_layer` and `delete_layer` find layers and instances at any depth (a sub-layer also by a path such as `"Main > HUD"`), and `add_layer` refuses a name any layer or sub-layer uses (#35).
 - A blocked `delete_object` or `delete_family` lists where the object is used; a forced delete names the uses it leaves behind, and `validate_project` reports dangling instances, object parameters, family members and object properties as `broken-object-reference` (#35).
 - `get_asset_usage` gives each asset a `status` (`used`, `unused` or `not-analysed`), where and how it is referenced (`referencedIn`, `via`) and a `reason` when not used; assets that names built at runtime may reach are reported as not analysed instead of unused (#34).
+- Event blocks are written in the shapes and key order the editor saves: Else as a System `else` condition at index 0, `isOrBlock` on OR blocks, function calls as `{ callFunction, sid, parameters: [...] }`, scripts as `{ type: "script", language: "javascript", script: [lines] }`, `disabled` after `sid`, `isInverted` after `parameters`. The per-condition `isOr` input is deprecated (#32).
+- `delete_event_from_sheet` refuses, unless forced, to delete functions or event variables that calls, function maps, System variable conditions/actions or expressions elsewhere still use; a forced dry run lists the references the delete would leave dangling (#32).
+- `get_function_map` counts `Functions.Name(...)` expression calls and function map registrations as call sites (#32).
+- `create_object` and `create_family` refuse names that clash with System or the built-in Functions object (#32).
 
 ### Fixed
 
@@ -53,6 +60,9 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `get_asset_usage` reads sprite animations as the editor saves them (`animations.items` and animation subfolders), lists single-image object types as images, and counts an image as used by the same rule as `find_orphaned_objects` (#34).
 - `get_asset_usage` matches sounds, music, fonts, videos and project files to their real uses (Audio file parameters, strings in events, scripts, flowcharts, timelines, properties, CSS font declarations) instead of reporting every file asset as unused (#34).
 - `analyze_performance` counts the frames of editor-saved animations, animation subfolders included (#34).
+- The built-in `Functions` object class (e.g. *Set return value*) is accepted by the event tools and no longer reported as a broken object reference by `validate_project` (#32).
+- `groupPath` finds groups whose titles have leading or trailing whitespace (#32).
+- `update_event_block` no longer warns that all conditions were removed on blocks that never had conditions, such as function blocks (#32).
 
 ## [1.8.1] - 2026-04-16
 

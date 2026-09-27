@@ -14,6 +14,7 @@
 
 import type { C3Event, Subfolder } from '../types.js';
 import { findNameClash, nameKey } from '../names.js';
+import { isElseCondition, DEFAULT_FUNCTIONS_OBJECT_NAME } from '../event-shapes.js';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -21,6 +22,7 @@ export type LoadRuleName =
   | 'expression-syntax'
   | 'empty-expression'
   | 'trigger-placement'
+  | 'else-placement'
   | 'duplicate-object-name'
   | 'family-plugin-mismatch';
 
@@ -286,7 +288,10 @@ function checkTriggers(
   }
 
   // Both AND-block issues share one key per event, so removing some of several
-  // triggers (a partial fix) is not mistaken for a new problem.
+  // triggers (a partial fix) is not mistaken for a new problem. A trigger after
+  // the "else" condition of an else block is reported by rule 4 instead, since
+  // "put the trigger first" would take Else off its first place.
+  const elseBlock = isElseCondition(conditions[0]);
   if (ev.isOrBlock !== true) {
     if (triggers.length > 1) {
       const confirmed = triggers.every(t => t.kind === 'trigger');
@@ -295,10 +300,10 @@ function checkTriggers(
         severity: confirmed ? 'error' : 'warning',
         location,
         message: `Event has ${triggers.length} triggers (${triggers.map(t => `"${String(t.c.id)}"`).join(', ')}). Only one trigger is allowed per event unless it is an OR block; ${loadFailure(confirmed)}.`,
-        suggestion: 'Split the triggers into separate events, one trigger each (the event tools cannot create OR blocks, and a per-condition "isOr" flag does not make one).',
+        suggestion: 'Split the triggers into separate events, one trigger each, or make the event an OR block (isOrBlock: true in add_event_block or update_event_block; a per-condition "isOr" flag does not make one).',
         key: `trigger-block|${keyBase}`,
       });
-    } else if (triggers.length === 1 && triggers[0].i > 0) {
+    } else if (triggers.length === 1 && triggers[0].i > 0 && !elseBlock) {
       const t = triggers[0];
       out.push({
         rule: 'trigger-placement',
@@ -321,22 +326,128 @@ function checkTriggers(
   return eventRoot.confirmed || !root.confirmed ? eventRoot : root;
 }
 
-// ─── Event Sheet Walk (rules 1–3) ────────────────────────────
+// ─── Rule 4: Else Placement ──────────────────────────────────
+
+/** Why an else block cannot stand where it is (see elsePlacementProblem). */
+export type ElsePlacementProblem =
+  | { kind: 'no-block-before'; previousType?: string }
+  | { kind: 'after-trigger'; trigger: Record<string, unknown> }
+  | { kind: 'holds-trigger'; trigger: Record<string, unknown> };
 
 /**
- * Check every event of a sheet for expression and trigger-placement problems.
- * Walks conditions and actions of blocks, function blocks and custom action
- * blocks; comments, variable initial values and script actions are not linted.
+ * The event an else block belongs to: the nearest sibling before index `i`
+ * that is not a comment, or undefined. Comments do not run, and editor saves
+ * have comments between a block and its else block.
+ */
+export function previousNonComment(list: readonly unknown[], i: number): unknown {
+  for (let j = i - 1; j >= 0; j--) {
+    const event = list[j];
+    if (!isObject(event) || event.eventType !== 'comment') return event;
+  }
+  return undefined;
+}
+
+/**
+ * Check where an else block stands. The manual (System conditions, Else):
+ * "Else can only follow normal (non-triggered) events. It can also follow
+ * another Else event with other conditions". Editor-saved r449 sheets agree:
+ * every else block follows a block, directly or with comments between (see
+ * previousNonComment), none follows a block with a trigger condition, and
+ * none holds a trigger itself (the loader would move that trigger before the
+ * "else" condition, see rule 3). `previous` is the nearest sibling before the
+ * else block that is not a comment, `conditions` the else block's own,
+ * starting with the "else" condition. Triggers are recognised by id (`on-`).
+ */
+export function elsePlacementProblem(previous: unknown, conditions: ReadonlyArray<unknown>): ElsePlacementProblem | null {
+  const findTrigger = (list: unknown): Record<string, unknown> | undefined =>
+    Array.isArray(list) ? list.find((c): c is Record<string, unknown> => isObject(c) && isTriggerId(c.id)) : undefined;
+
+  if (!isObject(previous) || previous.eventType !== 'block') {
+    return { kind: 'no-block-before', ...(isObject(previous) ? { previousType: String(previous.eventType) } : {}) };
+  }
+  const before = findTrigger(previous.conditions);
+  if (before) return { kind: 'after-trigger', trigger: before };
+  const own = findTrigger(conditions.slice(1));
+  if (own) return { kind: 'holds-trigger', trigger: own };
+  return null;
+}
+
+/** The problem in words, e.g. for messages of the event tools and the legacy shape repair. */
+export function describeElsePlacementProblem(problem: ElsePlacementProblem): string {
+  switch (problem.kind) {
+    case 'no-block-before':
+      return `${problem.previousType ? `the event before it is a ${problem.previousType}` : 'no event comes before it'} (comments aside), ` +
+        'so there is no block for it to be the else of (Construct 3 saves an else block after a block, with at most comments between)';
+    case 'after-trigger':
+      return `the block before it is triggered by "${String(problem.trigger.id)}", but Else can only follow normal (non-triggered) events`;
+    case 'holds-trigger':
+      return `it holds the trigger "${String(problem.trigger.id)}". When Construct 3 opens the project it moves a trigger ` +
+        'before the other conditions of its event, which would take Else off the first place (editor saves always have it first)';
+  }
+}
+
+const ELSE_PLACEMENT_SUGGESTIONS: Record<ElsePlacementProblem['kind'], string> = {
+  'no-block-before': 'Move the else block after the block it is the else of (only comments may stand between them), or remove its "else" condition (update_event_block with isElse: false).',
+  'after-trigger': 'To branch inside a trigger, add sub-events under the triggered event: one with the condition, then the else block right after it. Or remove the "else" condition (update_event_block with isElse: false).',
+  'holds-trigger': 'Put the trigger in its own event, or remove the "else" condition (update_event_block with isElse: false).',
+};
+
+/**
+ * Rule 4 for one block. Whether the editor refuses to open a project that
+ * breaks it is not verified, so it is always a warning.
+ */
+function checkElsePlacement(
+  ev: Record<string, unknown>,
+  siblings: readonly unknown[],
+  index: number,
+  location: string,
+  keyBase: string,
+  aceOrigin: AceOriginResolver,
+  out: LoadRuleIssue[],
+): void {
+  if (ev.eventType !== 'block' || !Array.isArray(ev.conditions) || !isElseCondition(ev.conditions[0])) return;
+  // Looked up only for else blocks: the comment runs before distinct else
+  // blocks do not overlap, so the walk stays linear in the sheet size.
+  const problem = elsePlacementProblem(previousNonComment(siblings, index), ev.conditions);
+  if (!problem) return;
+  const addonTrigger = problem.kind !== 'no-block-before' && classifyCondition(problem.trigger, aceOrigin) === 'possible-trigger'
+    ? ' (if this addon condition is a trigger)'
+    : '';
+  out.push({
+    rule: 'else-placement',
+    severity: 'warning',
+    location,
+    message: `Else block: ${describeElsePlacementProblem(problem)}${addonTrigger}. The event may not run as intended; whether Construct 3 refuses to open the project is not verified.`,
+    suggestion: ELSE_PLACEMENT_SUGGESTIONS[problem.kind],
+    key: `else-placement|${keyBase}`,
+  });
+}
+
+// ─── Event Sheet Walk (rules 1–4) ────────────────────────────
+
+/**
+ * Check every event of a sheet for expression, trigger-placement and
+ * else-placement problems. Walks conditions and actions of blocks, function
+ * blocks and custom action blocks; comments, variable initial values and
+ * script actions are not linted.
  */
 export function checkEventLoadRules(events: C3Event[], opts: EventCheckOptions): LoadRuleIssue[] {
   const out: LoadRuleIssue[] = [];
-  const stack: Array<{ event: Record<string, unknown>; location: string; root: TriggerRoot | undefined; depth: number }> = [];
+  const stack: Array<{
+    event: Record<string, unknown>;
+    /** The list holding the event and its index there (for else placement) */
+    siblings: unknown[];
+    index: number;
+    location: string;
+    root: TriggerRoot | undefined;
+    depth: number;
+  }> = [];
   const push = (list: unknown, parentLocation: string, root: TriggerRoot | undefined, depth: number) => {
     if (!Array.isArray(list)) return;
     for (let i = list.length - 1; i >= 0; i--) {
       const event = list[i];
       if (!isObject(event)) continue;
-      stack.push({ event, location: `${parentLocation} > ${describeEvent(event)}`, root, depth });
+      stack.push({ event, siblings: list, index: i, location: `${parentLocation} > ${describeEvent(event)}`, root, depth });
     }
   };
   push(events, opts.sheet, undefined, 0);
@@ -344,7 +455,7 @@ export function checkEventLoadRules(events: C3Event[], opts: EventCheckOptions):
   let nodes = 0;
   while (stack.length > 0) {
     if (nodes++ > MAX_NODES) break;
-    const { event, location, root, depth } = stack.pop()!;
+    const { event, siblings, index, location, root, depth } = stack.pop()!;
     if (depth > MAX_DEPTH) continue;
 
     // Identity for issue keys: the SID, or else the location, which names the
@@ -368,6 +479,7 @@ export function checkEventLoadRules(events: C3Event[], opts: EventCheckOptions):
     const childRoot = Array.isArray(event.conditions)
       ? checkTriggers(event, location, keyBase, root, opts.aceOrigin, out)
       : root;
+    checkElsePlacement(event, siblings, index, location, keyBase, opts.aceOrigin, out);
     push(event.children, location, childRoot, depth + 1);
   }
   return out;
@@ -446,6 +558,8 @@ export interface AceOriginData {
   objects: Map<string, Record<string, unknown>>;
   families: Map<string, Record<string, unknown>>;
   usedAddons: ReadonlyArray<{ type: string; id: string; author?: string }>;
+  /** Name of the built-in Functions object (project.c3proj functionsName; default "Functions") */
+  functionsName?: string;
 }
 
 function findBehaviorId(owner: Record<string, unknown> | undefined, behaviorName: string): string | undefined {
@@ -456,7 +570,9 @@ function findBehaviorId(owner: Record<string, unknown> | undefined, behaviorName
 
 /**
  * Resolve whether an ACE comes from a built-in addon. System is never listed in
- * usedAddons (0 of 576 real projects) and is always built in; every other ACE is
+ * usedAddons (0 of 576 real projects) and is always built in, and so is the
+ * Functions object (functionsName), whose actions the editor's ACE list keeps
+ * with the System plugin; every other ACE is
  * traced to its plugin (object or family `plugin-id`) or behavior (`behaviorType`
  * name → `behaviorId`, looked up on the object and on the families it belongs
  * to) and then to the usedAddons author, which is "Scirra" for built-in addons.
@@ -474,7 +590,7 @@ export function createAceOriginResolver(data: AceOriginData): AceOriginResolver 
     if (objectClass === 'System') return 'builtin';
     if (typeof objectClass !== 'string') return 'unknown';
     const owner = data.objects.get(objectClass) ?? data.families.get(objectClass);
-    if (!owner) return 'unknown';
+    if (!owner) return objectClass === (data.functionsName ?? DEFAULT_FUNCTIONS_OBJECT_NAME) ? 'builtin' : 'unknown';
 
     // Real projects write "behaviorType"; older writes of this server used "behavior-type".
     const behaviorName = ace.behaviorType ?? ace['behavior-type'];
@@ -545,17 +661,53 @@ function objectClassLoadError(name: string): string {
 }
 
 /**
+ * The object classes the editor creates for every project, before it reads
+ * the project's object types and families: System and the built-in Functions
+ * object, which it names after project.c3proj "functionsName" ("Functions"
+ * without the key). Both take their names in the object class namespace
+ * (projectResources.js r495.2: the project model creates both classes and
+ * then sets the Functions object's name from "functionsName"; an object class
+ * whose name is already taken, ignoring case, throws "object class name '...'
+ * already used", and the Functions object's rename dialog refuses such names).
+ */
+export function builtinObjectClassNames(functionsName: unknown): string[] {
+  return ['System', typeof functionsName === 'string' && functionsName !== '' ? functionsName : DEFAULT_FUNCTIONS_OBJECT_NAME];
+}
+
+/**
+ * The built-in object class (System or the Functions object, see
+ * builtinObjectClassNames) whose name `name` takes, ignoring case, for the
+ * pre-write checks of create_object and create_family.
+ */
+export function findBuiltinObjectClassClash(name: string, functionsName: unknown): string | undefined {
+  const target = normalizeObjectClassName(name);
+  return builtinObjectClassNames(functionsName).find(b => normalizeObjectClassName(b) === target);
+}
+
+function describeBuiltin(builtin: string): string {
+  return builtin === 'System' ? 'the built-in System object' : `the built-in Functions object ("${builtin}", functionsName in project.c3proj)`;
+}
+
+/** Error text for a create_object/create_family name that takes the name of a built-in object class. */
+export function builtinObjectClassClashMessage(name: string, builtin: string): string {
+  return `"${name}" is the name of ${describeBuiltin(builtin)}, ignoring case. Construct 3 creates it for every project, ` +
+    `in the name namespace object types and families share, and ${objectClassLoadError(name)}. Choose a different name.`;
+}
+
+/**
  * Object class names must be unique across the objectTypes and families trees,
  * all subfolders included. The editor's loader creates one object class per
  * listed name and refuses a name that is already taken, ignoring case, with
  * "object class name 'X' already used" (komabear/c3-skill reported it as
  * "object type name 'X' already used" for a name listed twice). So exact
  * duplicates, case-only duplicates and object type/family clashes all break
- * loading.
+ * loading, and so does an object type or family named like one of the
+ * built-in object classes (builtinObjectClassNames).
  */
 export function checkObjectClassNames(project: {
   objectTypes?: FolderTree;
   families?: FolderTree;
+  functionsName?: unknown;
 }): LoadRuleIssue[] {
   const out: LoadRuleIssue[] = [];
   const groups = new Map<string, Array<{ name: string; kind: ObjectClassKind }>>();
@@ -567,8 +719,22 @@ export function checkObjectClassNames(project: {
   };
   for (const name of flattenTree(project.objectTypes)) add(name, 'object type');
   for (const name of flattenTree(project.families)) add(name, 'family');
+  const builtins = builtinObjectClassNames(project.functionsName);
 
   for (const [normalized, list] of groups) {
+    const builtin = builtins.find(b => normalizeObjectClassName(b) === normalized);
+    if (builtin) {
+      out.push({
+        rule: 'duplicate-object-name',
+        severity: 'error',
+        location: `project.c3proj > ${list.map(e => `${e.kind} "${e.name}"`).join(', ')}`,
+        message: `${list.map(e => `${e.kind} "${e.name}"`).join(' and ')} ${list.length > 1 ? 'have' : 'has'} the name of ${describeBuiltin(builtin)}, ignoring case. ` +
+          `Construct 3 creates it for every project, in the name namespace object types and families share; ${objectClassLoadError(list[0].name)}.`,
+        suggestion: `Rename the ${list.length > 1 ? 'object classes' : list[0].kind} so no object type or family is named like System or the Functions object.`,
+        key: `object-name-clash|${normalized}`,
+      });
+      continue;
+    }
     if (list.length < 2) continue;
     const first = list[0];
     const sameEntry = list.every(e => e.name === first.name && e.kind === first.kind);

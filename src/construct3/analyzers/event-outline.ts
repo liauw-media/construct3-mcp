@@ -196,7 +196,7 @@ function describeCondition(cond: Raw): string {
   const id = typeof cond.id === 'string' ? cond.id : '?';
   const not = cond.isInverted ? 'NOT ' : '';
   const disabled = cond.disabled ? ' [disabled]' : '';
-  // isOr is a per-condition flag this server's writer emits; real sheets use the block's isOrBlock.
+  // isOr is a per-condition flag older versions of this server wrote; real sheets use the block's isOrBlock.
   const nonStandard = cond.isOr === true ? ' [non-standard isOr]' : '';
   const legacy = hasOnlyLegacyBehaviorKey(cond) ? LEGACY_MARK : '';
   return `${not}${aceTarget(cond)}.${id}(${renderParams(cond.parameters)})${disabled}${nonStandard}${legacy}`;
@@ -286,7 +286,7 @@ function describeHeader(kind: OutlineNodeKind, node: Raw, conditions: Raw[]): st
   switch (kind) {
     case 'block':
     case 'else': {
-      // isElse is a block flag this server's writer emits; real sheets use the System "else" condition.
+      // isElse is a block flag older versions of this server wrote; real sheets use the System "else" condition.
       const nonStandard = node.isElse === true ? ' [non-standard isElse]' : '';
       if (kind === 'else') return `ELSE${describeConditions(node, conditions.slice(1))}${disabled}${nonStandard}`;
       const conds = describeConditions(node, conditions);
@@ -358,14 +358,16 @@ function nonStandardFlagWarnings(isElse: string[], isOr: string[], legacyBehavio
   }
   if (isElse.length > 0) {
     warnings.push(
-      `${isElse.length} block(s) carry isElse: true (${first(isElse)}), a flag written by construct3-mcp's event tools, not by Construct 3. ` +
-      'Real sheets mark an else block with a System "else" first condition, so Construct 3 may ignore the flag; the outline shows these blocks as stored, marked [non-standard isElse].',
+      `${isElse.length} block(s) carry isElse: true (${first(isElse)}), a flag written by construct3-mcp 1.8.1 and earlier, not by Construct 3. ` +
+      'Real sheets mark an else block with a System "else" first condition, so Construct 3 may ignore the flag; the outline shows these blocks as stored, marked [non-standard isElse]. ' +
+      'Run fix_legacy_event_shapes to convert them.',
     );
   }
   if (isOr.length > 0) {
     warnings.push(
-      `${isOr.length} condition(s) carry isOr: true (${first(isOr)}), a flag written by construct3-mcp's event tools, not by Construct 3. ` +
-      'Real sheets OR a block\'s conditions with the block\'s isOrBlock flag, so Construct 3 may ignore it; the outline joins the conditions as stored, marked [non-standard isOr].',
+      `${isOr.length} condition(s) carry isOr: true (${first(isOr)}), a flag written by construct3-mcp 1.8.1 and earlier, not by Construct 3. ` +
+      'Real sheets OR a block\'s conditions with the block\'s isOrBlock flag, so Construct 3 may ignore it; the outline joins the conditions as stored, marked [non-standard isOr]. ' +
+      'Run fix_legacy_event_shapes to convert them.',
     );
   }
   return warnings;

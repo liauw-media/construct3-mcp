@@ -56,6 +56,12 @@ import type {
   ObjectReference,
   Layout,
 } from '../types.js';
+import {
+  functionsObjectName,
+  findExpressionCalls,
+  mappedFunctionName,
+  parameterValues,
+} from '../event-shapes.js';
 import { forEachLayoutInstance, layerPathLabel } from '../layers.js';
 
 /** Instances of an object type in one layout, on one layer (or among the non-world instances). */
@@ -118,6 +124,20 @@ interface FamilyOnlyNames {
 
 const MAX_NODES = 100_000;
 const MAX_DEPTH = 50;
+
+/**
+ * How a call site reaches its function: a "Call function" action
+ * (`callFunction`), a function map action of the Functions object that
+ * registers it for "Call mapped function" ("function-map"), or a
+ * `Functions.Name(...)` call in an expression ("expression").
+ */
+export type FunctionCallVia = 'callFunction' | 'function-map' | 'expression';
+
+export interface FunctionCallSite {
+  sheet: string;
+  path: string;
+  via: FunctionCallVia;
+}
 
 /**
  * Parameter keys that hold an object type or family name (object parameters),
@@ -306,9 +326,16 @@ export class ProjectIndex {
   /** Object or family → instance properties that hold its SID */
   objectToInstanceProperties: Map<string, InstancePropertyReference[]> = new Map();
 
-  /** Function definitions & call sites */
+  /**
+   * Function definitions & call sites. Call sites are callFunction actions,
+   * `Functions.Name(...)` calls in the expressions of conditions and actions,
+   * and the function map actions of the Functions object ("Map function",
+   * "Map function default"), which register a function for "Call mapped
+   * function". Call sites are keyed by lower-cased function name (the editor
+   * looks functions up ignoring case); use getFunctionCalls.
+   */
   functionDefinitions: Map<string, { sheet: string; params: string[] }> = new Map();
-  functionCalls: Map<string, { sheet: string; path: string }[]> = new Map();
+  functionCalls: Map<string, FunctionCallSite[]> = new Map();
 
   /** Family membership */
   familyMembers: Map<string, string[]> = new Map();
@@ -336,6 +363,8 @@ export class ProjectIndex {
   private familyOnlyNames: Map<string, FamilyOnlyNames> = new Map();
 
   private built = false;
+  /** Name of the built-in Functions object (project.c3proj functionsName) */
+  private functionsName = 'Functions';
 
   isBuilt(): boolean {
     return this.built;
@@ -353,6 +382,7 @@ export class ProjectIndex {
     const objectTypes = await reader.readAllObjectTypes();
     const families = await reader.readAllFamilies();
     this.familyOnlyNames = familyOnlyMemberNames(objectTypes, families);
+    this.functionsName = functionsObjectName(reader);
 
     // Index event sheets (variable names first: parameters are checked against them)
     const eventSheets = await reader.readAllEventSheets();
@@ -522,6 +552,8 @@ export class ProjectIndex {
   }
 
   private indexCondition(sheetName: string, condition: Condition, path: string): void {
+    if (!condition || typeof condition !== 'object') return;
+    this.indexExpressionCalls(condition as unknown as Record<string, unknown>, sheetName, path);
     if (condition.objectClass) {
       this.addObjectReference(condition.objectClass, sheetName, path, 'condition');
     }
@@ -530,12 +562,14 @@ export class ProjectIndex {
   }
 
   private indexAction(sheetName: string, action: Action, path: string): void {
+    if (!action || typeof action !== 'object') return;
     // Script actions have type: 'script' instead of objectClass
     if ('type' in action && action.type === 'script') {
       this.indexScript(sheetName, action.script, path);
       return;
     }
 
+    const record = action as unknown as Record<string, unknown>;
     const stdAction = action as { objectClass?: string; callFunction?: string; id?: string; parameters?: unknown };
     if (stdAction.objectClass) {
       this.addObjectReference(stdAction.objectClass, sheetName, path, 'action');
@@ -544,15 +578,24 @@ export class ProjectIndex {
     this.indexFamilyMemberUses(sheetName, action as unknown as Record<string, unknown>, path, 'action');
 
     // Check for function calls
-    if (stdAction.callFunction) {
-      const calls = this.functionCalls.get(stdAction.callFunction) || [];
-      calls.push({ sheet: sheetName, path });
-      this.functionCalls.set(stdAction.callFunction, calls);
+    if (typeof stdAction.callFunction === 'string' && stdAction.callFunction) {
+      this.addFunctionCall(stdAction.callFunction, sheetName, path, 'callFunction');
     }
 
-    // Also check id for "callFunction" pattern
-    if (stdAction.id === 'callFunction' && stdAction.callFunction) {
-      // Already handled above
+    // Function maps name the mapped function in their "function" parameter
+    const mapped = mappedFunctionName(record, this.functionsName);
+    if (mapped !== undefined) this.addFunctionCall(mapped, sheetName, path, 'function-map');
+
+    this.indexExpressionCalls(record, sheetName, path);
+  }
+
+  /** Record `Functions.Name(...)` calls in the expression parameters of a condition or action. */
+  private indexExpressionCalls(ace: Record<string, unknown>, sheetName: string, path: string): void {
+    for (const value of parameterValues(ace)) {
+      if (typeof value !== 'string') continue;
+      for (const call of findExpressionCalls(value, this.functionsName)) {
+        this.addFunctionCall(call.name, sheetName, path, 'expression');
+      }
     }
   }
 
@@ -659,6 +702,18 @@ export class ProjectIndex {
   private indexScript(sheetName: string, script: unknown, path: string): void {
     const names = new Set(scriptObjectTokens(scriptText(script)).filter(n => this.referableNames.has(n)));
     for (const name of names) this.addObjectReference(name, sheetName, path, 'script');
+  }
+
+  private addFunctionCall(functionName: string, sheetName: string, path: string, via: FunctionCallVia): void {
+    const key = functionName.toLowerCase();
+    const calls = this.functionCalls.get(key) || [];
+    calls.push({ sheet: sheetName, path, via });
+    this.functionCalls.set(key, calls);
+  }
+
+  /** Call sites of a function, matched ignoring case (as the editor looks functions up). */
+  getFunctionCalls(functionName: string): FunctionCallSite[] {
+    return this.functionCalls.get(functionName.toLowerCase()) ?? [];
   }
 
   private addObjectReference(objectName: string, sheetName: string, path: string, context: ObjectReference['context']): void {

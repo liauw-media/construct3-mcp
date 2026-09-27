@@ -169,6 +169,35 @@ describe('editor reload note — mutation responses', () => {
     expect(fixed.editorNote).toBe(EDITOR_RELOAD_NOTE);
   });
 
+  it('fix_legacy_event_shapes has the note only when it rewrote a sheet', async () => {
+    const clean = payload(await mockServer().callTool('fix_legacy_event_shapes', { dryRun: false }));
+    expect(clean.success).toBe(true);
+    expect(clean.totalConverted).toBe(0);
+    expect(clean.editorNote).toBeUndefined();
+
+    const server = new MockServer();
+    const reader = new MockReader({
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1',
+        sid: 1,
+        events: [{
+          eventType: 'block', sid: 100,
+          conditions: [{ id: 'a', objectClass: 'System', sid: 101 }, { id: 'b', objectClass: 'System', sid: 102, isOr: true }],
+          actions: [],
+        }],
+      }]]),
+    });
+    registerEventTools({ server, reader, writer: new MockWriter(), idGen: new MockIdGenerator() } as never);
+
+    const dry = payload(await server.callTool('fix_legacy_event_shapes', {}));
+    expect(dry.totalConverted).toBe(1);
+    expect(dry.editorNote).toBeUndefined();
+
+    const fixed = payload(await server.callTool('fix_legacy_event_shapes', { dryRun: false }));
+    expect(fixed.totalConverted).toBe(1);
+    expect(fixed.editorNote).toBe(EDITOR_RELOAD_NOTE);
+  });
+
   it('error responses have no note', async () => {
     const result = await mockServer().callTool('create_object', { name: 'Hero', pluginId: 'Sprite' });
     expect(result.isError).toBe(true);

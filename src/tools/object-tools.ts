@@ -15,11 +15,14 @@ import { forEachLayoutInstance } from '../construct3/layers.js';
 import {
   checkFamilyPlugins,
   findObjectClassNameClash,
+  findBuiltinObjectClassClash,
+  builtinObjectClassClashMessage,
   formatLoadRuleIssue,
   loadRuleErrorMessage,
   newLoadRuleIssues,
   objectClassNameClashMessage,
 } from '../construct3/analyzers/load-rules.js';
+import { functionsObjectName } from '../construct3/event-shapes.js';
 import {
   GLOBAL_PLUGINS,
   NONWORLD_GLOBAL_PLUGINS,
@@ -39,7 +42,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
     'create_object',
     'Create a new object type in the Construct3 project',
     {
-      name: z.string().max(200).describe('Object name (alphanumeric + underscore; must not match an existing object type or family name, ignoring case)'),
+      name: z.string().max(200).describe('Object name (alphanumeric + underscore; must not match an existing object type or family name, "System" or the name of the built-in Functions object, ignoring case)'),
       pluginId: z.string().max(100).describe('Plugin ID — "Sprite", "Text", "TiledBg", "NinePatch", "Audio", etc.'),
       isGlobal: z.boolean().optional().default(false).describe('Whether object is global (auto-detected for known global plugins)'),
       subfolder: z.string().max(500).optional().describe('Subfolder path in project (e.g., "UI/Buttons")'),
@@ -58,6 +61,11 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const nameClash = findObjectClassNameClash(args.name, existing, await reader.listFamilies());
         if (nameClash) {
           return toolError(objectClassNameClashMessage(args.name, nameClash));
+        }
+        // ...and with the built-in System and Functions objects
+        const builtinClash = findBuiltinObjectClassClash(args.name, functionsObjectName(reader));
+        if (builtinClash) {
+          return toolError(builtinObjectClassClashMessage(args.name, builtinClash));
         }
         if (args.subfolder) {
           const folderClash = findFolderPathClash(reader.getProject().objectTypes, args.subfolder);
@@ -353,7 +361,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
     'create_family',
     'Create a new family in the project. Families let you group object types and share instance variables and behaviors across them.',
     {
-      name: z.string().max(200).describe('Family name (must not match an existing object type or family name, ignoring case)'),
+      name: z.string().max(200).describe('Family name (must not match an existing object type or family name, "System" or the name of the built-in Functions object, ignoring case)'),
       pluginId: z.string().max(100).describe('Plugin ID all members must share (e.g. "Sprite", "Text"); members of another plugin are refused'),
       members: z.array(z.string().max(200)).optional().default([]).describe('Object type names to add as initial members'),
       subfolder: z.string().max(500).optional().describe('Subfolder path in project (e.g. "UI")'),
@@ -372,6 +380,11 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const nameClash = findObjectClassNameClash(args.name, await reader.listObjectTypes(), existing);
         if (nameClash) {
           return toolError(objectClassNameClashMessage(args.name, nameClash));
+        }
+        // ...and with the built-in System and Functions objects
+        const builtinClash = findBuiltinObjectClassClash(args.name, functionsObjectName(reader));
+        if (builtinClash) {
+          return toolError(builtinObjectClassClashMessage(args.name, builtinClash));
         }
         if (args.subfolder) {
           const folderClash = findFolderPathClash(reader.getProject().families, args.subfolder);

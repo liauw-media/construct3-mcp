@@ -86,3 +86,37 @@ describe('get_asset_usage', () => {
     expect(byName['spare.webm'].status).toBe('unused');
   });
 });
+
+describe('get_function_map', () => {
+  it('counts calls, expression calls and function map registrations, matching names ignoring case', async () => {
+    resetProjectIndex();
+    const fn = (name: string, sid: number) => ({ functionName: name, functionParameters: [], eventType: 'function-block', conditions: [], actions: [], sid });
+    const { server } = setup({
+      Main: [
+        fn('Twice', 10),
+        fn('Mapped', 11),
+        fn('Unused', 12),
+        { eventType: 'block', sid: 20, conditions: [
+          { id: 'compare-x', objectClass: 'Sprite', sid: 21, parameters: { comparison: 0, 'x-co-ordinate': 'functions.twice(1)' } },
+        ], actions: [
+          { callFunction: 'twice', sid: 22, parameters: ['Functions.Twice(2)'] },
+          { id: 'map-function', objectClass: 'Functions', sid: 23, parameters: { name: '"m"', string: '"a"', function: 'mapped' } },
+        ] },
+      ],
+    });
+    const data = parseResult(await server.callTool('get_function_map', { detail: 'full' }));
+    const twice = data.functions.find((f: { name: string }) => f.name === 'Twice');
+    expect(twice.callCount).toBe(3);
+    expect(twice.callSites.map((c: { via: string; path: string }) => [c.via, c.path])).toEqual([
+      ['expression', 'block > condition:0'],
+      ['callFunction', 'block > action:0'],
+      ['expression', 'block > action:0'],
+    ]);
+    expect(data.functions.find((f: { name: string }) => f.name === 'Mapped').callSites).toEqual([
+      { sheet: 'Main', path: 'block > action:1', via: 'function-map' },
+    ]);
+    expect(data.summary.uncalledFunctions).toEqual(['Unused']);
+    expect(data.summary.totalCallSites).toBe(4);
+    resetProjectIndex();
+  });
+});
