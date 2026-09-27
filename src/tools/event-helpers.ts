@@ -27,6 +27,7 @@ import {
   toPositionalArguments,
   checkFunctionCallArguments,
   createFunctionCallAction,
+  LEGACY_CALL_KEYS,
   resolveCallName,
   resolveMappedFunctionName,
   mappedFunctionName,
@@ -93,7 +94,10 @@ export const EVENT_INPUT_DESCRIPTIONS = {
 // its content without a word (a comment's text, a colour, a mistyped
 // "params"). The one exception is "sid", which inputs copied from
 // get_eventsheet_details or an editor-saved sheet carry: it is ignored, since
-// every written event, condition and action gets a new SID.
+// every written event, condition and action gets a new SID. The arguments of
+// add_event_block and update_event_block are strict as well: those tools are
+// registered with a strict object schema (registerTool), since a raw shape
+// given to server.tool() is wrapped in a stripping object by the MCP SDK.
 
 /** Drop an input object's "sid" (see above); anything else is passed on unchanged. */
 function withoutSid(value: unknown): unknown {
@@ -140,14 +144,28 @@ const conditionObjectSchema = z.object({
   disabled: z.boolean().optional().describe('Disable this individual condition'),
   isOr: z.boolean().optional().describe('DEPRECATED: use the block\'s isOrBlock. Never written. If every condition after the first carries isOr, the block is written as an OR block; isOr on only some of them is refused (Construct 3 ORs whole events).'),
 }, {
-  errorMap: unknownKeysErrorMap('a condition', 'A condition has id, objectClass, behaviorType, parameters, isInverted and disabled; a "sid" is ignored.'),
+  errorMap: unknownKeysErrorMap('a condition', 'A condition has id, objectClass, behaviorType (or its deprecated alias "behavior-type"), parameters, isInverted, disabled and the deprecated isOr; a "sid" is ignored.'),
 }).strict();
 
 /** A condition input; a "sid" key is ignored (see Strict Input). */
 export const conditionSchema = z.preprocess(withoutSid, conditionObjectSchema);
 
-/** Standard action schema */
-export const standardActionSchema = z.object({
+/**
+ * What a function call accepts, in both input forms. The editor saves calls as
+ * { callFunction, sid, disabled?, parameters? }: the keys of the older form
+ * (LEGACY_CALL_KEYS: id, objectClass, behaviorType, "behavior-type") name
+ * nothing a call needs and are dropped with a warning (buildAction), while a
+ * breakpoint is refused, since no editor-saved call on record has one.
+ */
+const FUNCTION_CALL_KEYS =
+  'A function call has callFunction, parameters and disabled; id, objectClass, behaviorType and "behavior-type" of the older call form are dropped with a warning, and a "sid" is ignored. ' +
+  'A breakpoint on a function call is not supported (no editor-saved function call on record has one).';
+
+/** Keys a function call is refused with in the older form, where the standard action schema would accept them. */
+const REFUSED_CALL_KEYS = ['breakpoint'] as const;
+
+/** Standard action schema (also the older function call form { id, objectClass, callFunction, parameters: {...} }) */
+const standardActionObjectSchema = z.object({
   id: z.string().describe('Action ACE id (kebab-case, e.g., "set-instvar-value", "destroy")'),
   objectClass: z.string().describe('Object name, family name, "System", or "Functions" for the built-in Functions object ("set-function-return-value" = Set return value, "map-function", "map-function-default", "call-mapped-function")'),
   behaviorType: z.string().optional().describe(behaviorTypeDescription),
@@ -159,20 +177,42 @@ export const standardActionSchema = z.object({
   disabled: z.boolean().optional().describe('Disable this individual action'),
   breakpoint: z.boolean().optional().describe('Debugger breakpoint on this action, as the editor saves it (written only when true)'),
 }, {
-  errorMap: unknownKeysErrorMap('an action', 'An action has id, objectClass, behaviorType, parameters, disabled and breakpoint; a "sid" is ignored. Function calls are { callFunction, parameters: [...] }, script actions { type: "script", script }, comment rows { type: "comment", text }.'),
+  errorMap: unknownKeysErrorMap('an action', 'An action has id, objectClass, behaviorType (or its deprecated alias "behavior-type"), parameters, disabled and breakpoint, and in the older function call form callFunction; a "sid" is ignored. Function calls are { callFunction, parameters: [...] }, script actions { type: "script", script }, comment rows { type: "comment", text }.'),
 }).strict();
+
+/**
+ * A plugin/behavior/System action, or a function call in the older form. A
+ * call in that form refuses the keys no function call is written with
+ * (REFUSED_CALL_KEYS), as the editor-shape call schema does.
+ */
+export const standardActionSchema = standardActionObjectSchema.superRefine((a, ctx) => {
+  if (!isFunctionCall(a)) return;
+  const refused = REFUSED_CALL_KEYS.filter(k => a[k] !== undefined);
+  if (refused.length === 0) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: [refused[0]],
+    message: `Key(s) ${refused.map(k => JSON.stringify(k)).join(', ')} in a function call: they would not be written, so the call is refused. ${FUNCTION_CALL_KEYS}`,
+  });
+});
 
 /** A function call argument: an expression string, or true/false for a boolean parameter. */
 export const functionCallArgumentSchema = z.union([z.string().max(10_000), z.number(), z.boolean()]);
 
-/** Function call action, in the editor's shape (no id/objectClass) */
+const legacyCallKeyDescription = 'Older call form only: not written (the editor saves function calls without it); dropped with a warning';
+
+/** Function call action, in the editor's shape (no id/objectClass); the older form's keys are dropped with a warning */
 export const functionCallActionSchema = z.object({
   callFunction: z.string().min(1).max(200).describe('Name of the event function to call'),
   parameters: z.array(functionCallArgumentSchema).max(100).optional()
     .describe('Arguments in the order of the function\'s parameters: expressions as strings (e.g. "1", "\\"text\\"", "Player.X"; numbers are written as strings), true/false for boolean parameters'),
   disabled: z.boolean().optional().describe('Disable this individual action'),
+  id: z.string().optional().describe(legacyCallKeyDescription),
+  objectClass: z.string().optional().describe(legacyCallKeyDescription),
+  behaviorType: z.string().optional().describe(legacyCallKeyDescription),
+  'behavior-type': z.string().optional().describe(legacyCallKeyDescription),
 }, {
-  errorMap: unknownKeysErrorMap('a function call', 'A function call has callFunction, parameters and disabled; a "sid" is ignored.'),
+  errorMap: unknownKeysErrorMap('a function call', FUNCTION_CALL_KEYS),
 }).strict();
 
 /** Script action schema */
@@ -263,7 +303,7 @@ export function unsupportedSubEventMessage(eventType: unknown): string {
     `${what} cannot be added as a sub-event with add_event_block; it would be lost, so the call is refused. ${SUB_EVENT_SHAPES} ${instead}`;
   switch (eventType) {
     case 'variable':
-      return refused('An event variable', 'A global variable is added with add_event_to_sheet (eventType "variable").');
+      return refused('An event variable', 'Inside an event it would be a local variable, which add_event_block does not add. add_event_to_sheet (eventType "variable") adds a variable only at the top level of a sheet, where it is a global variable, a different scope.');
     case 'group':
       return refused('A group', 'Groups are added with add_event_to_sheet (eventType "group"); add_event_block with groupPath adds blocks into one.');
     case 'function-block':
@@ -1420,8 +1460,9 @@ export async function buildAction(
     const args = toPositionalArguments(rec.parameters, signature, label);
     ctx.warnings.push(...checkFunctionCallArguments(args, signature, name, label));
     const callName = resolveCallName(name, signature, label, ctx.warnings);
-    if ('id' in rec || 'objectClass' in rec) {
-      ctx.warnings.push(`${label}: written in the editor's function call shape { callFunction, sid, parameters: [...] }; id/objectClass were dropped. Pass { callFunction, parameters: [...] } in future calls.`);
+    const dropped = LEGACY_CALL_KEYS.filter(k => rec[k] !== undefined);
+    if (dropped.length > 0) {
+      ctx.warnings.push(`${label}: written in the editor's function call shape { callFunction, sid, parameters: [...] }; ${dropped.join('/')} ${dropped.length === 1 ? 'was' : 'were'} dropped. Pass { callFunction, parameters: [...] } in future calls.`);
     }
     const sid = await idGen.generateSid(reader);
     return createFunctionCallAction(callName, sid, args, rec.disabled === true);

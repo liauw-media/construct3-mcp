@@ -356,25 +356,32 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   // ─── add_event_block ──────────────────────────────────────
 
-  server.tool(
+  // Registered with a strict object schema, so unknown arguments are refused
+  // (server.tool() with a raw shape would drop them; see Strict Input in event-helpers.ts).
+  server.registerTool(
     'add_event_block',
-    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Written in the shapes the Construct 3 editor saves: sub-events (blocks, also without conditions, which run whenever their parent runs; comments; scripts), else and else-if blocks (a System "else" first condition), OR blocks (isOrBlock), function calls ({ callFunction, parameters: [...] }), script actions (lines, language "javascript"), comment rows and per-condition/per-action disabling. Unknown keys are refused, never dropped. Writes that would break a checked editor load-time rule (expression syntax, empty expressions, trigger placement) are refused.',
     {
-      sheetName: z.string().max(200).describe('Target event sheet'),
-      eventType: z.literal('block', {
-        errorMap: (_issue, ctx) => ({
-          message: `add_event_block adds a block event, not ${JSON.stringify(ctx.data)}; the call is refused. ` +
-            'Comments, groups, variables, functions and includes are added with add_event_to_sheet; a comment or script can also be a sub-event in children.',
-        }),
-      }).optional().describe('Optional, only "block": this tool adds block events. Comments, groups, variables, functions and includes: add_event_to_sheet (comments and scripts can also be sub-events in children)'),
-      conditions: z.array(conditionSchema).optional().default([]).describe(EVENT_INPUT_DESCRIPTIONS.conditions),
-      actions: z.array(actionSchema).optional().default([]).describe('Actions: plugin/behavior/System actions, function calls { callFunction, parameters: [...] }, script actions { type: "script", script } and comment rows { type: "comment", text, "text-color"?, "background-color"? }'),
-      groupPath: z.string().max(500).optional().describe('Insert inside group by title path (e.g., "Movement > Collision"). Titles match exactly first, then ignoring leading/trailing whitespace when that fits one group'),
-      position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event block'),
-      disabled: z.boolean().optional().default(false).describe('Create the event block disabled'),
-      isElse: z.boolean().optional().default(false).describe(EVENT_INPUT_DESCRIPTIONS.isElse),
-      isOrBlock: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isOrBlock),
-      children: z.array(childEventSchema).optional().default([]).describe('Sub-events nested inside this block (recursive, max depth 10, max 200 total events): blocks { conditions?, actions?, disabled?, isElse?, isOrBlock?, children? }, comments { eventType: "comment", text } and scripts { eventType: "script", script }. Other event types (variables, groups, functions, includes) and unknown keys are refused'),
+      description: 'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Written in the shapes the Construct 3 editor saves: sub-events (blocks, also without conditions, which run whenever their parent runs; comments; scripts), else and else-if blocks (a System "else" first condition), OR blocks (isOrBlock), function calls ({ callFunction, parameters: [...] }), script actions (lines, language "javascript"), comment rows and per-condition/per-action disabling. Unknown keys, in the arguments and at any depth, are refused, never dropped. Writes that would break a checked editor load-time rule (expression syntax, empty expressions, trigger placement) are refused.',
+      inputSchema: z.object({
+        sheetName: z.string().max(200).describe('Target event sheet'),
+        eventType: z.literal('block', {
+          errorMap: (_issue, ctx) => ({
+            message: `add_event_block adds a block event, not ${JSON.stringify(ctx.data)}; the call is refused. ` +
+              'Comments, groups, variables, functions and includes are added with add_event_to_sheet; a comment or script can also be a sub-event in children.',
+          }),
+        }).optional().describe('Optional, only "block": this tool adds block events. Comments, groups, variables, functions and includes: add_event_to_sheet (comments and scripts can also be sub-events in children)'),
+        sid: z.number().optional().describe('Ignored: a block copied from get_eventsheet_details may carry its SID, but the new block always gets a new one'),
+        conditions: z.array(conditionSchema).optional().default([]).describe(EVENT_INPUT_DESCRIPTIONS.conditions),
+        actions: z.array(actionSchema).optional().default([]).describe('Actions: plugin/behavior/System actions, function calls { callFunction, parameters: [...] }, script actions { type: "script", script } and comment rows { type: "comment", text, "text-color"?, "background-color"? }'),
+        groupPath: z.string().max(500).optional().describe('Insert inside group by title path (e.g., "Movement > Collision"). Titles match exactly first, then ignoring leading/trailing whitespace when that fits one group'),
+        position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event block'),
+        disabled: z.boolean().optional().default(false).describe('Create the event block disabled'),
+        isElse: z.boolean().optional().default(false).describe(EVENT_INPUT_DESCRIPTIONS.isElse),
+        isOrBlock: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isOrBlock),
+        children: z.array(childEventSchema).optional().default([]).describe('Sub-events nested inside this block (recursive, max depth 10, max 200 total events): blocks { conditions?, actions?, disabled?, isElse?, isOrBlock?, children? }, comments { eventType: "comment", text } and scripts { eventType: "script", script }. Other event types (variables, groups, functions, includes) and unknown keys are refused'),
+      }, {
+        errorMap: unknownKeysErrorMap('the arguments of add_event_block', 'add_event_block takes sheetName, eventType, conditions, actions, groupPath, position, disabled, isElse, isOrBlock and children; a "sid" is ignored. Comments, groups, variables, functions and includes are added with add_event_to_sheet.'),
+      }).strict(),
     },
     async (args) => {
       try {
@@ -1139,36 +1146,41 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   // ─── update_event_block ─────────────────────────────────────
 
-  server.tool(
+  // Registered with a strict object schema, so unknown arguments are refused (see add_event_block).
+  server.registerTool(
     'update_event_block',
-    'Update an existing block event in an event sheet — modify action parameters, add/remove actions or conditions, toggle disabled state, make it an else or OR block. Identify the block by its SID (use get_eventsheet_details to find it). A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one.',
     {
-      sheetName: z.string().max(200).describe('Target event sheet'),
-      sid: z.number().int().positive().describe('SID of the block event to update'),
-      eventPath: eventPathSchema,
-      disabled: z.boolean().optional().describe('Enable or disable the entire block'),
-      isElse: z.boolean().optional().describe('true: make the block an else block (puts the System "else" condition first; existing conditions then make an else-if). false: remove the leading "else" condition. Applied after all other condition changes.'),
-      isOrBlock: z.boolean().optional().describe('true: make the block an OR block (its conditions are ORed); false: AND-combine them again'),
-      updateActions: z.array(z.object({
-        index: z.number().int().min(0).describe('Action index (0-based)'),
-        parameters: z.union([boundedRecord(), z.array(functionCallArgumentSchema).max(100)]).optional()
-          .describe('New parameter values — merged with existing (max 100 keys, depth 6). For a function call: an array replaces the arguments; an object keyed by position ("0", "1", …) or parameter name replaces single arguments'),
-        disabled: z.boolean().optional().describe('Enable or disable this action'),
+      description: 'Update an existing block event in an event sheet — modify action parameters, add/remove actions or conditions, toggle disabled state, make it an else or OR block. Identify the block by its SID (use get_eventsheet_details to find it). A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Unknown arguments and keys are refused, never dropped.',
+      inputSchema: z.object({
+        sheetName: z.string().max(200).describe('Target event sheet'),
+        sid: z.number().int().positive().describe('SID of the block event to update'),
+        eventPath: eventPathSchema,
+        disabled: z.boolean().optional().describe('Enable or disable the entire block'),
+        isElse: z.boolean().optional().describe('true: make the block an else block (puts the System "else" condition first; existing conditions then make an else-if). false: remove the leading "else" condition. Applied after all other condition changes.'),
+        isOrBlock: z.boolean().optional().describe('true: make the block an OR block (its conditions are ORed); false: AND-combine them again'),
+        updateActions: z.array(z.object({
+          index: z.number().int().min(0).describe('Action index (0-based)'),
+          parameters: z.union([boundedRecord(), z.array(functionCallArgumentSchema).max(100)]).optional()
+            .describe('New parameter values — merged with existing (max 100 keys, depth 6). For a function call: an array replaces the arguments; an object keyed by position ("0", "1", …) or parameter name replaces single arguments'),
+          disabled: z.boolean().optional().describe('Enable or disable this action'),
+        }, {
+          errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
+        }).strict()).optional().describe('Actions to update by index'),
+        updateConditions: z.array(z.object({
+          index: z.number().int().min(0).describe('Condition index (0-based)'),
+          parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
+          isInverted: z.boolean().optional().describe('Toggle inversion'),
+          disabled: z.boolean().optional().describe('Enable or disable this condition'),
+        }, {
+          errorMap: unknownKeysErrorMap('an updateConditions entry', 'An entry has index, parameters, isInverted and disabled; to change anything else, remove the condition (removeConditionIndices) and add a new one (addConditions).'),
+        }).strict()).optional().describe('Conditions to update by index'),
+        addActions: z.array(actionSchema).optional().describe('Append new actions to the block (same shapes as add_event_block)'),
+        addConditions: z.array(conditionSchema).optional().describe('Append new conditions to the block'),
+        removeActionIndices: z.array(z.number().int().min(0)).optional().describe('Remove actions by index (0-based, applied before adds)'),
+        removeConditionIndices: z.array(z.number().int().min(0)).optional().describe('Remove conditions by index (0-based, applied before adds)'),
       }, {
-        errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
-      }).strict()).optional().describe('Actions to update by index'),
-      updateConditions: z.array(z.object({
-        index: z.number().int().min(0).describe('Condition index (0-based)'),
-        parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
-        isInverted: z.boolean().optional().describe('Toggle inversion'),
-        disabled: z.boolean().optional().describe('Enable or disable this condition'),
-      }, {
-        errorMap: unknownKeysErrorMap('an updateConditions entry', 'An entry has index, parameters, isInverted and disabled; to change anything else, remove the condition (removeConditionIndices) and add a new one (addConditions).'),
-      }).strict()).optional().describe('Conditions to update by index'),
-      addActions: z.array(actionSchema).optional().describe('Append new actions to the block (same shapes as add_event_block)'),
-      addConditions: z.array(conditionSchema).optional().describe('Append new conditions to the block'),
-      removeActionIndices: z.array(z.number().int().min(0)).optional().describe('Remove actions by index (0-based, applied before adds)'),
-      removeConditionIndices: z.array(z.number().int().min(0)).optional().describe('Remove conditions by index (0-based, applied before adds)'),
+        errorMap: unknownKeysErrorMap('the arguments of update_event_block', 'update_event_block takes sheetName, sid, eventPath, disabled, isElse, isOrBlock, updateActions, updateConditions, addActions, addConditions, removeActionIndices and removeConditionIndices. It does not add sub-events.'),
+      }).strict(),
     },
     async (args) => {
       try {

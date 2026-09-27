@@ -9,7 +9,10 @@ import { z } from 'zod';
 interface ToolRegistration {
   name: string;
   description: string;
+  /** The argument shape (for registerTool: the shape of its object schema). */
   schema: Record<string, z.ZodTypeAny>;
+  /** registerTool only: the object schema the arguments are parsed with, as given (e.g. strict). */
+  inputSchema?: z.ZodTypeAny;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -49,6 +52,23 @@ export class MockServer {
   }
 
   /**
+   * Mimics McpServer.registerTool() — captures the registration. An object
+   * schema given as inputSchema is used as it is, as the real server does
+   * (so a strict schema refuses unknown arguments); a raw shape is wrapped
+   * in z.object(), which strips them.
+   */
+  registerTool(
+    name: string,
+    config: { description?: string; inputSchema?: z.ZodTypeAny | Record<string, z.ZodTypeAny> },
+    handler: (args: Record<string, unknown>) => Promise<unknown>,
+  ): void {
+    const given = config.inputSchema ?? {};
+    const inputSchema = given instanceof z.ZodType ? given : z.object(given);
+    const schema = inputSchema instanceof z.ZodObject ? inputSchema.shape as Record<string, z.ZodTypeAny> : {};
+    this.tools.set(name, { name, description: config.description ?? '', schema, inputSchema, handler });
+  }
+
+  /**
    * Invoke a registered tool by name with the given args.
    * Applies Zod schema parsing (just like the real MCP server) so that
    * .optional().default() values are applied.
@@ -62,7 +82,7 @@ export class MockServer {
       throw new Error(`Tool "${name}" not registered. Available: ${Array.from(this.tools.keys()).join(', ')}`);
     }
     // Parse through Zod schema to apply defaults, matching real MCP server behavior
-    const schemaObj = z.object(reg.schema);
+    const schemaObj = reg.inputSchema ?? z.object(reg.schema);
     const parsed = schemaObj.parse(args);
     return reg.handler(parsed) as Promise<{
       content: Array<{ type: string; text: string }>;
