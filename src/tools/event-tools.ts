@@ -53,6 +53,7 @@ import {
   loadFunctionSignatures,
   resolveFunctionMapParameter,
   functionCallArgumentSchema,
+  unknownKeysErrorMap,
   EVENT_INPUT_DESCRIPTIONS,
 } from './event-helpers.js';
 import {
@@ -147,7 +148,7 @@ function danglingReferenceList(report: DeleteReferenceReport): Record<string, un
 
 /**
  * Error for a parameter update on an action row that has no parameters:
- * editor-saved comment rows are { type, text } and script actions
+ * editor-saved comment rows are { type, text, colours? } and script actions
  * { type, language, script, disabled? }. Null for other actions.
  */
 function parameterlessRowError(action: Record<string, unknown>, index: number): string | null {
@@ -357,17 +358,23 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'add_event_block',
-    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Written in the shapes the Construct 3 editor saves: sub-events (also without conditions, which run whenever their parent runs), else and else-if blocks (a System "else" first condition), OR blocks (isOrBlock), function calls ({ callFunction, parameters: [...] }), script actions (lines, language "javascript"), comment rows and per-condition/per-action disabling. Writes that would break a checked editor load-time rule (expression syntax, empty expressions, trigger placement) are refused.',
+    'Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Written in the shapes the Construct 3 editor saves: sub-events (blocks, also without conditions, which run whenever their parent runs; comments; scripts), else and else-if blocks (a System "else" first condition), OR blocks (isOrBlock), function calls ({ callFunction, parameters: [...] }), script actions (lines, language "javascript"), comment rows and per-condition/per-action disabling. Unknown keys are refused, never dropped. Writes that would break a checked editor load-time rule (expression syntax, empty expressions, trigger placement) are refused.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
+      eventType: z.literal('block', {
+        errorMap: (_issue, ctx) => ({
+          message: `add_event_block adds a block event, not ${JSON.stringify(ctx.data)}; the call is refused. ` +
+            'Comments, groups, variables, functions and includes are added with add_event_to_sheet; a comment or script can also be a sub-event in children.',
+        }),
+      }).optional().describe('Optional, only "block": this tool adds block events. Comments, groups, variables, functions and includes: add_event_to_sheet (comments and scripts can also be sub-events in children)'),
       conditions: z.array(conditionSchema).optional().default([]).describe(EVENT_INPUT_DESCRIPTIONS.conditions),
-      actions: z.array(actionSchema).optional().default([]).describe('Actions: plugin/behavior/System actions, function calls { callFunction, parameters: [...] }, script actions { type: "script", script } and comment rows { type: "comment", text }'),
+      actions: z.array(actionSchema).optional().default([]).describe('Actions: plugin/behavior/System actions, function calls { callFunction, parameters: [...] }, script actions { type: "script", script } and comment rows { type: "comment", text, "text-color"?, "background-color"? }'),
       groupPath: z.string().max(500).optional().describe('Insert inside group by title path (e.g., "Movement > Collision"). Titles match exactly first, then ignoring leading/trailing whitespace when that fits one group'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event block'),
       disabled: z.boolean().optional().default(false).describe('Create the event block disabled'),
       isElse: z.boolean().optional().default(false).describe(EVENT_INPUT_DESCRIPTIONS.isElse),
       isOrBlock: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isOrBlock),
-      children: z.array(childEventSchema).optional().default([]).describe('Sub-events nested inside this block (recursive, max depth 10, max 200 total events)'),
+      children: z.array(childEventSchema).optional().default([]).describe('Sub-events nested inside this block (recursive, max depth 10, max 200 total events): blocks { conditions?, actions?, disabled?, isElse?, isOrBlock?, children? }, comments { eventType: "comment", text } and scripts { eventType: "script", script }. Other event types (variables, groups, functions, includes) and unknown keys are refused'),
     },
     async (args) => {
       try {
@@ -1147,13 +1154,17 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         parameters: z.union([boundedRecord(), z.array(functionCallArgumentSchema).max(100)]).optional()
           .describe('New parameter values — merged with existing (max 100 keys, depth 6). For a function call: an array replaces the arguments; an object keyed by position ("0", "1", …) or parameter name replaces single arguments'),
         disabled: z.boolean().optional().describe('Enable or disable this action'),
-      })).optional().describe('Actions to update by index'),
+      }, {
+        errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
+      }).strict()).optional().describe('Actions to update by index'),
       updateConditions: z.array(z.object({
         index: z.number().int().min(0).describe('Condition index (0-based)'),
         parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
         isInverted: z.boolean().optional().describe('Toggle inversion'),
         disabled: z.boolean().optional().describe('Enable or disable this condition'),
-      })).optional().describe('Conditions to update by index'),
+      }, {
+        errorMap: unknownKeysErrorMap('an updateConditions entry', 'An entry has index, parameters, isInverted and disabled; to change anything else, remove the condition (removeConditionIndices) and add a new one (addConditions).'),
+      }).strict()).optional().describe('Conditions to update by index'),
       addActions: z.array(actionSchema).optional().describe('Append new actions to the block (same shapes as add_event_block)'),
       addConditions: z.array(conditionSchema).optional().describe('Append new conditions to the block'),
       removeActionIndices: z.array(z.number().int().min(0)).optional().describe('Remove actions by index (0-based, applied before adds)'),
@@ -1311,7 +1322,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               if (rowProblem) return toolError(rowProblem);
             }
             if (upd.disabled !== undefined && act.type === 'comment') {
-              return toolError(`Action ${upd.index} is a comment row, which cannot be disabled (Construct 3 saves comment rows as { type, text } only).`);
+              return toolError(`Action ${upd.index} is a comment row, which cannot be disabled (editor-saved comment rows are { type, text } with optional "text-color" and "background-color"; none carries "disabled").`);
             }
             if (upd.parameters) {
               if (isFunctionCall(act)) {

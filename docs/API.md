@@ -549,19 +549,20 @@ Names of object types and families are not compared: the editor accepts an event
 
 ### `add_event_block`
 
-Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events, events without conditions, else and else-if blocks, OR blocks, function calls, script actions, comment rows, and disabling single conditions and actions. Everything is written in the shapes the Construct 3 editor saves (see **Written shapes** below).
+Add a block event (conditions + actions) to an event sheet — the core of gameplay logic. Supports sub-events (blocks, comments and scripts), events without conditions, else and else-if blocks, OR blocks, function calls, script actions, comment rows, and disabling single conditions and actions. Everything is written in the shapes the Construct 3 editor saves (see **Written shapes** below). Keys the tool does not know are refused, never dropped (see **Unknown keys** below).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
+| `eventType` | `"block"` | No | Optional; only `"block"` is accepted. Any other value (e.g. `"comment"`) is refused: comments, groups, variables, functions and includes are added with `add_event_to_sheet`, and a comment or script can also be a sub-event in `children`. |
 | `conditions` | array | No | Conditions (default: `[]`). Each: `{ id, objectClass, behaviorType?, parameters?, isInverted?, disabled? }`. AND-combined, or OR-combined in an OR block. `[]` makes an event without conditions: at the top level (or in a group) it runs every tick, as a sub-event whenever its parent runs. |
-| `actions` | array | No | Actions (default: `[]`). Plugin/behavior/System action: `{ id, objectClass, behaviorType?, parameters?, disabled? }`. Function call: `{ callFunction, parameters?: [...], disabled? }`. Script: `{ type: "script", script, language?, disabled? }`. Comment row: `{ type: "comment", text }` |
+| `actions` | array | No | Actions (default: `[]`). Plugin/behavior/System action: `{ id, objectClass, behaviorType?, parameters?, disabled?, breakpoint? }`. Function call: `{ callFunction, parameters?: [...], disabled? }`. Script: `{ type: "script", script, language?, disabled? }`. Comment row: `{ type: "comment", text, "text-color"?, "background-color"? }` |
 | `groupPath` | string | No | Insert inside group by title path (e.g., `"Movement > Collision"`). Segments are split at `>`. A segment first matches a group title exactly as typed, one space on each side of `>` counting as part of the separator (`"HUD "` and `"Parent > HUD "` name the title `"HUD "`, `"HUD"` and `"Parent > HUD"` the title `"HUD"`), so each of two sibling groups titled `"HUD"` and `"HUD "` can be reached. The editor also saves titles with leading or trailing whitespace, so a segment without such a match then matches the one group whose trimmed title equals the trimmed segment (`"HUD"` finds a lone `"HUD "`). When several do (e.g. `"HUD"` next to `"HUD "` and `" HUD"`), the call is refused with the candidate titles. |
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 | `disabled` | boolean | No | Create the block disabled (default: false) |
 | `isElse` | boolean | No | Make it an else block (default: false): a System `else` condition is written first. Conditions given in `conditions` follow it and make an else-if. |
 | `isOrBlock` | boolean | No | Make it an OR block: the event runs when any of its conditions is true (Construct 3 *Make 'Or' block*). An OR block may hold several triggers. |
-| `children` | array | No | Sub-events nested inside this block (recursive). Each child has the same shape: `{ conditions?, actions?, disabled?, isElse?, isOrBlock?, children? }` |
+| `children` | array | No | Sub-events nested inside this block (recursive), each one of: a block `{ eventType?: "block", conditions?, actions?, disabled?, isElse?, isOrBlock?, children? }`, a comment `{ eventType: "comment", text, "text-color"?, "background-color"? }` or a script `{ eventType: "script", script, language?, disabled? }`. Other event types are refused (see **Sub-events** below). |
 
 **Condition fields:**
 - `behaviorType` — For behavior conditions/actions: the behavior's *name* as defined on the object type or one of its families (e.g. `"Platform"`, `"8Direction"` — not the behaviorId `"EightDir"`). Omit for plugin and System ACEs. Written to the event sheet as `"behaviorType"`, the key Construct 3 reads.
@@ -573,29 +574,37 @@ Add a block event (conditions + actions) to an event sheet — the core of gamep
 **Action fields:**
 - `behaviorType` / deprecated `"behavior-type"` — same as for conditions.
 - `disabled` — Disable an individual action (the action exists but won't run).
+- `breakpoint` — A debugger breakpoint on a plugin/behavior/System action, as the editor saves it; written only when `true`.
+- Comment rows — `text`, plus the optional colours `"text-color"` and `"background-color"`, each `[red, green, blue, alpha]` with values from 0 to 1 as the editor saves them. Other colour forms (e.g. `"#ffcc00"`) are refused.
 - Function calls — `callFunction` names an event function, `parameters` is the argument list in the order of the function's parameters: expressions as strings (`"1"`, `"\"text\""`, `"Player.X"`; numbers are written as strings), `true`/`false` for boolean parameters. The older form `{ id, objectClass, callFunction, parameters: { ... } }` is still accepted: `id`/`objectClass` are dropped, and parameters keyed `"0"`, `"1"`, … or by the function's parameter names become the positional array (with a warning); other keys are refused. A call to a function that no event sheet defines, a different number of arguments than the function has parameters, and a boolean parameter given an expression (or the reverse) are warnings. A name that differs from the function's only in case is written with the function's spelling, as editor saves always spell calls, with a warning.
 - Script actions — `script` is an array of lines, as the editor saves it, or one string that is split into lines. `language` is `"javascript"` (the default and only value).
 - The built-in Functions object — the editor saves *Set return value* and the function map actions on it, not on System: `{ "id": "set-function-return-value", "objectClass": "Functions", "parameters": { "value": "..." } }`, and likewise `map-function`, `map-function-default` and `call-mapped-function`. Its name is `functionsName` in `project.c3proj` (`"Functions"` in every project on record). Conditions, other action ids and `behaviorType` on it, and these actions given on `System`, are written with a warning, since no editor save on record has them. *Set return value* outside a function block gets a warning too: it sets the return value of the function its event runs in, and `add_event_block` never adds to a function block (use `update_event_block` on the function block or one of its sub-events). The `function` parameter of `map-function` / `map-function-default` names an event function: a name that differs from the function's only in case is written with the function's spelling (editor saves pick it from a list), with a warning, and a name no function block has gets a warning, since the editor's loader throws *cannot find function* for it. The same applies when `update_event_block` or `update_event_block_action` changes the parameters of a function map.
 
 **Sub-events (`children`):**
-- Each child is a full block event with its own conditions, actions, and children.
+- A child is a block, a comment or a script — the kinds of sub-events editor-saved sheets hold under blocks — told apart by `eventType`. A block may leave `eventType` out.
+- A block child is a full block event with its own conditions, actions, and children.
+- A comment child `{ eventType: "comment", text, "text-color"?, "background-color"? }` and a script child `{ eventType: "script", script, language?, disabled? }` are written as the editor saves them (see **Written shapes**). Like script actions, `script` is an array of lines or one string that is split into lines, and `language` is `"javascript"`.
+- Other event types are refused with an error that names the sub-event's path, and nothing is written: event variables, groups, function blocks and includes cannot be added as sub-events with this tool (global variables, groups, functions and includes: `add_event_to_sheet`), and an unknown `eventType` is refused too.
 - Children without conditions are normal sub-events: they run whenever their parent runs.
 - Children with `isElse: true` are else (or else-if) branches of the sub-event before them. An else block needs a block without a trigger before it, with at most comments between (manual: *Else can only follow normal (non-triggered) events*), so an else block that is the first sub-event (comments aside), is inserted with no block before it, follows a triggered block or holds a trigger itself gets an `else-placement` warning from the load-time gate. To branch inside a trigger, put a block with the condition and then the else block as sub-events of the triggered event.
 - With `isElse: true` (or a System `else` first condition), a further System `else` condition in `conditions` is a duplicate and is dropped, with a warning.
-- Max nesting depth: 10 levels. Max total events (parent + all descendants): 200.
+- Max nesting depth: 10 levels. Max total events (parent + all descendants, comments and scripts included): 200.
+
+**Unknown keys.** Conditions, actions and sub-events accept only the keys listed here (and the entries of `update_event_block` only theirs). Any other key is refused with an error that names it and its path, and nothing is written — it would otherwise be dropped with its content (a mistyped `params`, a comment's `text` on a child without `eventType: "comment"`). The one exception is `sid`, which conditions, actions and sub-events copied from `get_eventsheet_details` carry: it is ignored, since everything written gets a new SID. Unknown arguments at the top level of a tool call are dropped by the MCP SDK before the tool sees them, so `add_event_block` takes `eventType` as an argument and refuses any value but `"block"`.
 
 **Written shapes.** These match editor-saved projects (Construct 3 r449):
 - Blocks: `eventType, conditions, actions, sid, disabled?, children?, isOrBlock?`. `children` is left out when there are none, and false flags are not written.
 - Else: the System condition `{ "id": "else", "objectClass": "System", "sid" }` at index 0. There is no block-level `isElse` key.
-- Conditions: `id, objectClass, sid, disabled?, behaviorType?, parameters?, isInverted?`; `isInverted` comes last, after `parameters`, in every inverted condition the editor wrote in the projects on record. Actions: `id, objectClass, sid, disabled?, behaviorType?, parameters?`.
+- Conditions: `id, objectClass, sid, disabled?, behaviorType?, parameters?, isInverted?`; `isInverted` comes last, after `parameters`, in every inverted condition the editor wrote in the projects on record. Actions: `id, objectClass, sid, disabled?, breakpoint?, behaviorType?, parameters?`.
 - Function calls: `{ "callFunction", "sid", "disabled"?, "parameters"?: [...] }` without `id`/`objectClass`.
-- Script actions: `{ "type": "script", "language": "javascript", "script": [lines], "disabled"? }`. Comment rows: `{ "type": "comment", "text" }`. Neither has a SID.
+- Script actions: `{ "type": "script", "language": "javascript", "script": [lines], "disabled"? }`. Comment rows: `{ "type": "comment", "text", "text-color"?, "background-color"? }`. Neither has a SID.
+- Comment sub-events: `{ "eventType": "comment", "text", "text-color"?, "background-color"? }`. Script sub-events: `{ "eventType": "script", "language": "javascript", "script": [lines], "disabled"? }`. Neither has a SID.
 
 **Validation:**
 - `objectClass` is hard-validated against project objects, families, `"System"` and the built-in Functions object — across the entire tree (parent + all descendants)
 - `behaviorType` is soft-validated (warning only, never blocks the write): it must name a behavior on the object type or on a family the object belongs to (for a family `objectClass`: on the family). The warning lists the available behavior names and hints when a behaviorId was passed instead of the name. When the object type or a family file cannot be read, the warning says the behavior could not be verified instead.
 - `id` (ACE identifier) is **not** validated — Claude knows the hundreds of C3 ACE IDs
-- Script actions, comment rows and function calls skip objectClass validation; script actions and comment rows get no SID
+- Script actions, comment rows, function calls and comment/script sub-events skip objectClass validation; script actions, comment rows and comment/script sub-events get no SID
 
 **Load-time gate:** before writing, the sheet is checked against the editor load-time rules `expression-syntax`, `empty-expression`, `trigger-placement` and `else-placement` (see [`validate_project`](#validate_project)). The check covers the whole sheet, so the new block's position counts, and it compares the sheet before and after the change. A new error blocks the write with an explanation and nothing is written. New warnings are returned in `warnings`. Problems that were already in the sheet do not block the write, unless the change makes one of them worse (a warning that becomes an error); fixing part of an existing problem is allowed. The same gate runs in `add_event_to_sheet`, `update_event_block` and `update_event_block_action`. `move_events_between_sheets` runs it over the source and target sheets together: moving an event that already breaks a rule (`deleteSource: true`) is allowed, while copying it is refused, since the copy adds the problem to a second sheet.
 
@@ -606,7 +615,7 @@ Two triggers in one AND block are rejected. For "Space OR Up pressed", make it a
 2. Validates all `objectClass` references across the entire event tree
 3. Recursively generates SIDs for each block, condition, action and function call
 4. Builds conditions and actions in the editor's shapes and key order (see **Written shapes**)
-5. Recursively builds child sub-events, else branches and OR blocks
+5. Recursively builds child sub-events (blocks, comments, scripts), else branches and OR blocks
 6. If `groupPath`: resolves nested group path (error with the groups at the level that did not match, titles quoted so outer whitespace shows)
 7. Inserts at position (`start`/`end`)
 8. Runs the load-time gate (blocks on new errors)
@@ -666,8 +675,8 @@ Update an existing block event — modify action parameters, add/remove actions 
 | `disabled` | boolean | No | Enable or disable the entire block |
 | `isElse` | boolean | No | `true`: put the System `else` condition first (existing conditions then make an else-if); `false`: remove a leading `else` condition. Blocks only. A block-level `isElse` key left by older versions is dropped either way. |
 | `isOrBlock` | boolean | No | `true`: make it an OR block; `false`: AND-combine its conditions again |
-| `updateActions` | array | No | `[{ index, parameters?, disabled? }]` — update actions by index (merge semantics). For a function call, `parameters` is an argument array that replaces all arguments, or an object keyed by position (`"0"`, `"1"`, …) or parameter name that replaces single ones. |
-| `updateConditions` | array | No | `[{ index, parameters?, isInverted?, disabled? }]` — update conditions by index |
+| `updateActions` | array | No | `[{ index, parameters?, disabled? }]` — update actions by index (merge semantics). For a function call, `parameters` is an argument array that replaces all arguments, or an object keyed by position (`"0"`, `"1"`, …) or parameter name that replaces single ones. Other keys are refused. |
+| `updateConditions` | array | No | `[{ index, parameters?, isInverted?, disabled? }]` — update conditions by index. Other keys (e.g. `behaviorType`) are refused: remove the condition and add a new one instead. |
 | `addActions` | array | No | Append new actions (same shapes as in `add_event_block`) |
 | `addConditions` | array | No | Append new conditions |
 | `removeActionIndices` | number[] | No | Remove actions by 0-based index |
@@ -693,7 +702,8 @@ At least one update parameter must be provided.
 - `disabled` on the block, an action or a condition is written right after its `sid`, as the editor does. Parameters added to a condition that has `isInverted` but no `parameters` go before `isInverted`, and a new `isInverted` goes last, where the editor writes them.
 - Added actions on the built-in Functions object are checked as in `add_event_block`; *Set return value* gets no warning when the block is a function block or one of its sub-events.
 - An added condition with the deprecated `isOr` flag is refused unless the block is (or becomes) an OR block. An added System `else` condition is appended: on a block without conditions it becomes the first condition; in an else block, or with `isElse: true`, it is a duplicate and is dropped; otherwise it lands after the existing conditions with a warning (use `isElse: true` instead).
-- Comment rows and script actions have no parameters: `parameters` on them is refused, and so is `disabled` on a comment row (the editor saves comment rows as `{ type, text }` only).
+- Comment rows and script actions have no parameters: `parameters` on them is refused, and so is `disabled` on a comment row (editor-saved comment rows are `{ type, text }` with the optional colours `"text-color"` and `"background-color"`; none on record carries `disabled`).
+- Added conditions and actions, and the entries of `updateConditions` / `updateActions`, refuse keys they do not know, as in `add_event_block` (see **Unknown keys** there); a `sid` on an added condition or action is ignored.
 - A function call stored in an older shape (with `id`/`objectClass` or keyed parameters) whose arguments are edited is rewritten in the editor's shape, with a warning. A call whose name differs from its function's only in case is written with the function's spelling, with a warning.
 - Runs the load-time gate (see `add_event_block`) on the whole sheet, so a trigger added to a sub-event of a triggered event, of a function block or of a custom action block is rejected, as is a second trigger in one event. New conditions are appended, so a trigger added to a block that already has conditions ends up after them; that only warns, since the editor moves it to the top when it opens the project. A block made an else block where Else cannot stand (no block before it, comments aside, or a block with a trigger) gets an `else-placement` warning.
 

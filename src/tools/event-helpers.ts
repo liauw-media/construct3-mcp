@@ -13,9 +13,12 @@ import type {
   BlockEvent,
   StandardAction,
   ScriptAction,
+  CommentAction,
+  CommentEvent,
+  ScriptEvent,
   C3Event,
 } from '../construct3/types.js';
-import { createBlockEvent } from '../construct3/templates.js';
+import { createBlockEvent, createCommentEvent } from '../construct3/templates.js';
 import {
   isElseCondition,
   createElseCondition,
@@ -70,8 +73,12 @@ const legacyBehaviorTypeDescription =
 // Event shapes below follow editor-saved sheets (Construct 3 r449; issue #32):
 // Else is a System "else" condition at index 0 (conditions after it make an
 // else-if), OR blocks carry the block key "isOrBlock", function calls are
-// { callFunction, sid, parameters: [positional] } without id/objectClass, and
-// script actions are { type: "script", language: "javascript", script: [lines] }.
+// { callFunction, sid, parameters: [positional] } without id/objectClass,
+// script actions are { type: "script", language: "javascript", script: [lines] },
+// and comment rows { type: "comment", text } may carry "text-color" and
+// "background-color" ([r, g, b, a], each 0-1). Blocks hold block, comment and
+// script sub-events; comment and script sub-events have the same keys as
+// comment rows and script actions, with eventType instead of type.
 
 /** Descriptions shared by add_event_block, its sub-events and update_event_block. */
 export const EVENT_INPUT_DESCRIPTIONS = {
@@ -80,8 +87,48 @@ export const EVENT_INPUT_DESCRIPTIONS = {
   isOrBlock: 'Make this an OR block: the event runs when any of its conditions is true (Construct 3 "Make \'Or\' block"). An OR block may hold several triggers.',
 } as const;
 
+// ─── Strict Input ───────────────────────────────────────────
+//
+// Event input objects refuse keys they do not know: a stripped key would drop
+// its content without a word (a comment's text, a colour, a mistyped
+// "params"). The one exception is "sid", which inputs copied from
+// get_eventsheet_details or an editor-saved sheet carry: it is ignored, since
+// every written event, condition and action gets a new SID.
+
+/** Drop an input object's "sid" (see above); anything else is passed on unchanged. */
+function withoutSid(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || !Object.hasOwn(value, 'sid')) {
+    return value;
+  }
+  const { sid: _ignored, ...rest } = value as Record<string, unknown>;
+  return rest;
+}
+
+/** Error map of a strict input object: names the unknown keys and what the object accepts. */
+export function unknownKeysErrorMap(what: string, accepted: string): z.ZodErrorMap {
+  return (issue, ctx) => {
+    if (issue.code === z.ZodIssueCode.unrecognized_keys) {
+      const keys = issue.keys.map(k => JSON.stringify(k)).join(', ');
+      return { message: `Unknown key(s) ${keys} in ${what}: they would not be written, so the call is refused. ${accepted}` };
+    }
+    return { message: ctx.defaultError };
+  };
+}
+
+/** A colour of a comment, as the editor saves it: [r, g, b, a], each 0-1. */
+export const commentColorSchema = z.array(z.number().min(0).max(1)).length(4)
+  .describe('Colour as Construct 3 saves it: [red, green, blue, alpha], each 0-1');
+
+/** The colour keys of comment events and comment rows, in the editor's key order. */
+const COMMENT_COLOR_KEYS = ['text-color', 'background-color'] as const;
+
+export interface CommentColors {
+  'text-color'?: number[];
+  'background-color'?: number[];
+}
+
 /** Condition schema shared by top-level and child events */
-export const conditionSchema = z.object({
+const conditionObjectSchema = z.object({
   id: z.string().describe('Condition ACE id (kebab-case, e.g., "on-start-of-layout", "on-collision-with-another-object")'),
   objectClass: z.string().describe('Object name, family name or "System"'),
   behaviorType: z.string().optional().describe(behaviorTypeDescription),
@@ -92,7 +139,12 @@ export const conditionSchema = z.object({
   isInverted: z.boolean().optional().describe('Negate the condition'),
   disabled: z.boolean().optional().describe('Disable this individual condition'),
   isOr: z.boolean().optional().describe('DEPRECATED: use the block\'s isOrBlock. Never written. If every condition after the first carries isOr, the block is written as an OR block; isOr on only some of them is refused (Construct 3 ORs whole events).'),
-});
+}, {
+  errorMap: unknownKeysErrorMap('a condition', 'A condition has id, objectClass, behaviorType, parameters, isInverted and disabled; a "sid" is ignored.'),
+}).strict();
+
+/** A condition input; a "sid" key is ignored (see Strict Input). */
+export const conditionSchema = z.preprocess(withoutSid, conditionObjectSchema);
 
 /** Standard action schema */
 export const standardActionSchema = z.object({
@@ -105,7 +157,10 @@ export const standardActionSchema = z.object({
     .optional().describe('Action parameters as key-value pairs (max 100 keys, depth 6)'),
   callFunction: z.string().optional().describe('DEPRECATED function call form; use { callFunction, parameters: [...] } without id/objectClass. Still accepted: written in the editor\'s shape, with parameters keyed "0", "1", … or by the function\'s parameter names turned into a positional array.'),
   disabled: z.boolean().optional().describe('Disable this individual action'),
-});
+  breakpoint: z.boolean().optional().describe('Debugger breakpoint on this action, as the editor saves it (written only when true)'),
+}, {
+  errorMap: unknownKeysErrorMap('an action', 'An action has id, objectClass, behaviorType, parameters, disabled and breakpoint; a "sid" is ignored. Function calls are { callFunction, parameters: [...] }, script actions { type: "script", script }, comment rows { type: "comment", text }.'),
+}).strict();
 
 /** A function call argument: an expression string, or true/false for a boolean parameter. */
 export const functionCallArgumentSchema = z.union([z.string().max(10_000), z.number(), z.boolean()]);
@@ -116,7 +171,9 @@ export const functionCallActionSchema = z.object({
   parameters: z.array(functionCallArgumentSchema).max(100).optional()
     .describe('Arguments in the order of the function\'s parameters: expressions as strings (e.g. "1", "\\"text\\"", "Player.X"; numbers are written as strings), true/false for boolean parameters'),
   disabled: z.boolean().optional().describe('Disable this individual action'),
-});
+}, {
+  errorMap: unknownKeysErrorMap('a function call', 'A function call has callFunction, parameters and disabled; a "sid" is ignored.'),
+}).strict();
 
 /** Script action schema */
 export const scriptActionSchema = z.object({
@@ -125,23 +182,43 @@ export const scriptActionSchema = z.object({
   script: z.union([z.string(), z.array(z.string())])
     .describe('Inline JavaScript: an array of lines, as Construct 3 saves it, or one string (split into lines)'),
   disabled: z.boolean().optional().describe('Disable this individual script action'),
-});
+}, {
+  errorMap: unknownKeysErrorMap('a script action', 'A script action has type, language, script and disabled.'),
+}).strict();
 
 /** Comment row among a block's actions */
 export const commentActionSchema = z.object({
   type: z.literal('comment').describe('Comment row among the actions'),
   text: z.string().max(10_000).describe('Comment text'),
-});
+  'text-color': commentColorSchema.optional(),
+  'background-color': commentColorSchema.optional(),
+}, {
+  errorMap: unknownKeysErrorMap('a comment row', 'A comment row has type, text, text-color and background-color.'),
+}).strict();
 
-/** Union of standard, function call, script and comment actions */
-export const actionSchema = z.union([standardActionSchema, functionCallActionSchema, scriptActionSchema, commentActionSchema]);
+const ACTION_SHAPES =
+  'An action is a plugin/behavior/System action { id, objectClass, behaviorType?, parameters?, disabled?, breakpoint? }, ' +
+  'a function call { callFunction, parameters?: [...], disabled? }, a script action { type: "script", script, language?, disabled? } ' +
+  'or a comment row { type: "comment", text, "text-color"?, "background-color"? } (colours as [red, green, blue, alpha], each 0-1).';
+
+/** Union of standard, function call, script and comment actions; a "sid" key is ignored (see Strict Input). */
+export const actionSchema = z.preprocess(withoutSid, z.union(
+  [standardActionSchema, functionCallActionSchema, scriptActionSchema, commentActionSchema],
+  {
+    errorMap: (issue, ctx) => (issue.code === z.ZodIssueCode.invalid_union
+      ? { message: `Not a valid action. ${ACTION_SHAPES} Why each shape does not fit is listed in unionErrors.` }
+      : { message: ctx.defaultError }),
+  },
+));
 
 export type ConditionInput = z.infer<typeof conditionSchema>;
 export type ActionInput = z.infer<typeof actionSchema>;
 
 // ─── Recursive Child Event Schema ───────────────────────────
 
-export interface ChildEventInput {
+/** A block sub-event (eventType omitted or "block"). */
+export interface BlockChildInput {
+  eventType?: 'block';
   conditions?: ConditionInput[];
   actions?: ActionInput[];
   disabled?: boolean;
@@ -150,14 +227,104 @@ export interface ChildEventInput {
   children?: ChildEventInput[];
 }
 
-export const childEventSchema: z.ZodType<ChildEventInput> = z.lazy(() => z.object({
+/** A comment sub-event, as the editor saves it. */
+export interface CommentChildInput extends CommentColors {
+  eventType: 'comment';
+  text: string;
+}
+
+/** A script sub-event, as the editor saves it. */
+export interface ScriptChildInput {
+  eventType: 'script';
+  language?: 'javascript';
+  script: string | string[];
+  disabled?: boolean;
+}
+
+/** A sub-event: a block, a comment or a script — the kinds editor-saved sheets put under blocks. */
+export type ChildEventInput = BlockChildInput | CommentChildInput | ScriptChildInput;
+
+/** True when a sub-event input is a block (eventType omitted or "block"). */
+export function isBlockChild(child: ChildEventInput): child is BlockChildInput {
+  return child.eventType === undefined || child.eventType === 'block';
+}
+
+const SUB_EVENT_SHAPES =
+  'A sub-event is a block { conditions?, actions?, disabled?, isElse?, isOrBlock?, children? } (eventType omitted or "block"), ' +
+  'a comment { eventType: "comment", text, "text-color"?, "background-color"? } or a script { eventType: "script", script, language?, disabled? }.';
+
+/**
+ * Why a sub-event of this eventType cannot be added, and what to use instead.
+ * Editor-saved sheets hold blocks, comments and scripts under blocks; the
+ * other kinds are not written as sub-events by add_event_block.
+ */
+export function unsupportedSubEventMessage(eventType: unknown): string {
+  const refused = (what: string, instead: string) =>
+    `${what} cannot be added as a sub-event with add_event_block; it would be lost, so the call is refused. ${SUB_EVENT_SHAPES} ${instead}`;
+  switch (eventType) {
+    case 'variable':
+      return refused('An event variable', 'A global variable is added with add_event_to_sheet (eventType "variable").');
+    case 'group':
+      return refused('A group', 'Groups are added with add_event_to_sheet (eventType "group"); add_event_block with groupPath adds blocks into one.');
+    case 'function-block':
+    case 'function':
+      return refused('A function block', 'Functions are added with add_event_to_sheet (eventType "function").');
+    case 'include':
+      return refused('An include', 'Includes are added with add_event_to_sheet (eventType "include").');
+    default:
+      return `Unknown sub-event type ${JSON.stringify(eventType)}; it would be lost, so the call is refused. ${SUB_EVENT_SHAPES}`;
+  }
+}
+
+/** A comment sub-event: { eventType: "comment", text, "text-color"?, "background-color"? } */
+const commentChildSchema = z.object({
+  eventType: z.literal('comment'),
+  text: z.string().max(10_000).describe('Comment text'),
+  'text-color': commentColorSchema.optional(),
+  'background-color': commentColorSchema.optional(),
+}, {
+  errorMap: unknownKeysErrorMap('a comment sub-event', 'A comment sub-event has eventType, text, text-color and background-color.'),
+}).strict();
+
+/** A script sub-event: { eventType: "script", script, language?, disabled? } */
+const scriptChildSchema = z.object({
+  eventType: z.literal('script'),
+  language: z.literal('javascript').optional().describe('Script language (default and only value: "javascript")'),
+  script: z.union([z.string(), z.array(z.string())])
+    .describe('Inline JavaScript: an array of lines, as Construct 3 saves it, or one string (split into lines)'),
+  disabled: z.boolean().optional().describe('Disable this script sub-event'),
+}, {
+  errorMap: unknownKeysErrorMap('a script sub-event', 'A script sub-event has eventType, language, script and disabled.'),
+}).strict();
+
+/**
+ * One sub-event: a block, a comment or a script, told apart by eventType (a
+ * block may leave it out). Other event types and unknown keys are refused
+ * rather than written as an empty block; a "sid" key is ignored.
+ */
+export const childEventSchema: z.ZodType<ChildEventInput, z.ZodTypeDef, unknown> = z.lazy(() => childEventUnion);
+
+const blockChildSchema = z.object({
+  eventType: z.literal('block').optional().describe('Optional for a block: "block". Comment and script sub-events carry eventType "comment" / "script"'),
   conditions: z.array(conditionSchema).optional().default([]).describe(EVENT_INPUT_DESCRIPTIONS.conditions),
   actions: z.array(actionSchema).optional().default([]),
   disabled: z.boolean().optional(),
   isElse: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isElse),
   isOrBlock: z.boolean().optional().describe(EVENT_INPUT_DESCRIPTIONS.isOrBlock),
   children: z.array(childEventSchema).optional().default([]),
-}));
+}, {
+  errorMap: unknownKeysErrorMap('a block sub-event', `A block sub-event has eventType, conditions, actions, disabled, isElse, isOrBlock and children; a "sid" is ignored. ${SUB_EVENT_SHAPES}`),
+}).strict();
+
+const childEventUnion = z.preprocess(withoutSid, z.discriminatedUnion(
+  'eventType',
+  [blockChildSchema, commentChildSchema, scriptChildSchema],
+  {
+    errorMap: (issue, ctx) => (issue.code === z.ZodIssueCode.invalid_union_discriminator
+      ? { message: unsupportedSubEventMessage((ctx.data as Record<string, unknown> | undefined)?.eventType) }
+      : { message: ctx.defaultError }),
+  },
+));
 
 // ─── Safety Limits ──────────────────────────────────────────
 
@@ -1057,6 +1224,8 @@ export function collectObjectRefs(
     }
   }
   for (const child of children) {
+    // Comment and script sub-events name no object
+    if (!isBlockChild(child)) continue;
     collectObjectRefs(
       child.conditions ?? [],
       (child.actions ?? []) as Array<Record<string, unknown>>,
@@ -1127,7 +1296,7 @@ export function buildCondition(c: ConditionInput, sid: number): Condition {
 }
 
 /** Build a plugin/behavior/System action in the editor's key order:
- *  id, objectClass, sid, disabled, behaviorType, parameters. */
+ *  id, objectClass, sid, disabled, breakpoint, behaviorType, parameters. */
 export function buildStandardAction(a: z.infer<typeof standardActionSchema>, sid: number): StandardAction {
   const act: StandardAction = {
     id: a.id,
@@ -1135,6 +1304,7 @@ export function buildStandardAction(a: z.infer<typeof standardActionSchema>, sid
     sid,
   };
   if (a.disabled) act.disabled = true;
+  if (a.breakpoint) act.breakpoint = true;
   const { behaviorType } = resolveBehaviorType(a);
   if (behaviorType) act.behaviorType = behaviorType;
   if (a.parameters) act.parameters = a.parameters;
@@ -1153,6 +1323,39 @@ export function buildScriptAction(a: { script: string | string[]; disabled?: boo
   };
   if (a.disabled) act.disabled = true;
   return act;
+}
+
+/** Copy the comment colours of an input onto a comment event or row, in the editor's key order. */
+function addCommentColors<T extends Record<string, unknown>>(target: T, input: CommentColors): T {
+  for (const key of COMMENT_COLOR_KEYS) {
+    const color = input[key];
+    if (color !== undefined) (target as Record<string, unknown>)[key] = [...color];
+  }
+  return target;
+}
+
+/** Build a comment row as the editor saves it: { type, text, "text-color"?, "background-color"? }. */
+export function buildCommentAction(a: { text: string } & CommentColors): CommentAction {
+  return addCommentColors({ type: 'comment', text: a.text } as CommentAction, a);
+}
+
+/** Build a comment sub-event as the editor saves it: { eventType, text, "text-color"?, "background-color"? }. */
+export function buildCommentEvent(c: CommentChildInput): CommentEvent {
+  return addCommentColors(createCommentEvent(c.text), c);
+}
+
+/**
+ * Build a script sub-event as the editor saves it: { eventType, language, script: [lines], disabled? }.
+ * A string is split into lines, as for script actions.
+ */
+export function buildScriptEvent(s: ScriptChildInput): ScriptEvent {
+  const event: ScriptEvent = {
+    eventType: 'script',
+    language: 'javascript',
+    script: toScriptLines(s.script),
+  };
+  if (s.disabled) event.disabled = true;
+  return event;
 }
 
 /** True when an action input or stored action is a function call. */
@@ -1206,7 +1409,7 @@ export async function buildAction(
   where: string,
 ): Promise<Action> {
   if ('type' in a && a.type === 'script') return buildScriptAction(a);
-  if ('type' in a && a.type === 'comment') return { type: 'comment', text: a.text };
+  if ('type' in a && a.type === 'comment') return buildCommentAction(a);
 
   const rec = a as Record<string, unknown>;
   if (isFunctionCallInput(rec)) {
@@ -1249,15 +1452,15 @@ function locationLabel(depth: number): string {
   return depth === 1 ? 'Block' : `Sub-event at depth ${depth}`;
 }
 
-/** Recursively build a block event with conditions, actions, and children.
- *  Returns the built block and increments the counter (for safety limit). */
-export async function buildBlockEvent(
-  reader: Construct3ProjectReader,
-  idGen: IdGenerator,
-  block: BlockInput,
-  depth: number,
-  counter: { count: number; warnings: string[]; functions?: Map<string, FunctionSignature> },
-): Promise<BlockEvent> {
+/** What building a block tree keeps track of: the event count (safety limit), warnings and function signatures. */
+export interface BlockBuildCounter {
+  count: number;
+  warnings: string[];
+  functions?: Map<string, FunctionSignature>;
+}
+
+/** Count one more event of the tree being built, enforcing the depth and size limits. */
+function countEvent(depth: number, counter: BlockBuildCounter): void {
   if (depth > MAX_NESTING_DEPTH) {
     throw new Error(`Sub-event nesting exceeds maximum depth of ${MAX_NESTING_DEPTH}`);
   }
@@ -1265,6 +1468,58 @@ export async function buildBlockEvent(
   if (counter.count > MAX_TOTAL_EVENTS) {
     throw new Error(`Total event count exceeds maximum of ${MAX_TOTAL_EVENTS}`);
   }
+}
+
+/**
+ * Build one sub-event in the editor's shape: a block (recursively), a comment
+ * or a script. Any other event type is refused (the input schema already
+ * refuses it; this guards direct callers), never written as an empty block.
+ */
+async function buildChildEvent(
+  reader: Construct3ProjectReader,
+  idGen: IdGenerator,
+  child: ChildEventInput,
+  depth: number,
+  counter: BlockBuildCounter,
+): Promise<C3Event> {
+  switch (child.eventType) {
+    case 'comment':
+      countEvent(depth, counter);
+      return buildCommentEvent(child);
+    case 'script':
+      countEvent(depth, counter);
+      return buildScriptEvent(child);
+    case undefined:
+    case 'block':
+      return buildBlockEvent(
+        reader,
+        idGen,
+        {
+          conditions: child.conditions ?? [],
+          actions: child.actions ?? [],
+          disabled: child.disabled,
+          isElse: child.isElse,
+          isOrBlock: child.isOrBlock,
+          children: child.children ?? [],
+        },
+        depth,
+        counter,
+      );
+    default:
+      throw new Error(unsupportedSubEventMessage((child as { eventType?: unknown }).eventType));
+  }
+}
+
+/** Recursively build a block event with conditions, actions, and children.
+ *  Returns the built block and increments the counter (for safety limit). */
+export async function buildBlockEvent(
+  reader: Construct3ProjectReader,
+  idGen: IdGenerator,
+  block: BlockInput,
+  depth: number,
+  counter: BlockBuildCounter,
+): Promise<BlockEvent> {
+  countEvent(depth, counter);
 
   // Cap conditions and actions per block to prevent SID amplification
   if (block.conditions.length > MAX_ITEMS_PER_BLOCK) {
@@ -1321,25 +1576,11 @@ export async function buildBlockEvent(
     builtActions.push(await buildAction(reader, idGen, a, counter, where));
   }
 
-  // Recursively build children. Where an else block stands (after a block
-  // without a trigger) is checked on the whole sheet by the load-time gate.
-  const builtChildren: BlockEvent[] = [];
+  // Recursively build children (blocks, comments, scripts). Where an else block
+  // stands (after a block without a trigger) is checked on the whole sheet by the load-time gate.
+  const builtChildren: C3Event[] = [];
   for (const child of block.children) {
-    const childBlock = await buildBlockEvent(
-      reader,
-      idGen,
-      {
-        conditions: child.conditions ?? [],
-        actions: child.actions ?? [],
-        disabled: child.disabled,
-        isElse: child.isElse,
-        isOrBlock: child.isOrBlock,
-        children: child.children ?? [],
-      },
-      depth + 1,
-      counter,
-    );
-    builtChildren.push(childBlock);
+    builtChildren.push(await buildChildEvent(reader, idGen, child, depth + 1, counter));
   }
 
   return createBlockEvent(blockSid, builtConditions, builtActions, {
