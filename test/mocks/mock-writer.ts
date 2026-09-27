@@ -15,9 +15,19 @@ export class MockWriter {
     name: string,
     data: unknown,
     subfolder?: string,
+    options?: { createOnly?: boolean },
   ): Promise<string> {
-    this.calls.push({ method: 'writeEntityFile', args: [category, name, data, subfolder] });
+    this.calls.push({ method: 'writeEntityFile', args: [category, name, data, subfolder, options] });
     return `/mock/backup/${category}/${name}.json.bak`;
+  }
+
+  async entityFileRefusal(
+    category: string,
+    name: string,
+    subfolder?: string,
+  ): Promise<string | undefined> {
+    this.calls.push({ method: 'entityFileRefusal', args: [category, name, subfolder] });
+    return undefined;
   }
 
   async deleteEntityFile(

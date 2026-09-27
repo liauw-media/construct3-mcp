@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, readFile, writeFile, mkdir, rm, unlink } from 'fs/promises';
+import { mkdtemp, cp, readFile, readdir, writeFile, mkdir, rm, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, dirname } from 'path';
@@ -10,6 +10,9 @@ import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerTimelineTools } from '../../src/tools/timeline-tools.js';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { EDITOR_RELOAD_NOTE } from '../../src/tools/shared.js';
+import { isCaseInsensitiveFs } from '../helpers/fs-case.js';
+
+const caseInsensitive = isCaseInsensitiveFs();
 
 // Pass-through mock so a single test can make unlink fail.
 vi.mock('fs/promises', async (importOriginal) => {
@@ -500,5 +503,99 @@ describe('timeline tools on a project folder', () => {
     expect(project.replace(/\r\n/g, '')).not.toContain('\n');
     expect(project.endsWith('}\r\n')).toBe(true);
     expect(JSON.parse(project).timelines.subfolders[2].subfolders[0].items).toEqual([]);
+  });
+
+  // Issue #29: names that differ only in case
+
+  /** Every file below timelines/ plus project.c3proj, by project-relative path. */
+  async function timelineFiles(): Promise<Record<string, string>> {
+    const out: Record<string, string> = { 'project.c3proj': await readFile(projPath, 'utf-8') };
+    const walk = async (rel: string) => {
+      for (const entry of await readdir(file(rel), { withFileTypes: true })) {
+        const child = `${rel}/${entry.name}`;
+        if (entry.isDirectory()) await walk(child);
+        else out[child] = await readText(child);
+      }
+    };
+    await walk('timelines');
+    return out;
+  }
+
+  async function expectCreateRefused(args: Record<string, unknown>, message: string): Promise<void> {
+    const before = await timelineFiles();
+    const result = await server.callTool('create_timeline', args);
+    expect(result.isError, JSON.stringify(args)).toBe(true);
+    expect(result.content[0].text).toContain(message);
+    expect(await timelineFiles()).toEqual(before);
+  }
+
+  it('create_timeline refuses a case variant of a timeline in the same folder and leaves its file alone', async () => {
+    await expectCreateRefused({ name: 'door' }, 'the existing timeline "Door" in the same folder');
+    await expectCreateRefused({ name: 'DOOR', totalTime: 9 }, 'timelines/Door.json');
+    await expectCreateRefused({ name: 'ko', subfolder: 'Steel and Stone' }, '"KO"');
+    await expectCreateRefused({ name: 'deep', subfolder: 'A/B' }, '"Deep"');
+    expect(await readText('timelines/Door.json')).toBe(PROJECT_FILES['timelines/Door.json']);
+  });
+
+  it('create_timeline refuses a project-bar folder that differs only in case', async () => {
+    await expectCreateRefused({ name: 'Outro', subfolder: 'a/b' }, 'Use subfolder "A/B"');
+    await expectCreateRefused({ name: 'Outro', subfolder: 'steel and stone/New' }, 'Use subfolder "Steel and Stone/New"');
+  });
+
+  it('create_timeline allows a case variant in another folder or of a transition, with a note', async () => {
+    // The editor compares timeline names exactly; the files are in different folders
+    const ko = parseResult(await server.callTool('create_timeline', { name: 'ko' }));
+    expect(ko.success).toBe(true);
+    expect(ko.warnings).toEqual([expect.stringContaining('the existing timeline "KO" (timelines/Steel and Stone/KO.json)')]);
+    const note = parseResult(await server.callTool('create_timeline', { name: 'NOTE', subfolder: 'A' }));
+    expect(note.warnings).toEqual([expect.stringContaining('the existing transition "Note" (timelines/transitions/Note.json)')]);
+    expect(await readText('timelines/Steel and Stone/KO.json')).toBe(PROJECT_FILES['timelines/Steel and Stone/KO.json']);
+    expect(existsSync(file('timelines/ko.json'))).toBe(true);
+    expect(existsSync(file('timelines/A/NOTE.json'))).toBe(true);
+    expect(parseResult(await server.callTool('create_timeline', { name: 'Brand New' })).warnings).toBeUndefined();
+  });
+
+  it('create_timeline never replaces a file that is already on disk', async () => {
+    await writeFile(file('timelines/Orphan.json'), timelineJson('Orphan', 7), 'utf-8');
+    await expectCreateRefused({ name: 'Orphan' }, 'timelines/Orphan.json already exists');
+    await expectCreateRefused({ name: 'orphan' }, 'timelines/Orphan.json already exists');
+    await expectCreateRefused({ name: 'ORPHAN' }, 'Choose another name, or, if the file is a leftover of a deleted timeline, check it and remove it first.');
+  });
+
+  describe.skipIf(!caseInsensitive)('on a case-insensitive file system', () => {
+    // Registered as "timeline1" and "deep2", stored as Timeline1.json and Deep2.json
+    beforeEach(async () => {
+      const project = JSON.parse(await readFile(projPath, 'utf-8'));
+      project.timelines.items.push('timeline1');
+      project.timelines.subfolders[2].subfolders[0].items.push('deep2');
+      await writeFile(projPath, JSON.stringify(project, null, '\t'), 'utf-8');
+      await writeFile(file('timelines/Timeline1.json'), timelineJson('timeline1', 1), 'utf-8');
+      await writeFile(file('timelines/A/B/Deep2.json'), timelineJson('deep2', 2), 'utf-8');
+      const reader = new Construct3ProjectReader(projPath);
+      await reader.loadProject();
+      server = new MockServer();
+      registerTimelineTools({ server, reader, writer: new MockWriter(), idGen: new MockIdGenerator() } as any);
+    });
+
+    it('update_timeline keeps the file name on disk and backs up under it', async () => {
+      const result = parseResult(await server.callTool('update_timeline', { name: 'timeline1', loop: true }));
+      expect(result.backupFile).toBe(file('timelines/Timeline1.json.bak'));
+      const entries = await readdir(file('timelines'));
+      expect(entries).toContain('Timeline1.json');
+      expect(entries).toContain('Timeline1.json.bak');
+      expect(entries).not.toContain('timeline1.json');
+      expect(JSON.parse(await readText('timelines/Timeline1.json')).loop).toBe(true);
+
+      expect((await server.callTool('update_timeline', { name: 'deep2', totalTime: 4 })).isError).toBeUndefined();
+      expect((await readdir(file('timelines/A/B'))).sort()).toEqual(['Deep.json', 'Deep2.json', 'Deep2.json.bak']);
+    });
+
+    it('delete_timeline backs up under the file name on disk', async () => {
+      const result = parseResult(await server.callTool('delete_timeline', { name: 'timeline1' }));
+      expect(result.backupFile).toBe(file('timelines/Timeline1.json.bak'));
+      const entries = await readdir(file('timelines'));
+      expect(entries).toContain('Timeline1.json.bak');
+      expect(entries).not.toContain('Timeline1.json');
+    });
   });
 });

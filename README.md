@@ -126,13 +126,13 @@ node dist/index.js /path/to/your/project.c3proj
 
 | Tool | Description |
 |------|-------------|
-| `create_event_sheet` | Create a new event sheet with optional includes |
-| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked) |
+| `create_event_sheet` | Create a new event sheet with optional includes; refuses names that differ from an existing sheet only in case |
+| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); the names of a new (global) variable and of function parameters are checked like in the editor |
 | `add_event_block` | Add a block event with conditions + actions (gameplay logic); refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) |
 | `update_event_block` | Update an existing block: modify/add/remove actions and conditions (load-time checked) |
 | `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; load-time checked) |
-| `update_event_variable` | Rename a variable or change its type, initial value, static or constant flag |
-| `move_events_between_sheets` | Copy or move top-level events between sheets by SID (optionally into a group); load-time checked, so copying an event that breaks a load-time rule is refused |
+| `update_event_variable` | Rename a variable or change its type, initial value, static or constant flag; a new name is checked like in the editor |
+| `move_events_between_sheets` | Copy or move top-level events between sheets by SID (optionally into a group); load-time checked, so copying an event that breaks a load-time rule is refused; a copy or move that would clash event variable names (e.g. a copied global variable) is refused |
 | `delete_event_from_sheet` | Delete an event from a sheet by SID or include name (dry-run, force) |
 | `remove_event_from_sheet` | Remove an include from a sheet by included sheet name |
 | `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
@@ -142,11 +142,11 @@ node dist/index.js /path/to/your/project.c3proj
 
 | Tool | Description |
 |------|-------------|
-| `create_layout` | Create a new layout with configurable layers |
+| `create_layout` | Create a new layout with configurable layers; refuses names that differ from an existing layout only in case |
 | `update_layout` | Update layout event sheet binding and dimensions |
 | `delete_layout` | Delete a layout (blocks startup layout, checks references) |
-| `add_layer` | Add a layer (position, visibility, transparency, parallax, blend mode) |
-| `update_layer` | Rename a layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation |
+| `add_layer` | Add a layer (position, visibility, transparency, parallax, blend mode); refuses a name used by another layer of the layout, ignoring case |
+| `update_layer` | Rename a layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation; refuses a new name used by another layer, ignoring case |
 | `delete_layer` | Delete a layer (never the last one; blocked while it holds instances unless forced) |
 | `add_instance_to_layout` | Place an object instance on a layout layer with full property control |
 | `update_instance` | Update a placed instance by UID (position, size, angle, color, visibility, tags, instance variables) |
@@ -169,7 +169,7 @@ node dist/index.js /path/to/your/project.c3proj
 
 | Tool | Description |
 |------|-------------|
-| `create_timeline` | Create a timeline (duration, loop, ping-pong, repeat count, start-on-layout) |
+| `create_timeline` | Create a timeline (duration, loop, ping-pong, repeat count, start-on-layout); refuses a case variant of a timeline in the same folder |
 | `update_timeline` | Update timeline settings or enable/disable it |
 | `delete_timeline` | Delete a timeline (backs up exactly the file it deletes; errors and leaves `project.c3proj` unchanged when the file is missing) |
 
@@ -240,6 +240,10 @@ Additional safeguards:
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
 - **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs with correct naming conventions. Batch writes roll back on failure.
 - **Layout instance sync** — When behaviors or variables are added to an object type, all layout instances of that object are automatically updated with the required `behaviors` and `instanceVariables` dicts so C3 can load the project correctly.
+- **Names compared like the editor** — Create and rename tools refuse a name that differs from an existing one only in case where Construct 3 compares names ignoring case: event sheets and layouts (project-wide), object types and families, the layers of one layout (sub-layers included; the editor cannot load a layout with two such layers), the animations of one sprite (in any animation folder), and sibling project-bar folders. Timeline names are compared exactly, as the editor does, but a case variant of a timeline in the same folder is refused because both would share one file on Windows and macOS.
+- **Event variable names checked like the editor** — `add_event_to_sheet` and `update_event_variable` refuse the event variable and function parameter names the editor's variable and parameter dialogs refuse: a name that matches, ignoring case, an event variable or function parameter in its scope (for a global variable, any in the project; for a local one or a parameter, the globals, the variables and parameters of its enclosing events and those below its parent event or function), the name of a System expression (e.g. `time`, `random`), and names with whitespace, punctuation such as `-` `.` `:`, a leading underscore or only digits. Names of object types and families are allowed, as in the editor. `move_events_between_sheets` refuses a copy or move that would create such a clash, e.g. a copy of a global variable (the editor renames a pasted variable instead).
+- **No overwrite on create** — Create tools refuse to write an entity JSON file (object type, family, event sheet, layout) or a timeline file where one already exists, also one whose name differs only in case (an unregistered file, or one registered under another spelling). Nothing is backed up or replaced. Placeholder PNGs are not covered: `create_object` and the animation tools write them over an image file of the same name in `images/`, e.g. one left behind by a deleted object or animation.
+- **File names kept** — Rewriting an existing file keeps its name on disk exactly, including case (e.g. `Layout1.json` registered as `layout1`); the `.bak` backup takes the same name.
 - **Text style preserved** — JSON is written the way Construct 3 saves it (tab indent). A file that already exists keeps its own line endings (e.g. CRLF from a git `core.autocrlf` checkout), exact trailing whitespace and BOM. A new file follows `project.c3proj`, then the first JSON file with line breaks in its target folder, then Construct 3's own style (LF, no trailing newline, no BOM). For files in Construct 3's tab layout, diffs show only the lines that changed; files indented another way (e.g. with spaces) are re-indented with tabs in full.
 
 ## Documentation
@@ -382,6 +386,9 @@ construct3-mcp/
 │   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
 │   │   ├── templates.ts            # Object, event sheet, layout templates
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
+│   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
+│   │   ├── names.ts                # Case-insensitive name and folder comparison
+│   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
 │   │   ├── types.ts                # TypeScript type definitions

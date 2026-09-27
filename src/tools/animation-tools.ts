@@ -7,11 +7,31 @@
 import { z } from 'zod';
 import { readFile } from 'fs/promises';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult, ObjectType, AnimationFrame } from '../construct3/types.js';
-import { toolResult, toolError, notFoundError } from './shared.js';
+import type { WriteResult, ObjectType, Animation, AnimationFrame } from '../construct3/types.js';
+import { toolResult, toolError, notFoundError, caseClashError } from './shared.js';
+import { findNameClash } from '../construct3/names.js';
 import { createAnimation, createAnimationFrame } from '../construct3/templates.js';
 import { getImageFileName } from '../construct3/png-generator.js';
 import { resolveProjectPath } from '../construct3/path-utils.js';
+
+/**
+ * Every animation of a sprite, including those in animation folders. The editor
+ * looks animation names up over all folders (projectResources.js: the animation
+ * lookup walks the folder tree and compares with normalize().toLowerCase()).
+ */
+function allAnimations(container: unknown, out: Animation[] = []): Animation[] {
+  if (!container || typeof container !== 'object') return out;
+  const { items, subfolders } = container as { items?: unknown; subfolders?: unknown };
+  if (Array.isArray(items)) {
+    for (const anim of items as Animation[]) if (anim && typeof anim === 'object') out.push(anim);
+  }
+  if (Array.isArray(subfolders)) for (const folder of subfolders) allAnimations(folder, out);
+  return out;
+}
+
+function animationNames(anims: Animation[]): string[] {
+  return anims.map(a => a.name).filter((n): n is string => typeof n === 'string');
+}
 
 export function registerAnimationTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── add_animation_to_sprite ──────────────────────────────
@@ -51,9 +71,16 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         }
         const animItems = obj.animations.items;
 
-        // Check for duplicate animation name
-        if (animItems.some(a => a.name === args.animationName)) {
+        // Check for a duplicate animation name in any animation folder. The editor
+        // compares animation names ignoring case, and frame image file names are
+        // built from the animation name, so on Windows and macOS a case variant
+        // would write its placeholder images over the existing animation's images
+        const nameClash = findNameClash(args.animationName, animationNames(allAnimations(obj.animations)));
+        if (nameClash === args.animationName) {
           return toolError(`Animation "${args.animationName}" already exists on "${args.objectName}". Use update_animation_properties to modify it.`);
+        }
+        if (nameClash) {
+          return toolError(caseClashError('animation', args.animationName, nameClash));
         }
 
         // Determine frame dimensions from existing animation if not specified
@@ -302,8 +329,15 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
           return toolError(`Animation "${args.animationName}" not found on "${args.objectName}". Available: ${available}`);
         }
 
-        if (animItems.some(a => a.name === args.newName)) {
+        // Like the editor: another animation's name (in any animation folder, ignoring
+        // case) is taken, changing the case of this one is fine
+        const others = allAnimations(obj.animations).filter(a => a !== anim);
+        const nameClash = args.newName === anim.name ? anim.name : findNameClash(args.newName, animationNames(others));
+        if (nameClash === args.newName) {
           return toolError(`Animation "${args.newName}" already exists on "${args.objectName}".`);
+        }
+        if (nameClash) {
+          return toolError(caseClashError('animation', args.newName, nameClash));
         }
 
         anim.name = args.newName;

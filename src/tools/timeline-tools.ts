@@ -13,13 +13,15 @@
  */
 
 import { z } from 'zod';
-import { readFile, writeFile, mkdir, copyFile, unlink, rename, stat } from 'fs/promises';
-import { dirname } from 'path';
+import { readFile, mkdir, copyFile, unlink, stat } from 'fs/promises';
+import { dirname, relative, sep } from 'path';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult } from '../construct3/types.js';
 import { newProjectFolder } from '../construct3/project-writer.js';
-import { validateName, validateSubfolder, toolResult, toolError } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, folderCaseClashError } from './shared.js';
 import { resolveProjectPath } from '../construct3/path-utils.js';
+import { atomicReplace, existingSpelling, findFileIgnoringCase } from '../construct3/atomic-write.js';
+import { findFolderPathClash, nameKey } from '../construct3/names.js';
 import { jsonTextStyleOf, parseJsonText, resolveJsonTextStyle, serializeJson } from '../construct3/json-format.js';
 
 // ─── Timeline Type ─────────────────────────────────────────
@@ -129,30 +131,22 @@ async function readTimelineFile(filePath: string): Promise<Timeline> {
   return parseJsonText(content) as Timeline;
 }
 
+/** Write a timeline file atomically; an existing file keeps its name on disk, including its case. */
 async function atomicWriteTimeline(filePath: string, data: Timeline, projectPath: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
+  const target = await existingSpelling(filePath);
   // Keep the existing file's text style; a new file follows the project's
-  const json = serializeJson(data, await resolveJsonTextStyle(filePath, projectPath, dirname(filePath)));
-  const tmpPath = filePath + '.tmp';
-  await writeFile(tmpPath, json, 'utf-8');
-  try {
-    await rename(tmpPath, filePath);
-  } catch (e: unknown) {
-    if (e && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'EEXIST') {
-      await unlink(filePath);
-      await rename(tmpPath, filePath);
-    } else {
-      try { await unlink(tmpPath); } catch { /* best-effort */ }
-      throw e;
-    }
-  }
+  const json = serializeJson(data, await resolveJsonTextStyle(target, projectPath, dirname(target)));
+  await atomicReplace(target, json);
 }
 
 /**
- * Copy a file to <file>.bak. Returns the backup path, or undefined when the
- * file does not exist (nothing to back up). A failed copy throws.
+ * Copy a file to <file>.bak, named after the file as spelled on disk. Returns
+ * the backup path, or undefined when the file does not exist (nothing to back
+ * up). A failed copy throws.
  */
-async function backupTimeline(filePath: string): Promise<string | undefined> {
+async function backupTimeline(path: string): Promise<string | undefined> {
+  const filePath = await existingSpelling(path);
   const bak = filePath + '.bak';
   try {
     await stat(filePath);
@@ -234,6 +228,11 @@ function locatedFileLabel(name: string, location: TimelineLocation): string {
   return ['timelines', ...locationDirs(location), `${name}.json`].join('/');
 }
 
+/** Whether two project-bar folder paths are the same folder (names compared ignoring case). */
+function sameFolders(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((folder, i) => nameKey(folder) === nameKey(b[i]));
+}
+
 function transitionRefusal(name: string): string {
   return `"${name}" is a transition (an easing curve in timelines/${TRANSITIONS_DIR}/), not a timeline. ` +
     'The timeline tools do not read, change or delete transitions; edit them in the Construct 3 editor.';
@@ -269,19 +268,7 @@ async function addTimelineToProject(
     if (!container.items.includes(name)) container.items.push(name);
   }
 
-  const tmpPath = projectPath + '.tmp';
-  await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
-  try {
-    await rename(tmpPath, projectPath);
-  } catch (e: unknown) {
-    if (e && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'EEXIST') {
-      await unlink(projectPath);
-      await rename(tmpPath, projectPath);
-    } else {
-      try { await unlink(tmpPath); } catch { /* best-effort */ }
-      throw e;
-    }
-  }
+  await atomicReplace(projectPath, serializeJson(project, jsonTextStyleOf(content)));
 }
 
 /**
@@ -303,19 +290,7 @@ async function removeTimelineFromProject(projectPath: string, name: string, fold
   }
   items.splice(idx, 1);
 
-  const tmpPath = projectPath + '.tmp';
-  await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
-  try {
-    await rename(tmpPath, projectPath);
-  } catch (e: unknown) {
-    if (e && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'EEXIST') {
-      await unlink(projectPath);
-      await rename(tmpPath, projectPath);
-    } else {
-      try { await unlink(tmpPath); } catch { /* best-effort */ }
-      throw e;
-    }
-  }
+  await atomicReplace(projectPath, serializeJson(project, jsonTextStyleOf(content)));
 }
 
 // ─── Registration ──────────────────────────────────────────
@@ -399,12 +374,37 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
           }
         }
 
-        const { timelines, transitions } = locateTimelines(reader.getProject().timelines);
+        const container = reader.getProject().timelines;
+        const { timelines, transitions } = locateTimelines(container);
         if (timelines.has(args.name)) {
           return toolError(`Timeline "${args.name}" already exists.`);
         }
         if (transitions.has(args.name)) {
           return toolError(`A transition named "${args.name}" already exists. Choose another timeline name.`);
+        }
+        if (args.subfolder) {
+          const folderClash = findFolderPathClash(container, args.subfolder);
+          if (folderClash) return toolError(folderCaseClashError(args.subfolder, folderClash));
+        }
+
+        // The editor compares timeline names exactly (projectResources.js r495.2),
+        // so a case variant in another folder is allowed, with a note. In the same
+        // folder both would be stored in one file on Windows and macOS.
+        const folders = args.subfolder ? args.subfolder.split('/') : [];
+        const warnings: string[] = [];
+        for (const [existing, location] of [...timelines, ...transitions]) {
+          if (nameKey(existing) !== nameKey(args.name)) continue;
+          const existingFile = locatedFileLabel(existing, location);
+          if (location.kind === 'timeline' && sameFolders(location.folders, folders)) {
+            return toolError(
+              `"${args.name}" differs only in case from the existing timeline "${existing}" in the same folder. ` +
+              `On Windows and macOS both names are the same file (${existingFile}), which creating this timeline would overwrite. Choose a different name.`,
+            );
+          }
+          warnings.push(
+            `"${args.name}" differs only in case from the existing ${location.kind} "${existing}" (${existingFile}). ` +
+            'Construct 3 compares timeline names exactly and the files are in different folders, so both are kept.',
+          );
         }
 
         const data = createTimeline(args.name, args.totalTime);
@@ -414,8 +414,17 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
         data.startOnLayout = args.startOnLayout;
         data.ignoreSystemTimescale = args.ignoreSystemTimescale;
 
+        // Never replace a file on create, also not one whose name differs only in case
         const filePath = timelineFilePath(reader.getProjectDir(), args.name, args.subfolder);
-        const backupPath = await backupTimeline(filePath);
+        const onDisk = await findFileIgnoringCase(filePath);
+        if (onDisk) {
+          const label = relative(reader.getProjectDir(), onDisk).split(sep).join('/');
+          return toolError(
+            `The file ${label} already exists: it is not a registered timeline, or it is registered under a name ` +
+            'that differs only in case. It was left unchanged. Choose another name, or, if the file is a leftover of a ' +
+            'deleted timeline, check it and remove it first.',
+          );
+        }
         await atomicWriteTimeline(filePath, data, reader.getProjectPath());
 
         // Register in project.c3proj (under lock via withProjectLock is internal to writer;
@@ -431,7 +440,7 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
           entity: args.name,
           category: 'timeline',
           action: 'created',
-          backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {

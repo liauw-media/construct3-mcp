@@ -374,6 +374,8 @@ Mutation tools that write through the project writer (objects, families, event s
 
 **Text style.** An overwritten file keeps its line endings (LF or CRLF), exact trailing whitespace and BOM. A new file follows `project.c3proj`, then the first JSON file with line breaks in its target folder, then Construct 3's own style: tab-indented JSON with LF line endings, no trailing newline and no BOM. Only files already in that tab layout get line-level diffs; files indented another way are re-indented in full.
 
+**Names and file names.** Entity files are named after the entity (`<category>/<folders>/<name>.json`, folders mirroring the project bar), and on Windows and macOS names that differ only in case name the same file. Create and rename tools therefore compare names the way the Construct 3 editor does: event sheet and layout names project-wide ignoring case, object type and family names in one namespace ignoring case, layer names per layout ignoring case (sub-layers included; the editor cannot load a layout with two such layers), animation names per sprite ignoring case (in any animation folder), event variable names ignoring case within the variable's scope (see [Event variable names](#event-variable-names)), and sibling project-bar folders (`subfolder` segments) ignoring case — a case-only clash is refused with an error naming the existing entity or folder. Create tools also refuse to write an entity JSON file or a timeline file where one already exists, including one whose name differs only in case; nothing is backed up or replaced, and the error says to choose another name or, for a leftover of a deleted entity, to check and remove the file first. Placeholder PNGs are not covered: `create_object` and the animation tools write them over an image file of the same name in `images/`. Rewrites of an existing file keep its name on disk exactly, including case, and the `.bak` backup takes that name.
+
 **Editor reload note.** Every response that reports a completed write includes `editorNote`: *"If this project is open in Construct 3, close and reopen it there before saving, or the editor can overwrite these changes."* The editor keeps an open project in memory, so saving from a session opened before the edit can overwrite it; its Project Bar reload (F9) re-reads script files only. A `WriteResult` with `success: true` counts as a write unless it is a dry run. Tools whose success does not imply a write carry no note: the `already_registered` no-op of `register_addon`, `fix_legacy_behavior_keys` with `dryRun: false` when it found nothing to rename, `clone_project`, and `export_for_preview` / `pack_project` with `injectBridge: false`. Error responses never carry the note, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
 ### `create_object`
@@ -476,6 +478,8 @@ Create a new event sheet.
 | `subfolder` | string | No | Subfolder path |
 | `includeSheets` | string[] | No | Sheets to auto-include (validated for existence) |
 
+A name that differs from an existing event sheet (in any folder) only in case is refused, as is a `subfolder` folder that differs from an existing project-bar folder only in case (see [Names and file names](#mutation-tools)).
+
 ### `add_event_to_sheet`
 
 Add a structural event to an existing event sheet.
@@ -486,8 +490,8 @@ Add a structural event to an existing event sheet.
 | `eventType` | enum | Yes | `"group"` \| `"function"` \| `"variable"` \| `"include"` \| `"comment"` |
 | `title` | string | For groups | Group title |
 | `functionName` | string | For functions | Function name |
-| `functionParams` | array | For functions | `[{ name, type }]` |
-| `variableName` | string | For variables | Variable name |
+| `functionParams` | array | For functions | `[{ name, type }]` (names checked, see below) |
+| `variableName` | string | For variables | Variable name (checked, see below) |
 | `variableType` | enum | For variables | `"number"` \| `"string"` \| `"boolean"` |
 | `initialValue` | string | For variables | Initial value |
 | `includeSheet` | string | For includes | Sheet to include (validated) |
@@ -495,6 +499,18 @@ Add a structural event to an existing event sheet.
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 
 Runs the same load-time gate as `add_event_block` before writing.
+
+#### Event variable names
+
+A variable added with `add_event_to_sheet` goes to the top level of the sheet, so it is a global variable; a function goes there too. The variable's name, the names in `functionParams` and a new name given to `update_event_variable` are refused where the Construct 3 editor's event variable and function parameter dialogs refuse them (checked against the editor code of releases r449 and r495.2, which agree; both dialogs run the same checks):
+
+- **In use in the scope, ignoring case.** A global variable's name must differ from every event variable (global, local, static) and function parameter in every event sheet of the project. A local variable's name must differ from every global variable, from the variables and parameters of each event enclosing it, and from every variable and parameter below its parent event; locals in other branches or other sheets do not count. A function parameter has the scope of a local variable declared directly in its function: for a new function, its name must differ from every global variable and from the function's other parameters, while parameters of other functions and locals elsewhere do not count. Changing only the case of a variable's own name is allowed.
+- **A System expression name, ignoring case** — e.g. `time`, `dt`, `random`, `max`, `LayoutName` (all 136 System expressions of r495.2, deprecated ones included). Five of them (`ColorToHexString`, `distance3d`, `HexColor`, `ProjectFileCount`, `ProjectFileNameAt`) are not in r449, whose editor accepts these names; they are refused anyway, since the r495.2 editor refuses them, and the error says so.
+- **Characters the editor removes** — whitespace, the characters `. , " ( ) ? : \ / ; * | ' - ! ¬ £ $ % ^ & + = < > { } [ ] @ # ~`, the backtick, the soft hyphen, the ideographic full stop `。`, the full-width forms `， （ ） ？ ：` of `, ( ) ? :` and the typographic double quotes `“ ”`, a leading underscore, or a name of digits only. Other full-width forms, such as `．` and `／`, are accepted, as in the editor.
+
+Names of object types and families are not compared: the editor accepts an event variable named like an object. Event sheet files that are not registered in `project.c3proj` are not read, as the editor does not load them. The other sheets are read from disk for each check, so sheets saved outside the server count as well.
+
+`move_events_between_sheets` applies the scope rule to the variables and parameters it copies or moves, in their new place: see [`move_events_between_sheets`](#move_events_between_sheets).
 
 ### `add_event_block`
 
@@ -637,13 +653,13 @@ Update an event variable declaration found by SID.
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Event sheet containing the variable |
 | `sid` | number | Yes | SID of the `variable` event |
-| `newName` | string | No | New name (must be unused in the sheet) |
+| `newName` | string | No | New name (checked, see [Event variable names](#event-variable-names)) |
 | `newType` | `"number"` \| `"string"` \| `"boolean"` | No | New type |
 | `newInitialValue` | string | No | New initial value, as a string |
 | `isStatic` | boolean | No | Value persists between calls |
 | `isConstant` | boolean | No | Value cannot change at runtime |
 
-At least one change must be provided. References to the old name are not updated.
+At least one change must be provided. References to the old name are not updated. A new name is refused where the editor refuses it (see [Event variable names](#event-variable-names)): for a global variable it must differ, ignoring case, from every event variable and function parameter in the project, for a local one from those in its scope; changing only the case of the variable's own name is allowed.
 
 ### `move_events_between_sheets`
 
@@ -657,6 +673,8 @@ Copy top-level events from one sheet to another by SID; with `deleteSource` they
 | `deleteSource` | boolean | No | Remove the events from the source after copying (default: false) |
 | `targetGroupPath` | string | No | Insert into a group by title path (e.g. `"Movement > Collision"`) |
 | `position` | `"start"` \| `"end"` | No | Insert position (default: end) |
+
+Copied and moved events keep their event variable and function parameter names. A copy or move that would give one of them a name that is in use, ignoring case, in its new scope (see [Event variable names](#event-variable-names)) is refused and nothing is written; the error lists the clashing names. The most common case is a copy of a global variable (`deleteSource: false`), since its original keeps the name; moving it is fine. A local variable or parameter moved into a group (`targetGroupPath`) can also clash with the group's variables. The editor renames a pasted variable in this case instead; rename it first with `update_event_variable`. Clashes that the events already had in their old place are not counted.
 
 Runs the load-time gate (see [`add_event_block`](#add_event_block)) over the source and target sheets together, before anything is written. Moving an event that already breaks a load-time rule only relocates the problem and is allowed; copying it (`deleteSource: false`) adds the problem to a second sheet, so a copied error is refused and a copied warning is returned in `warnings`.
 
@@ -703,6 +721,8 @@ Create a new layout.
 | `height` | number | No | Height in pixels (default: project viewport height) |
 | `eventSheet` | string | No | Linked event sheet name (validated) |
 | `layers` | string[] | No | Layer names (default: single `"Layer 0"`) |
+
+A name that differs from an existing layout (in any folder) only in case is refused: the editor compares layout names ignoring case. So are `layers` that differ from each other only in case.
 
 ### `add_instance_to_layout`
 
@@ -772,13 +792,15 @@ Add a new layer to a layout.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `layoutName` | string | Yes | Layout to add the layer to |
-| `layerName` | string | Yes | New layer name (unique within the layout) |
+| `layerName` | string | Yes | New layer name (unique within the layout, ignoring case) |
 | `index` | number | No | Insert position (0 = bottom; default: on top) |
 | `isInitiallyVisible` | boolean | No | Starts visible (default: true) |
 | `isTransparent` | boolean | No | Transparent background (default: true) |
 | `parallaxX` | number | No | Horizontal parallax rate (default: 1) |
 | `parallaxY` | number | No | Vertical parallax rate (default: 1) |
 | `blendMode` | enum | No | `"normal"` (default), `"additive"`, `"xor"`, `"copy"`, `"destination-over"`, `"source-in"`, `"destination-in"`, `"source-out"`, `"destination-out"`, `"source-atop"`, `"destination-atop"` |
+
+A name used by another layer of the layout (sub-layers included) is refused, also when it differs only in case: the editor refuses such a layer name and cannot load a layout with two of them.
 
 ### `update_layer`
 
@@ -788,7 +810,7 @@ Update properties of an existing layer.
 |-----------|------|----------|-------------|
 | `layoutName` | string | Yes | Layout name |
 | `layerName` | string | Yes | Layer to update |
-| `newName` | string | No | Rename the layer (must be unused in the layout) |
+| `newName` | string | No | Rename the layer (must be unused in the layout, ignoring case) |
 | `isInitiallyVisible` | boolean | No | Initial visibility |
 | `isInitiallyInteractive` | boolean | No | Initial interactivity |
 | `isTransparent` | boolean | No | Transparency |
@@ -798,7 +820,7 @@ Update properties of an existing layer.
 | `scaleRate` | number | No | Scale rate (parallax zoom) |
 | `zElevation` | number | No | Z elevation for 3D layering |
 
-At least one property must be provided.
+At least one property must be provided. A new name used by another layer of the layout (sub-layers included), also one that differs only in case, is refused; changing only the case of the layer's own name is allowed.
 
 ### `delete_layer`
 
@@ -898,7 +920,7 @@ Add a new animation to a Sprite object.
 
 **Notes:**
 - Validates the object is a Sprite plugin (rejects non-Sprite objects)
-- Checks animation name uniqueness within the sprite
+- Checks animation name uniqueness within the sprite (in any animation folder), ignoring case like the editor. Frame image file names are built from the animation name, so on Windows and macOS a case variant would write its placeholder images over the existing animation's images
 - Frame dimensions default to the existing first animation's frame size
 
 ### `update_animation_properties`
@@ -925,6 +947,8 @@ Rename an animation on a Sprite object.
 | `objectName` | string | Yes | Sprite object name |
 | `animationName` | string | Yes | Current animation name |
 | `newName` | string | Yes | New animation name |
+
+A new name that differs from another animation of the sprite (in any animation folder) only in case is refused; changing only the case of the animation's own name is allowed.
 
 ### `delete_animation`
 
@@ -988,7 +1012,7 @@ Replace a frame's image with real PNG data. The PNG is written to the frame's fi
 
 ### `create_timeline`
 
-Create a timeline in `timelines/` (or `timelines/<subfolder>/`) and register it in `project.c3proj`, in the same project-bar folder. The name must not be used by another timeline or by a transition.
+Create a timeline in `timelines/` (or `timelines/<subfolder>/`) and register it in `project.c3proj`, in the same project-bar folder. The name must not be used by another timeline or by a transition. Construct 3 compares timeline names exactly, but a name that differs only in case from a timeline in the same folder is refused: on Windows and macOS both would be one file. A case variant of a timeline in another folder, or of a transition, is created with a `warnings` entry. A `subfolder` folder that differs from an existing project-bar folder only in case is refused, and an existing file at the target path is never replaced (no backup is made on create).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

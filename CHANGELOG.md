@@ -25,12 +25,16 @@ All notable changes to the Construct3 MCP Server are documented here.
 - Duplicate-SID reports locate event sheet entries by event path and index and no longer advise re-saving the project; behavior and instance variable SID clashes are warnings (#18).
 - The `review_game_logic` and `explain_eventsheet` prompts point to `find_runtime_traps` and the pitfalls resource (#20).
 - `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md` refreshed to match the code: source tree, write flow (backups, atomic writes, project lock), analyzers and the load-time gate.
+- Create and rename tools compare names the way the Construct 3 editor does: a name that differs from an existing event sheet, layout, object type or family, layer, animation, event variable or project-bar folder only in case is refused; `create_timeline` refuses a case variant of a timeline in the same folder (#29).
+- `add_event_to_sheet`, `update_event_variable` and `move_events_between_sheets` check event variable and function parameter names like the editor: no clash within the variable's scope (ignoring case), no System expression names, none of the characters the editor removes (#29).
 
 ### Fixed
 
 - Behavior conditions/actions are written with the `behaviorType` key that Construct 3 reads, instead of `behavior-type`, which made the editor refuse to open the project. `"behavior-type"` is still accepted as a deprecated input alias (#16).
 - Writes keep each file's line endings, trailing newline and BOM instead of rewriting CRLF files with LF (whole-file diffs on Windows checkouts); new files follow the style of `project.c3proj` (#21).
 - Timeline tools find timelines in any `project.c3proj` subfolder, and `update_timeline` writes back to the same file. `delete_timeline` backs up exactly the file it deletes and leaves `project.c3proj` unchanged when that file is missing (#22).
+- Create tools no longer overwrite an existing entity or timeline file whose name differs only in case (Windows, macOS); they refuse to write where a file already exists (#29).
+- Rewriting an existing file keeps its name on disk, including its case, instead of renaming it to the registered spelling (#29).
 
 ## [1.8.1] - 2026-04-16
 

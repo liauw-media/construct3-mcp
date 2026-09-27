@@ -5,7 +5,25 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { C3Event, EventSheet, FunctionBlockEvent, WriteResult } from '../construct3/types.js';
-import { validateName, validateSubfolder, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
+import {
+  validateName,
+  validateSubfolder,
+  toolResult,
+  toolError,
+  notFoundError,
+  boundedRecord,
+  caseClashError,
+  folderCaseClashError,
+} from './shared.js';
+import { findFolderPathClash, findNameClash } from '../construct3/names.js';
+import {
+  SYSTEM_EXPRESSIONS_NOT_IN_R449,
+  eventVariableNameUses,
+  findEnclosingEvents,
+  findEventVariableNameProblem,
+  findNewEventVariableNameClashes,
+} from '../construct3/event-variable-names.js';
+import type { EventVariableNameProblem, NewEventVariableNameClash } from '../construct3/event-variable-names.js';
 import {
   conditionSchema,
   actionSchema,
@@ -50,7 +68,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     'create_event_sheet',
     'Create a new event sheet in the project',
     {
-      name: z.string().max(200).describe('Event sheet name'),
+      name: z.string().max(200).describe('Event sheet name (must not match an existing event sheet name, ignoring case)'),
       subfolder: z.string().max(500).optional().describe('Subfolder path'),
       includeSheets: z.array(z.string()).optional().describe('Event sheets to auto-include'),
     },
@@ -59,11 +77,22 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         validateName(args.name);
         if (args.subfolder) validateSubfolder(args.subfolder);
 
-        // Check uniqueness
+        // Check uniqueness: the editor compares event sheet names ignoring case, project-wide
         const existing = await reader.listEventSheets();
         if (existing.includes(args.name)) {
           return toolError(`Event sheet "${args.name}" already exists.`);
         }
+        const nameClash = findNameClash(args.name, existing);
+        if (nameClash) {
+          return toolError(caseClashError('event sheet', args.name, nameClash));
+        }
+        if (args.subfolder) {
+          const folderClash = findFolderPathClash(reader.getProject().eventSheets, args.subfolder);
+          if (folderClash) return toolError(folderCaseClashError(args.subfolder, folderClash));
+        }
+        // Never replace an existing file
+        const fileRefusal = await writer.entityFileRefusal('eventSheets', args.name, args.subfolder);
+        if (fileRefusal) return toolError(fileRefusal);
 
         // Validate include sheets exist
         if (args.includeSheets) {
@@ -84,7 +113,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
         }
 
-        await writer.writeEntityFile('eventSheets', args.name, data, args.subfolder);
+        await writer.writeEntityFile('eventSheets', args.name, data, args.subfolder, { createOnly: true });
         await writer.addToProject('eventSheets', args.name, args.subfolder);
         resetProjectIndex();
 
@@ -116,8 +145,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       functionParams: z.array(z.object({
         name: z.string().describe('Parameter name'),
         type: z.enum(['number', 'string', 'boolean']).describe('Parameter type'),
-      })).optional().describe('For functions: parameter definitions'),
-      variableName: z.string().max(200).optional().describe('For variables: variable name'),
+      })).optional().describe('For functions: parameter definitions. Names are refused like in the editor: a name that matches, ignoring case, a global variable of the project, another parameter of the function or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
+      variableName: z.string().max(200).optional().describe('For variables: name of the new global variable. Refused like in the editor: a name that matches, ignoring case, any event variable or function parameter in the project or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
       variableType: z.enum(['number', 'string', 'boolean']).optional().describe('For variables: variable type'),
       initialValue: z.string().max(500).optional().default('').describe('For variables: initial value'),
       includeSheet: z.string().max(200).optional().describe('For includes: sheet name to include'),
@@ -146,6 +175,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
           case 'function': {
             if (!args.functionName) return toolError('functionName is required for function events');
+            // Parameter names are checked like in the editor's Function parameter dialog
+            if (args.functionParams && args.functionParams.length > 0) {
+              const sheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
+              const paramError = functionParameterNamesError(sheets, args.sheetName, args.functionParams.map(p => p.name));
+              if (paramError) return toolError(paramError);
+            }
             const sid = await idGen.generateSid(reader);
             // Pre-generate real SIDs for each parameter before passing to the template.
             const paramsWithSids = args.functionParams
@@ -161,6 +196,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
           case 'variable': {
             if (!args.variableName) return toolError('variableName is required for variable events');
+            // The variable goes to the top level of the sheet: a global variable
+            const sheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
+            const nameError = eventVariableNameError(sheets, args.sheetName, [], args.variableName);
+            if (nameError) return toolError(nameError);
             const varType = args.variableType || 'number';
             const defaultValue = args.initialValue || (varType === 'number' ? '0' : varType === 'boolean' ? 'false' : '');
             const sid = await idGen.generateSid(reader);
@@ -717,7 +756,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
       targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
       sids: z.array(z.number().int().positive()).min(1).describe('SIDs of the top-level events to copy/move'),
-      deleteSource: z.boolean().optional().default(false).describe('If true, remove the events from the source sheet after copying (move semantics)'),
+      deleteSource: z.boolean().optional().default(false).describe('If true, remove the events from the source sheet after copying (move semantics). A copy or move that would leave two event variables or function parameters whose names match ignoring case in one scope is refused, e.g. a copy of a global variable (its original keeps the name)'),
       targetGroupPath: z.string().max(500).optional().describe('Insert into a group in the target sheet by title path (e.g. "Movement > Collision")'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert events in the target sheet or group'),
     },
@@ -803,6 +842,26 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (args.deleteSource) {
           const sidSet = new Set(args.sids);
           sourceSheetData.events = sourceEvents.filter(e => !sidSet.has(e.sid as number)) as unknown as C3Event[];
+        }
+
+        // Event variable names: copies keep their names (the editor renames a
+        // pasted variable whose name is taken), so refuse a copy or move that
+        // would leave two names in one scope that the editor treats as the same
+        const sheetsBefore = await readEventSheetsFresh(reader, [
+          [args.sourceSheet, sourceEvents as unknown as C3Event[]],
+          [args.targetSheet, targetBefore],
+        ]);
+        const sheetsAfter = new Map(sheetsBefore);
+        sheetsAfter.set(args.sourceSheet, sourceSheetData.events);
+        sheetsAfter.set(args.targetSheet, targetSheetData.events);
+        const nameClashes = findNewEventVariableNameClashes(
+          sheetsBefore, args.sourceSheet, eventsToMove as unknown as C3Event[],
+          sheetsAfter, args.targetSheet, copiedEvents as unknown as C3Event[],
+        );
+        if (nameClashes.length > 0) {
+          sourceSheetData.events = sourceEvents as unknown as C3Event[];
+          targetSheetData.events = targetBefore;
+          return toolError(movedEventVariableNameClashMessage(args.targetSheet, args.deleteSource, nameClashes));
         }
 
         // Editor load-time rules over both sheets: a copy of an event that
@@ -1223,7 +1282,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     {
       sheetName: z.string().max(200).describe('Event sheet containing the variable'),
       sid: z.number().int().describe('SID of the variable event to update'),
-      newName: z.string().max(200).optional().describe('New variable name'),
+      newName: z.string().max(200).optional().describe('New variable name. Refused like in the editor: a name that matches, ignoring case, an event variable or function parameter in the variable\'s scope (for a global variable: anywhere in the project) or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
       newType: z.enum(['number', 'string', 'boolean']).optional().describe('New variable type'),
       newInitialValue: z.string().max(1000).optional().describe('New initial value (as string — use "0", "false", or "" for defaults)'),
       isStatic: z.boolean().optional().describe('Mark as static (value persists between calls)'),
@@ -1255,12 +1314,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const varEvent = findResult.event as unknown as import('../construct3/types.js').VariableEvent;
 
-        // Check name uniqueness if renaming
+        // Check the new name against the variable's scope, as the editor does;
+        // changing the case of this variable's own name is fine
         if (args.newName !== undefined && args.newName !== varEvent.name) {
-          const nameInUse = findVariableNameInUse(sheet.events, args.newName, args.sid);
-          if (nameInUse) {
-            return toolError(`A variable named "${args.newName}" already exists in sheet "${args.sheetName}".`);
-          }
+          const parents = findEnclosingEvents(sheet.events, findResult.event as C3Event) ?? [];
+          const sheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
+          const nameError = eventVariableNameError(
+            sheets, args.sheetName, parents, args.newName, findResult.event as C3Event);
+          if (nameError) return toolError(nameError);
           varEvent.name = args.newName;
         }
 
@@ -1290,16 +1351,149 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 }
 
 /**
- * Check whether a variable name is already used in the event list (excluding the event with the given SID).
+ * The events of every event sheet registered in the project, read from disk
+ * rather than from the reader's cache (which does not see sheets saved
+ * outside this server since its last write), with `overrides` (sheet name and
+ * events) in place of the saved events. Unreadable sheets are skipped, as in
+ * readAllEventSheets.
  */
-function findVariableNameInUse(events: C3Event[], name: string, excludeSid: number): boolean {
-  for (const ev of events) {
-    if (ev.eventType === 'variable' && (ev as import('../construct3/types.js').VariableEvent).name === name) {
-      if ((ev as { sid?: number }).sid !== excludeSid) return true;
-    }
-    if ('children' in ev && Array.isArray((ev as { children?: C3Event[] }).children)) {
-      if (findVariableNameInUse((ev as { children: C3Event[] }).children, name, excludeSid)) return true;
+async function readEventSheetsFresh(
+  reader: MutationToolDeps['reader'],
+  overrides: ReadonlyArray<readonly [string, C3Event[]]>,
+): Promise<Map<string, C3Event[]>> {
+  const sheets = new Map<string, C3Event[]>();
+  for (const name of await reader.listEventSheets()) {
+    try {
+      const data = await reader.readEventSheet(name);
+      if (Array.isArray(data.events)) sheets.set(name, data.events);
+    } catch {
+      // Skip unreadable sheets
     }
   }
-  return false;
+  for (const [name, events] of overrides) sheets.set(name, events);
+  return sheets;
+}
+
+/** The scope rules of the editor's Event variable and Function parameter dialogs, for error messages. */
+const NAME_SCOPE_RULE = {
+  global: 'Construct 3 requires a global variable name to differ, ignoring case, from every event variable and ' +
+    'function parameter in the project.',
+  local: 'Construct 3 requires a local variable name to differ, ignoring case, from every global variable, from the ' +
+    'variables and function parameters of the events enclosing it and from those below its parent event.',
+  parameter: 'Construct 3 requires a function parameter name to differ, ignoring case, from every global variable, ' +
+    'from the other parameters of its function and from the variables below the function.',
+};
+
+/**
+ * Error text for an event variable or function parameter name the editor
+ * would refuse. `scopeRule` is one of NAME_SCOPE_RULE.
+ */
+function eventVariableNameMessage(
+  problem: EventVariableNameProblem,
+  name: string,
+  what: 'event variable' | 'function parameter',
+  scopeRule: string,
+): string {
+  const article = what === 'event variable' ? 'an' : 'a';
+  if (problem.problem === 'invalid') {
+    return `"${name}" is not a valid ${what} name: ${problem.reason}. Construct 3 does not accept whitespace, ` +
+      'the characters . , " ( ) ? : \\ / ; * | \' - ` ! $ % ^ & + = < > { } [ ] @ # ~ ¬ £, the soft hyphen, ' +
+      'the ideographic full stop 。, the full-width forms ， （ ） ？ ： of , ( ) ? :, ' +
+      'the typographic double quotes “ ”, a leading underscore or a name made only of digits. ' +
+      'Choose a different name.';
+  }
+  if (problem.problem === 'system-expression') {
+    const newer = SYSTEM_EXPRESSIONS_NOT_IN_R449.has(problem.expression)
+      ? ' Newer Construct 3 releases such as r495.2 have this System expression (r449 does not have it) and'
+      : ' Construct 3';
+    return `"${name}" is the name of the System expression "${problem.expression}"` +
+      `${problem.expression === name ? '' : ' (ignoring case)'}.${newer} does not accept ${article} ${what} ` +
+      'named like a System expression. Choose a different name.';
+  }
+  const { use } = problem;
+  if (use.name === name) {
+    return `A ${use.kind} named "${name}" already exists in sheet "${use.sheet}". ${scopeRule}`;
+  }
+  const kind = use.kind === 'variable' ? 'event variable' : 'function parameter';
+  return `Sheet "${use.sheet}": ${caseClashError(kind, name, use.name)} ${scopeRule}`;
+}
+
+/**
+ * Why the editor would refuse `name` for an event variable declared in sheet
+ * `sheetName` under `parents` (the enclosing events, outermost first; empty
+ * for a global variable), or undefined when it would accept it. `sheets` holds
+ * the events of every event sheet (from readEventSheetsFresh); `self` is the
+ * variable being renamed. See construct3/event-variable-names.ts for the rules.
+ */
+function eventVariableNameError(
+  sheets: ReadonlyMap<string, readonly C3Event[]>,
+  sheetName: string,
+  parents: readonly C3Event[],
+  name: string,
+  self?: C3Event,
+): string | undefined {
+  const ownName = self ? (self as { name?: unknown }).name : undefined;
+  const problem = findEventVariableNameProblem(
+    name,
+    eventVariableNameUses(sheets, sheetName, parents, self),
+    typeof ownName === 'string' ? ownName : undefined,
+  );
+  if (!problem) return undefined;
+  return eventVariableNameMessage(problem, name, 'event variable',
+    parents.length === 0 ? NAME_SCOPE_RULE.global : NAME_SCOPE_RULE.local);
+}
+
+/**
+ * Why the editor would refuse the parameter `names` of a new function that
+ * goes to the top level of sheet `sheetName`, checked in order like the
+ * editor's Function parameter dialog when the parameters are added one by
+ * one; undefined when it would accept them all. `sheets` holds the events of
+ * every event sheet (from readEventSheetsFresh).
+ */
+function functionParameterNamesError(
+  sheets: ReadonlyMap<string, readonly C3Event[]>,
+  sheetName: string,
+  names: readonly string[],
+): string | undefined {
+  // The new function has no enclosing events and no sub-events yet, so a
+  // parameter's scope is every global variable and the parameters before it
+  const fn = { eventType: 'function-block', functionParameters: [] as Array<{ name: string }>, children: [] };
+  for (const name of names) {
+    const problem = findEventVariableNameProblem(name, eventVariableNameUses(sheets, sheetName, [fn as unknown as C3Event]));
+    if (problem?.problem === 'in-use' && problem.use.kind === 'function parameter') {
+      return problem.use.name === name
+        ? `functionParams lists "${name}" more than once. ${NAME_SCOPE_RULE.parameter}`
+        : `functionParams lists "${problem.use.name}" and "${name}", which differ only in case. Construct 3 treats ` +
+          `them as the same function parameter name. ${NAME_SCOPE_RULE.parameter}`;
+    }
+    if (problem) return eventVariableNameMessage(problem, name, 'function parameter', NAME_SCOPE_RULE.parameter);
+    fn.functionParameters.push({ name });
+  }
+  return undefined;
+}
+
+/** Error text for copied or moved events whose variable or parameter names clash in their new scope. */
+function movedEventVariableNameClashMessage(
+  targetSheet: string,
+  deleteSource: boolean,
+  clashes: readonly NewEventVariableNameClash[],
+): string {
+  const MAX_LISTED = 10;
+  const lines = clashes.slice(0, MAX_LISTED).map(({ declaration, use }) => {
+    const what = declaration.kind === 'function parameter'
+      ? 'function parameter'
+      : declaration.parents.length === 0 ? 'global variable' : 'local variable';
+    const other = use.kind === 'variable' ? 'event variable' : 'function parameter';
+    const relation = use.name === declaration.name ? 'has the same name as' : 'differs only in case from';
+    return `- the ${what} "${declaration.name}" ${relation} the ${other} "${use.name}" in sheet "${use.sheet}"`;
+  });
+  if (clashes.length > MAX_LISTED) lines.push(`- and ${clashes.length - MAX_LISTED} more`);
+  return `${deleteSource ? 'Moving' : 'Copying'} these events to "${targetSheet}" would put names that Construct 3 ` +
+    'treats as the same (ignoring case) into one event variable scope:\n' +
+    `${lines.join('\n')}\n\n` +
+    'Construct 3 requires a global variable name to differ from every event variable and function parameter in ' +
+    'the project, and a local variable or function parameter name to differ from every global variable, from those ' +
+    'of the events enclosing it and from those below its parent event. The editor renames a pasted variable in this ' +
+    'case; this tool keeps the names, so nothing was written. Rename one of them first (update_event_variable)' +
+    `${deleteSource ? '' : ', or move a global variable to the other sheet (deleteSource: true) instead of copying it'}.`;
 }

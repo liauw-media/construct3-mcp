@@ -55,6 +55,9 @@ construct3-mcp/
 │   │   ├── id-generator.ts         # SID/UID/imageSpriteId generation with collision avoidance
 │   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
+│   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
+│   │   ├── names.ts                # Case-insensitive name and folder comparison
+│   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
 │   │   ├── types.ts                # TypeScript type definitions
@@ -179,6 +182,7 @@ Key things to know when working with Construct 3 project files:
 
 - **SIDs** are ~15-digit random integers. The editor refuses to open a project in which two object types or families share a SID, and its loader also checks function parameter SIDs; duplicates among events, conditions, actions and layout instances are common in editor-saved projects and open fine (see `classifySidDuplicate()` in `load-rules.ts`). New SIDs are still generated unique across the whole project
 - **UIDs** are sequential integers, only on layout instances and singleglobal-inst objects
+- **Names**: the editor compares event sheet, layout, object type/family, layer, animation, event variable and project-bar folder names ignoring case (timeline names exactly); entity files are named after the entity, so names that differ only in case share one file on Windows and macOS. Compare with `findNameClash` / `findFolderPathClash` in `names.ts`
 - **Cross-references are by NAME** — event sheets reference objects as `"objectClass": "Name"`, layouts as `"type": "Name"`
 - **c3proj containers** use `{ items: string[], subfolders: Subfolder[] }` recursive structure
 - **usedAddons** in c3proj must list every plugin, behavior, and effect used

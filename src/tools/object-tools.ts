@@ -8,7 +8,8 @@ import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Instance, Layout } from '../construct3/types.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
-import { validateName, validateSubfolder, toolResult, toolError, notFoundError } from './shared.js';
+import { validateName, validateSubfolder, toolResult, toolError, notFoundError, folderCaseClashError } from './shared.js';
+import { findFolderPathClash } from '../construct3/names.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   checkFamilyPlugins,
@@ -57,6 +58,13 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (nameClash) {
           return toolError(objectClassNameClashMessage(args.name, nameClash));
         }
+        if (args.subfolder) {
+          const folderClash = findFolderPathClash(reader.getProject().objectTypes, args.subfolder);
+          if (folderClash) return toolError(folderCaseClashError(args.subfolder, folderClash));
+        }
+        // Before any write (addon registration, placeholder images): never replace an existing file
+        const fileRefusal = await writer.entityFileRefusal('objectTypes', args.name, args.subfolder);
+        if (fileRefusal) return toolError(fileRefusal);
 
         // Ensure the plugin is registered in usedAddons
         const addonWarning = await writer.ensureAddonRegistered('plugin', args.pluginId);
@@ -110,7 +118,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           }
         }
 
-        await writer.writeEntityFile('objectTypes', args.name, data, args.subfolder);
+        await writer.writeEntityFile('objectTypes', args.name, data, args.subfolder, { createOnly: true });
         await writer.addToProject('objectTypes', args.name, args.subfolder);
 
         const warnings: string[] = [];
@@ -361,6 +369,13 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (nameClash) {
           return toolError(objectClassNameClashMessage(args.name, nameClash));
         }
+        if (args.subfolder) {
+          const folderClash = findFolderPathClash(reader.getProject().families, args.subfolder);
+          if (folderClash) return toolError(folderCaseClashError(args.subfolder, folderClash));
+        }
+        // Never replace an existing file
+        const fileRefusal = await writer.entityFileRefusal('families', args.name, args.subfolder);
+        if (fileRefusal) return toolError(fileRefusal);
 
         // Validate members exist
         const warnings: string[] = [];
@@ -394,7 +409,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           members: args.members,
         };
 
-        await writer.writeEntityFile('families', args.name, familyData, args.subfolder);
+        await writer.writeEntityFile('families', args.name, familyData, args.subfolder, { createOnly: true });
         await writer.addToProject('families', args.name, args.subfolder);
 
         const result: WriteResult = {

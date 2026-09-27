@@ -3,12 +3,13 @@
  */
 
 import { z } from 'zod';
-import { readFile, writeFile, rename, unlink } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, Addon } from '../construct3/types.js';
 import { toolResult, toolError } from './shared.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from '../construct3/templates.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
+import { atomicReplace } from '../construct3/atomic-write.js';
 
 export function registerProjectTools({ server, reader, writer }: MutationToolDeps) {
   server.tool(
@@ -111,19 +112,7 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
         };
         project.usedAddons.push(newAddon);
 
-        const tmpPath = projectPath + '.tmp';
-        await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
-        try {
-          await rename(tmpPath, projectPath);
-        } catch (e: unknown) {
-          if (e && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'EEXIST') {
-            await unlink(projectPath);
-            await rename(tmpPath, projectPath);
-          } else {
-            try { await unlink(tmpPath); } catch { /* best-effort */ }
-            throw e;
-          }
-        }
+        await atomicReplace(projectPath, serializeJson(project, jsonTextStyleOf(content)));
         await reader.reloadProject();
 
         const result: WriteResult = {
@@ -173,19 +162,7 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
           project.usedAddons.splice(projIdx, 1);
         }
 
-        const tmpPath = projectPath + '.tmp';
-        await writeFile(tmpPath, serializeJson(project, jsonTextStyleOf(content)), 'utf-8');
-        try {
-          await rename(tmpPath, projectPath);
-        } catch (e: unknown) {
-          if (e && typeof e === 'object' && 'code' in e && (e as { code: string }).code === 'EEXIST') {
-            await unlink(projectPath);
-            await rename(tmpPath, projectPath);
-          } else {
-            try { await unlink(tmpPath); } catch { /* best-effort */ }
-            throw e;
-          }
-        }
+        await atomicReplace(projectPath, serializeJson(project, jsonTextStyleOf(content)));
         await reader.reloadProject();
 
         const result: WriteResult = {

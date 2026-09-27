@@ -116,7 +116,8 @@ Safe write operations with the safety pipeline: **backup → validate → write 
 ```typescript
 class Construct3ProjectWriter {
   // Entity files (objectTypes, eventSheets, layouts, families)
-  writeEntityFile(category, name, data, subfolder?): Promise<string>
+  writeEntityFile(category, name, data, subfolder?, { createOnly? }): Promise<string>
+  entityFileRefusal(category, name, subfolder?): Promise<string | undefined>  // file already on disk, ignoring case
   deleteEntityFile(category, name, subfolder?): Promise<string>
 
   // c3proj container updates
@@ -142,7 +143,8 @@ class Construct3ProjectWriter {
 - **Path traversal protection**: All paths resolved through `resolveProjectPath()` (`path-utils.ts`) and checked against the project directory
 - **Pre-write validation**: JSON round-trip test, null/type checks, 5MB size limit
 - **Backup**: `.bak` file created before every overwrite or delete
-- **Atomic write**: Content goes to a `.tmp` file that is then renamed into place
+- **Atomic write**: Content goes to a `.tmp` file that is then renamed into place; an existing file keeps its name on disk, including its case (`atomic-write.ts`)
+- **No overwrite on create**: Create tools pass `createOnly`, so a new entity is never written over a file that already exists, also one whose name differs only in case
 - **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write
 - **Project lock**: The writer's read-modify-writes of `project.c3proj` (`addToProject`, `removeFromProject`, `updateProjectProperties`, addon auto-registration) share one lock, so parallel writer calls cannot lose each other's updates
 - **Text style**: An existing file keeps its line endings, trailing whitespace and BOM; a new file follows `project.c3proj` (`json-format.ts`)
@@ -190,6 +192,9 @@ Supporting modules next to the templates:
 
 | Module | Purpose |
 |--------|---------|
+| `construct3/atomic-write.ts` | Temp-file-and-rename writes that keep an existing file's name on disk; case-insensitive file lookup |
+| `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
+| `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
 | `construct3/png-generator.ts` | Zero-dependency placeholder PNGs and C3 image file names |
@@ -251,11 +256,12 @@ Claude → create_object({ name: "Enemy", pluginId: "Sprite" })
   → validateName("Enemy")
   → check uniqueness against reader.listObjectTypes()
   → findObjectClassNameClash()      ← same name as an object or family, ignoring case
+  → writer.entityFileRefusal(...)   ← no file for the name on disk yet, ignoring case
   → writer.ensureAddonRegistered("plugin", "Sprite")
   → idGen.generateSid() / generateImageSpriteId() (scan all IDs if first use)
   → writer.writeImageFiles(...)     ← placeholder PNG for the first frame
   → build template: createSpriteObject("Enemy", sid, animSid, imageSpriteId)
-  → writer.writeEntityFile("objectTypes", "Enemy", data)
+  → writer.writeEntityFile("objectTypes", "Enemy", data, undefined, { createOnly: true })
       → validateJsonData(data)      ← pre-write check
       → resolveJsonTextStyle(...)   ← keep the file's line endings and BOM
       → createBackup(filePath)      ← .bak copy
@@ -316,7 +322,7 @@ The mutation tools provide extra context:
 
 - **Path traversal protection**: `resolveProjectPath()` rejects any path escaping the project directory
 - **Reserved name blocking**: "System" and other C3 reserved names cannot be used
-- **Name clash checks**: Object types and families share one name space that ignores case
+- **Name clash checks**: Names the editor compares ignoring case (event sheets, layouts, object types and families in one name space, layers, animations, event variables, project-bar folders) are refused when they differ from an existing one only in case (`names.ts`)
 - **Input validation**: Zod schemas on all tool parameters with length limits
 - **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
 - **Load-time gate**: The five event-editing tools listed under Write Flow reject writes that add an error the editor would refuse at load

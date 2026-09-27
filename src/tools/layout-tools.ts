@@ -6,7 +6,8 @@
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, Layout, Layer } from '../construct3/types.js';
-import { validateName, toolResult, toolError, notFoundError, boundedRecord } from './shared.js';
+import { validateName, toolResult, toolError, notFoundError, boundedRecord, caseClashError } from './shared.js';
+import { findNameClash } from '../construct3/names.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
   DEFAULT_INSTANCE_PROPERTIES,
@@ -16,6 +17,32 @@ import {
 } from '../construct3/templates.js';
 import type { InstanceOverrides } from '../construct3/templates.js';
 
+/**
+ * Every layer of a layout, sub-layers included. The editor refuses a layer name
+ * that another layer anywhere in the layout uses, ignoring case, and cannot load
+ * a layout with two such layers (projectResources.js: layer names are looked up
+ * over all layers with normalize().toLowerCase()).
+ */
+function allLayers(layers: unknown, out: Layer[] = []): Layer[] {
+  if (!Array.isArray(layers)) return out;
+  for (const layer of layers as Layer[]) {
+    if (!layer || typeof layer !== 'object') continue;
+    out.push(layer);
+    allLayers(layer.subLayers, out);
+  }
+  return out;
+}
+
+function layerNames(layers: Layer[]): string[] {
+  return layers.map(l => l.name).filter((n): n is string => typeof n === 'string');
+}
+
+/** Error text for a layer name that `existing` (another layer of the layout) already uses, exactly or ignoring case. */
+function layerNameClashError(name: string, existing: string, layoutName: string): string {
+  if (existing === name) return `Layer "${name}" already exists in layout "${layoutName}".`;
+  return `Layout "${layoutName}": ${caseClashError('layer', name, existing)}`;
+}
+
 export function registerLayoutTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_layout ────────────────────────────────────────
 
@@ -23,21 +50,34 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
     'create_layout',
     'Create a new layout in the project',
     {
-      name: z.string().max(200).describe('Layout name'),
+      name: z.string().max(200).describe('Layout name (must not match an existing layout name, ignoring case)'),
       width: z.number().int().positive().optional().describe('Width in pixels (default: project viewport width)'),
       height: z.number().int().positive().optional().describe('Height in pixels (default: project viewport height)'),
       eventSheet: z.string().max(200).optional().describe('Linked event sheet name'),
-      layers: z.array(z.string()).optional().describe('Layer names (default: single "Layer 0")'),
+      layers: z.array(z.string()).optional().describe('Layer names, different from each other ignoring case (default: single "Layer 0")'),
     },
     async (args) => {
       try {
         validateName(args.name);
 
-        // Check uniqueness
+        // Check uniqueness: the editor compares layout names ignoring case, project-wide
         const existing = await reader.listLayouts();
         if (existing.includes(args.name)) {
           return toolError(`Layout "${args.name}" already exists.`);
         }
+        const nameClash = findNameClash(args.name, existing);
+        if (nameClash) {
+          return toolError(caseClashError('layout', args.name, nameClash));
+        }
+        // The editor refuses a layer name used by another layer of the layout, ignoring case
+        const newLayerNames = args.layers ?? [];
+        for (let i = 1; i < newLayerNames.length; i++) {
+          const layerClash = findNameClash(newLayerNames[i], newLayerNames.slice(0, i));
+          if (layerClash !== undefined) return toolError(layerNameClashError(newLayerNames[i], layerClash, args.name));
+        }
+        // Never replace an existing file
+        const fileRefusal = await writer.entityFileRefusal('layouts', args.name);
+        if (fileRefusal) return toolError(fileRefusal);
 
         // Validate event sheet
         if (args.eventSheet) {
@@ -67,7 +107,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
         const data = createLayout(args.name, layoutSid, width, height, args.eventSheet, layerDefs);
 
-        await writer.writeEntityFile('layouts', args.name, data);
+        await writer.writeEntityFile('layouts', args.name, data, undefined, { createOnly: true });
         await writer.addToProject('layouts', args.name);
 
         const result: WriteResult = {
@@ -392,7 +432,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
     'Add a new layer to an existing layout',
     {
       layoutName: z.string().max(200).describe('Layout to add the layer to'),
-      layerName: z.string().max(200).describe('New layer name (must be unique within the layout)'),
+      layerName: z.string().max(200).describe('New layer name (must be unique within the layout, ignoring case)'),
       index: z.number().int().min(0).optional().describe('Insert at this position (0 = bottom, default: append to top)'),
       isInitiallyVisible: z.boolean().optional().default(true).describe('Layer starts visible (default: true)'),
       isTransparent: z.boolean().optional().default(true).describe('Layer is transparent (default: true)'),
@@ -409,9 +449,10 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
         }
 
-        // Check for duplicate layer name within this layout
-        if (layout.layers.some(l => l.name === args.layerName)) {
-          return toolError(`Layer "${args.layerName}" already exists in layout "${args.layoutName}".`);
+        // Check for a layer name used anywhere in this layout (sub-layers included), ignoring case like the editor
+        const layerClash = findNameClash(args.layerName, layerNames(allLayers(layout.layers)));
+        if (layerClash !== undefined) {
+          return toolError(layerNameClashError(args.layerName, layerClash, args.layoutName));
         }
 
         const layerSid = await idGen.generateSid(reader);
@@ -522,7 +563,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
     {
       layoutName: z.string().max(200).describe('Layout name'),
       layerName: z.string().max(200).describe('Layer name to update'),
-      newName: z.string().max(200).optional().describe('Rename the layer'),
+      newName: z.string().max(200).optional().describe('Rename the layer (must not match another layer of the layout, ignoring case)'),
       isInitiallyVisible: z.boolean().optional().describe('Change initial visibility'),
       isInitiallyInteractive: z.boolean().optional().describe('Change initial interactivity'),
       isTransparent: z.boolean().optional().describe('Change transparency'),
@@ -556,10 +597,13 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return toolError(`Layer "${args.layerName}" not found in layout "${args.layoutName}". Available layers: ${available}`);
         }
 
-        // Check new name uniqueness
+        // Check new name uniqueness like the editor: another layer's name (ignoring case, sub-layers
+        // included) is taken, changing the case of this layer's own name is fine
         if (args.newName !== undefined && args.newName !== args.layerName) {
-          if (layout.layers.some(l => l.name === args.newName)) {
-            return toolError(`Layer "${args.newName}" already exists in layout "${args.layoutName}".`);
+          const others = allLayers(layout.layers).filter(l => l !== layer);
+          const layerClash = findNameClash(args.newName, layerNames(others));
+          if (layerClash !== undefined) {
+            return toolError(layerNameClashError(args.newName, layerClash, args.layoutName));
           }
           layer.name = args.newName;
         }

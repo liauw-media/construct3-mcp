@@ -129,6 +129,27 @@ export function notFoundError(
   return toolError(`${entityKind} "${name}" not found.${hint}`);
 }
 
+/**
+ * Error text for a new name that differs from an existing one only in case,
+ * for the kinds of names the Construct 3 editor compares ignoring case (see
+ * construct3/names.ts).
+ */
+export function caseClashError(kind: string, name: string, existing: string): string {
+  return `"${name}" differs only in case from the existing ${kind} "${existing}". ` +
+    `Construct 3 treats names that differ only in case as the same ${kind} name. Choose a different name.`;
+}
+
+/**
+ * Error text for a subfolder path with a folder whose name differs from an
+ * existing sibling project-bar folder only in case. `existingPath` is the path
+ * spelled like the existing folders (from findFolderPathClash).
+ */
+export function folderCaseClashError(subfolder: string, existingPath: string): string {
+  return `Subfolder "${subfolder}" differs only in case from the existing project-bar folder path "${existingPath}". ` +
+    'Construct 3 treats sibling folder names that differ only in case as the same name, and on Windows and macOS ' +
+    `they are the same directory. Use subfolder "${existingPath}".`;
+}
+
 // ─── Parameter Naming Convention ────────────────────────────
 //
 // All MCP tool Zod schemas use the `<entityKind>Name` convention:

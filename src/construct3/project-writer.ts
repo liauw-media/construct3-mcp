@@ -5,9 +5,10 @@
  * see json-format.ts.
  */
 
-import { readFile, writeFile, copyFile, unlink, mkdir, stat, rename } from 'fs/promises';
-import { dirname } from 'path';
+import { readFile, writeFile, copyFile, unlink, mkdir, stat } from 'fs/promises';
+import { dirname, relative, sep } from 'path';
 import { resolveProjectPath } from './path-utils.js';
+import { atomicReplace, existingSpelling, findFileIgnoringCase } from './atomic-write.js';
 import type { Construct3ProjectReader } from './project-reader.js';
 import type { IdGenerator } from './id-generator.js';
 import type { Addon, Subfolder, ProjectProperties } from './types.js';
@@ -40,6 +41,17 @@ const PROPERTIES_KEY_MAP: Record<keyof ProjectProperties, true> = {
   exportFileStructure: true, uidAllocationMode: true,
 };
 const ALLOWED_PROPERTIES = new Set(Object.keys(PROPERTIES_KEY_MAP));
+
+type EntityCategory = 'objectTypes' | 'eventSheets' | 'layouts' | 'families';
+
+/** Options for Construct3ProjectWriter.writeEntityFile. */
+export interface WriteEntityOptions {
+  /**
+   * The entity is new: refuse to write (no backup, no write) when a file for it
+   * already exists, also one whose name differs only in case.
+   */
+  createOnly?: boolean;
+}
 
 /**
  * A new, empty project-bar folder for a project.c3proj container. The key
@@ -75,33 +87,20 @@ export class Construct3ProjectWriter {
   }
 
   /**
-   * Atomically replace a file by writing to a temp path then renaming.
-   * On Windows, rename fails with EEXIST if destination exists — we handle
-   * this by deleting the destination first, then retrying the rename.
+   * Atomically replace a file (temp file + rename), keeping an existing file's
+   * name on disk, including its case (see atomic-write.ts).
    */
   private async atomicWrite(filePath: string, content: string | Buffer): Promise<void> {
-    const tmpPath = filePath + '.tmp';
-    await writeFile(tmpPath, content, typeof content === 'string' ? 'utf-8' : undefined);
-    try {
-      await rename(tmpPath, filePath);
-    } catch (e: unknown) {
-      if (e && typeof e === 'object' && 'code' in e && e.code === 'EEXIST') {
-        // Windows: destination exists — delete it then retry
-        await unlink(filePath);
-        await rename(tmpPath, filePath);
-      } else {
-        // Cleanup temp file before re-throwing
-        try { await unlink(tmpPath); } catch { /* best-effort */ }
-        throw e;
-      }
-    }
+    await atomicReplace(filePath, content);
   }
 
   /**
    * Create a .bak backup of a file before overwriting.
    * Returns the backup path (even if the original didn't exist).
    */
-  private async createBackup(filePath: string): Promise<string> {
+  private async createBackup(path: string): Promise<string> {
+    // The backup takes the file's name as spelled on disk
+    const filePath = await existingSpelling(path);
     const backupPath = filePath + '.bak';
     try {
       await stat(filePath);
@@ -172,25 +171,53 @@ export class Construct3ProjectWriter {
     await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
   }
 
-  /**
-   * Write an entity JSON file (object, event sheet, layout, family).
-   */
-  async writeEntityFile(
-    category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
-    name: string,
-    data: unknown,
-    subfolder?: string,
-  ): Promise<string> {
-    // Pre-write validation
-    const json = this.validateJsonData(data, name);
-
+  /** Path of an entity's JSON file, confined to the project directory. */
+  private entityFilePath(category: EntityCategory, name: string, subfolder?: string): string {
     const segments = subfolder
       ? [category, subfolder, `${name}.json`]
       : [category, `${name}.json`];
-    const filePath = resolveProjectPath(this.reader.getProjectDir(), ...segments);
+    return resolveProjectPath(this.reader.getProjectDir(), ...segments);
+  }
+
+  /**
+   * Why a new entity cannot be written: the file it would be written to already
+   * exists, also when its name there differs only in case (on Windows and macOS
+   * that is the same file, and writing would replace it). Returns the refusal
+   * text, or undefined when the name is free on disk. Create tools check this
+   * before their first write and return the text as a tool error.
+   */
+  async entityFileRefusal(category: EntityCategory, name: string, subfolder?: string): Promise<string | undefined> {
+    const existing = await findFileIgnoringCase(this.entityFilePath(category, name, subfolder));
+    if (!existing) return undefined;
+    const label = relative(this.reader.getProjectDir(), existing).split(sep).join('/');
+    return `Refusing to create "${name}": the file ${label} already exists (not registered in project.c3proj under this name, ` +
+      'or registered with a name that differs only in case). It was left unchanged. Choose another name, or, if the file ' +
+      'is a leftover of a deleted entity, check it and remove it first.';
+  }
+
+  /**
+   * Write an entity JSON file (object, event sheet, layout, family). An
+   * existing file keeps its name on disk, including its case.
+   */
+  async writeEntityFile(
+    category: EntityCategory,
+    name: string,
+    data: unknown,
+    subfolder?: string,
+    options: WriteEntityOptions = {},
+  ): Promise<string> {
+    // Pre-write validation
+    const json = this.validateJsonData(data, name);
+    if (options.createOnly) {
+      const refusal = await this.entityFileRefusal(category, name, subfolder);
+      if (refusal) throw new Error(refusal);
+    }
+
+    const requested = this.entityFilePath(category, name, subfolder);
 
     // Ensure directory exists
-    await mkdir(dirname(filePath), { recursive: true });
+    await mkdir(dirname(requested), { recursive: true });
+    const filePath = await existingSpelling(requested);
 
     // Keep the existing file's text style; a new file follows the project's
     const style = await resolveJsonTextStyle(filePath, this.reader.getProjectPath(), dirname(filePath));
@@ -210,14 +237,11 @@ export class Construct3ProjectWriter {
    * Delete an entity JSON file.
    */
   async deleteEntityFile(
-    category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
+    category: EntityCategory,
     name: string,
     subfolder?: string,
   ): Promise<string> {
-    const segments = subfolder
-      ? [category, subfolder, `${name}.json`]
-      : [category, `${name}.json`];
-    const filePath = resolveProjectPath(this.reader.getProjectDir(), ...segments);
+    const filePath = this.entityFilePath(category, name, subfolder);
 
     const backupPath = await this.createBackup(filePath);
     try {
@@ -237,7 +261,7 @@ export class Construct3ProjectWriter {
    * Add a name to a c3proj container (objectTypes, eventSheets, layouts, families).
    */
   async addToProject(
-    category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
+    category: EntityCategory,
     name: string,
     subfolder?: string,
   ): Promise<void> {
@@ -269,7 +293,7 @@ export class Construct3ProjectWriter {
    * Remove a name from a c3proj container.
    */
   async removeFromProject(
-    category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
+    category: EntityCategory,
     name: string,
   ): Promise<void> {
     return this.withProjectLock(async () => {
@@ -337,7 +361,7 @@ export class Construct3ProjectWriter {
    * Get the subfolder path for an existing entity name.
    */
   getSubfolderForEntity(
-    category: 'objectTypes' | 'eventSheets' | 'layouts' | 'families',
+    category: EntityCategory,
     name: string,
   ): string | undefined {
     const project = this.reader.getProject();

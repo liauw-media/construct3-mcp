@@ -13,6 +13,7 @@
  */
 
 import type { C3Event, Subfolder } from '../types.js';
+import { findNameClash, nameKey } from '../names.js';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -531,10 +532,10 @@ function flattenTree(tree: FolderTree | undefined): string[] {
 /**
  * Object types and families are both "object classes" in the editor and share
  * one name namespace, compared after Unicode normalization and ignoring case
- * (Addon SDK: IProject.GetObjectClassByName returns either).
+ * (Addon SDK: IProject.GetObjectClassByName returns either; see names.ts).
  */
 export function normalizeObjectClassName(name: string): string {
-  return name.normalize().toLowerCase();
+  return nameKey(name);
 }
 
 type ObjectClassKind = 'object type' | 'family';
@@ -600,13 +601,10 @@ export function findObjectClassNameClash(
   objectTypeNames: Iterable<string>,
   familyNames: Iterable<string>,
 ): { name: string; kind: ObjectClassKind } | undefined {
-  const target = normalizeObjectClassName(name);
-  for (const existing of objectTypeNames) {
-    if (normalizeObjectClassName(existing) === target) return { name: existing, kind: 'object type' };
-  }
-  for (const existing of familyNames) {
-    if (normalizeObjectClassName(existing) === target) return { name: existing, kind: 'family' };
-  }
+  const objectType = findNameClash(name, objectTypeNames);
+  if (objectType !== undefined) return { name: objectType, kind: 'object type' };
+  const family = findNameClash(name, familyNames);
+  if (family !== undefined) return { name: family, kind: 'family' };
   return undefined;
 }
 
