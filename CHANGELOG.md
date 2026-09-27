@@ -23,6 +23,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `validate_project` checks `legacy-event-shape` (shapes the current editor never writes) and `else-placement` (an else block that does not follow a non-triggered block, or holds a trigger) (#32).
 - `add_event_block` and `update_event_block` write else-if blocks, OR blocks (`isOrBlock`), events without conditions, positional function calls, multi-line script actions and comment rows; `update_event_block` can make a block an else or OR block (#32).
 - `validate_project` check `missing-behavior-entry`: layout instances that lack the entry for a behavior of their object type or its families (#33).
+- `validate_project` check `missing-behavior-or-variable`: conditions, actions and expressions that use an instance variable or behavior which the object type, its families or the family do not have (#37).
 
 ### Changed
 
@@ -69,6 +70,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `update_event_block` no longer warns that all conditions were removed on blocks that never had conditions, such as function blocks (#32).
 - Placeholder image files are named all lowercase, as the editor names them (`images/<object>-<animation>-000.png`), instead of keeping the case of the animation name (#33).
 - `replace_sprite_image` on a frame stored in another format (e.g. JPEG) sets the frame's `fileType` to PNG to match the new `.png` file and names the old file in a warning (#33).
+- `update_object_properties` and `update_family` no longer remove an instance variable, behavior or family member that conditions, actions or expressions still use: they refuse, list the uses, and go ahead only with `force` (#37).
 
 ## [1.8.1] - 2026-04-16
 
