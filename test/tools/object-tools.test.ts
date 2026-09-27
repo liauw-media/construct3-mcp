@@ -4,6 +4,7 @@ import { MockReader } from '../mocks/mock-reader.js';
 import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerObjectTools } from '../../src/tools/object-tools.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 
 function setup(readerData = {}) {
   const server = new MockServer();
@@ -360,6 +361,43 @@ describe('delete_object', () => {
     const { server } = setup();
     const result = await server.callTool('delete_object', { name: 'Ghost' });
     expect(result.isError).toBe(true);
+  });
+
+  it('refuses objects used only as an object parameter, a non-world instance or from a script action', async () => {
+    resetProjectIndex();
+    const sprite = (name: string, sid: number) => [name, { name, 'plugin-id': 'Sprite', sid }] as [string, Record<string, unknown>];
+    const { server, writer } = setup({
+      objects: new Map([
+        sprite('Sprite1', 101), sprite('Sprite2', 102), sprite('Sprite3', 103), sprite('Sprite4', 104),
+        ['Array1', { name: 'Array1', 'plugin-id': 'Arr', sid: 110 }],
+      ]),
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 200,
+        events: [{
+          eventType: 'block', sid: 201, conditions: [],
+          actions: [
+            { id: 'spawn-another-object', objectClass: 'Sprite1', sid: 202, parameters: { object: 'Sprite2', layer: '0', 'image-point': '0' } },
+            { type: 'script', language: 'javascript', script: ['runtime.objects.Sprite3.createInstance(0, 0, 0);'] },
+          ],
+        }],
+      }]]),
+      layouts: new Map([['Layout1', {
+        name: 'Layout1', sid: 300, layers: [],
+        'nonworld-instances': [{ type: 'Array1', uid: 1, sid: 301, properties: {} }],
+      }]]),
+    });
+
+    for (const [name, where] of [['Sprite2', 'eventSheets'], ['Sprite3', 'eventSheets'], ['Array1', 'layouts']] as const) {
+      const data = parseResult(await server.callTool('delete_object', { name }));
+      expect(data.action, name).toBe('delete_blocked');
+      expect(data.references[where], name).toEqual([where === 'layouts' ? 'Layout1' : 'Sheet1']);
+    }
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(0);
+
+    // Control: an object nothing refers to is deleted
+    const data = parseResult(await server.callTool('delete_object', { name: 'Sprite4' }));
+    expect(data.action).toBe('deleted');
+    resetProjectIndex();
   });
 });
 

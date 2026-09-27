@@ -74,6 +74,7 @@ export async function getAssetUsage(
   // Determine usage for each asset by checking object references
   const assetUsages: AssetUsageInfo[] = [];
   const objectNames = new Set(index.allObjects);
+  let unusedCount = 0;
 
   for (const asset of allAssets) {
     const eventSheets: string[] = [];
@@ -82,7 +83,10 @@ export async function getAssetUsage(
 
     // Check if the asset name matches an object name
     const baseName = asset.item.name;
-    if (objectNames.has(baseName)) {
+    const isObjectAsset = objectNames.has(baseName);
+    // Unused by the same rule as find_orphaned_objects (use through a family included)
+    if (!isObjectAsset || !index.isObjectUsed(baseName)) unusedCount++;
+    if (isObjectAsset) {
       const objSheets = index.getEventSheetsForObject(baseName);
       eventSheets.push(...objSheets);
       const objLayouts = index.objectToLayouts.get(baseName) || [];
@@ -109,10 +113,6 @@ export async function getAssetUsage(
   for (const asset of allAssets) {
     byType[asset.type] = (byType[asset.type] || 0) + 1;
   }
-
-  const unusedCount = assetUsages.filter(
-    a => a.referencedIn.eventSheets.length === 0 && a.referencedIn.layouts.length === 0
-  ).length;
 
   // Most referenced
   const sorted = [...assetUsages]

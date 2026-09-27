@@ -6,9 +6,10 @@
 
 import { readdir } from 'fs/promises';
 import { join } from 'path';
-import type { Construct3ProjectReader } from '../project-reader.js';
+import { entityFolderPaths, entityFilePath, type Construct3ProjectReader } from '../project-reader.js';
 import type { C3Event, Construct3Project, Layout, ObjectType, EventSheet } from '../types.js';
 import { getProjectIndex } from './index-builder.js';
+import { isNamelessFolder, transitionsFolderIndex } from '../timeline-folders.js';
 import { findOrphanedObjects } from './object-deps.js';
 import { scanLegacyBehaviorKeys, hasOnlyLegacyBehaviorName, describeLegacyHit } from './legacy-behavior-keys.js';
 import { checkBehaviorName } from './behavior-refs.js';
@@ -109,15 +110,15 @@ export async function validateProjectIntegrity(
   checkBrokenIncludes(eventSheets, warnings);
   checkMissingAddons(objects, reader, warnings);
 
-  // Info checks
-  await checkOrphanedFiles(reader, registeredObjects, registeredSheets, registeredLayouts, info);
+  // Info checks (orphaned files also warn about file-name-case-mismatch)
+  await checkOrphanedFiles(reader, project, warnings, info);
   await checkBackupFiles(reader, info);
   await checkOrphanedObjects(reader, info);
 
   // 13 original checks + legacy-behavior-key + expression-syntax,
   // empty-expression, trigger-placement, duplicate-object-name,
-  // family-plugin-mismatch
-  const checksRun = 19;
+  // family-plugin-mismatch, file-name-case-mismatch
+  const checksRun = 20;
 
   return {
     valid: errors.length === 0,
@@ -308,6 +309,11 @@ function checkNameConsistency(
 
 // ─── Check 3b: Subfolder Structure ───────────────────────────
 
+/**
+ * Every project-bar subfolder needs a name and an items array. Exception: the
+ * first nameless subfolder directly under timelines is the editor's
+ * Transitions folder, which Construct 3 writes without a name.
+ */
 function checkSubfolderStructure(
   project: Construct3Project,
   errors: IntegrityIssue[]
@@ -322,36 +328,45 @@ function checkSubfolderStructure(
 
   for (const { name, container } of containers) {
     if (!container || !Array.isArray(container.subfolders)) continue;
-    validateSubfolders(container.subfolders as Array<Record<string, unknown>>, name, errors);
+    // The editor's Transitions folder: the one nameless first-level timelines subfolder
+    const transitionsIndex = name === 'timelines' ? transitionsFolderIndex(container) : -1;
+    validateSubfolders(container.subfolders as Array<Record<string, unknown>>, name, name, errors, transitionsIndex);
   }
 }
 
 function validateSubfolders(
   subfolders: Array<Record<string, unknown>>,
   path: string,
-  errors: IntegrityIssue[]
+  containerName: string,
+  errors: IntegrityIssue[],
+  transitionsIndex = -1
 ): void {
   for (let i = 0; i < subfolders.length; i++) {
     const sf = subfolders[i];
-    if (typeof sf.name !== 'string' || sf.name === '') {
+    const isTransitions = i === transitionsIndex;
+    if (!isTransitions && isNamelessFolder(sf)) {
       errors.push({
         check: 'subfolder-structure',
         entity: `${path}/subfolders[${i}]`,
         message: `Subfolder at index ${i} is missing required "name" field`,
-        suggestion: 'Add a "name" field to the subfolder object in project.c3proj',
+        suggestion: containerName === 'timelines'
+          ? 'Give the subfolder a name in project.c3proj, or remove it. Only the first unnamed folder directly under timelines is the editor\'s Transitions folder.'
+          : 'Add a "name" field to the subfolder object in project.c3proj',
       });
     }
+    const folderPath = isTransitions
+      ? `${path}/(Transitions)`
+      : sf.name ? `${path}/${sf.name}` : `${path}/subfolders[${i}]`;
     if (!Array.isArray(sf.items)) {
       errors.push({
         check: 'subfolder-structure',
-        entity: `${path}/${sf.name || 'subfolders[' + i + ']'}`,
+        entity: folderPath,
         message: 'Subfolder is missing required "items" array',
         suggestion: 'Add an "items" array to the subfolder object',
       });
     }
     if (Array.isArray(sf.subfolders)) {
-      const childPath = sf.name ? `${path}/${sf.name}` : `${path}/subfolders[${i}]`;
-      validateSubfolders(sf.subfolders as Array<Record<string, unknown>>, childPath, errors);
+      validateSubfolders(sf.subfolders as Array<Record<string, unknown>>, folderPath, containerName, errors);
     }
   }
 }
@@ -789,13 +804,22 @@ function checkDuplicateUids(
     }
   }
 
+  // Scirra (Construct-bugs #8725, quoting its GitHub collaboration tutorial): a
+  // project with duplicate UIDs is invalid; Construct tries to cope by
+  // reassigning duplicated UIDs, which can still break hierarchies and events
+  // that refer to a specific UID. Typical cause: merging branches with the
+  // default "increment" UID numbering. Re-saving is therefore no fix.
   for (const [uid, locations] of uidMap) {
     if (locations.length > 1) {
       warnings.push({
         check: 'duplicate-uid',
         entity: locations[0],
-        message: `UID ${uid} is used ${locations.length} times: ${locations.join(', ')}`,
-        suggestion: 'Each instance must have a unique UID. Re-save the project in C3 to fix.',
+        message: `UID ${uid} is used ${locations.length} times: ${locations.join(', ')}. ` +
+          'Instance UIDs must be unique across the project. Construct 3 tries to cope by reassigning duplicated UIDs, ' +
+          'which can still break hierarchies, timelines and events that refer to a specific UID.',
+        suggestion: 'Give all but one of these instances a new unused UID and update anything that refers to them; ' +
+          'do not rely on re-saving in Construct 3. Duplicates usually come from merging branches: for projects edited on ' +
+          'several branches, set the project\'s "UID numbering" property to Random.',
       });
     }
   }
@@ -933,121 +957,190 @@ function checkMissingAddons(
 
 // ─── Check 10: Orphaned Files ────────────────────────────────
 
+/** Editor view-state files saved next to entity files (e.g. Layout1.uistate.json); not entities. */
+const EDITOR_UI_STATE_SUFFIX = '.uistate.json';
+
+/** Folder nesting depth scanned below objectTypes/, eventSheets/ and layouts/. */
+const MAX_ENTITY_DIR_DEPTH = 20;
+
+const ENTITY_NOUNS: Record<string, string> = {
+  objectTypes: 'object type',
+  eventSheets: 'event sheet',
+  layouts: 'layout',
+};
+
+interface EntityFile {
+  /** Project-relative path, e.g. "layouts/Sub/Layout2.json" */
+  path: string;
+  /** File name without ".json" */
+  base: string;
+}
+
+/**
+ * Each registered entity is read from one file: <category>/<project-bar folder
+ * path>/<name>.json (the reader's path map). Files are classified against
+ * these expected paths, folders included:
+ * - the expected path itself: the entity's file;
+ * - the expected path in different letter case (and the exact path absent):
+ *   the file that loads on case-insensitive file systems (Windows, default
+ *   macOS). It gets a targeted warning with rename advice, never delete advice;
+ * - anything else is not read for any entity (orphaned-file, info), including
+ *   a copy named like a registered entity in another folder.
+ * Editor *.uistate.json files are skipped.
+ */
 async function checkOrphanedFiles(
   reader: Construct3ProjectReader,
-  registeredObjects: string[],
-  registeredSheets: string[],
-  registeredLayouts: string[],
+  project: Construct3Project,
+  warnings: IntegrityIssue[],
   info: IntegrityIssue[]
 ): Promise<void> {
   const projectDir = reader.getProjectDir();
+  const categories: Array<[string, Construct3Project['layouts']]> = [
+    ['objectTypes', project.objectTypes],
+    ['eventSheets', project.eventSheets],
+    ['layouts', project.layouts],
+  ];
 
-  await scanDirForOrphans(projectDir, 'objectTypes', new Set(registeredObjects), info);
-  await scanDirForOrphans(projectDir, 'eventSheets', new Set(registeredSheets), info);
-  await scanDirForOrphans(projectDir, 'layouts', new Set(registeredLayouts), info);
-}
-
-async function scanDirForOrphans(
-  projectDir: string,
-  dirName: string,
-  registered: Set<string>,
-  info: IntegrityIssue[]
-): Promise<void> {
-  try {
-    const dirPath = join(projectDir, dirName);
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.json')) {
-        const baseName = entry.name.replace(/\.json$/, '');
-        if (!registered.has(baseName)) {
-          info.push({
-            check: 'orphaned-file',
-            entity: `${dirName}/${entry.name}`,
-            message: `File exists on disk but is not registered in c3proj`,
-            suggestion: `Delete the file or register it in the project`,
-          });
-        }
-      }
+  for (const [dirName, container] of categories) {
+    const expected = new Map<string, string>();
+    for (const [name, folderPath] of entityFolderPaths(container)) {
+      expected.set(name, entityFilePath(dirName, folderPath, name));
     }
-    // Recurse into subdirectories
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        await scanSubdirForOrphans(join(dirPath, entry.name), dirName, entry.name, registered, info);
-      }
-    }
-  } catch {
-    // Directory doesn't exist or not readable — skip (common in tests)
+    const files = await listEntityFiles(join(projectDir, dirName), dirName, 0);
+    classifyEntityFiles(dirName, files, expected, warnings, info);
   }
 }
 
-async function scanSubdirForOrphans(
-  subDirPath: string,
-  category: string,
-  subDirName: string,
-  registered: Set<string>,
-  info: IntegrityIssue[]
-): Promise<void> {
+/** Entity JSON files below a category folder, files before subfolders. */
+async function listEntityFiles(dirPath: string, prefix: string, depth: number): Promise<EntityFile[]> {
+  if (depth > MAX_ENTITY_DIR_DEPTH) return [];
+  let entries;
   try {
-    const entries = await readdir(subDirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.json')) {
-        const baseName = entry.name.replace(/\.json$/, '');
-        if (!registered.has(baseName)) {
-          info.push({
-            check: 'orphaned-file',
-            entity: `${category}/${subDirName}/${entry.name}`,
-            message: `File exists on disk but is not registered in c3proj`,
-            suggestion: `Delete the file or register it in the project`,
-          });
-        }
-      }
-    }
+    entries = await readdir(dirPath, { withFileTypes: true });
   } catch {
-    // Skip unreadable
+    return []; // Directory doesn't exist or not readable — skip (common in tests)
+  }
+  const files: EntityFile[] = [];
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith('.json') && !entry.name.endsWith(EDITOR_UI_STATE_SUFFIX)) {
+      files.push({ path: `${prefix}/${entry.name}`, base: entry.name.slice(0, -'.json'.length) });
+    }
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      files.push(...await listEntityFiles(join(dirPath, entry.name), `${prefix}/${entry.name}`, depth + 1));
+    }
+  }
+  return files;
+}
+
+/**
+ * @param expected  registered name → project-relative path it is read from
+ */
+function classifyEntityFiles(
+  category: string,
+  files: EntityFile[],
+  expected: Map<string, string>,
+  warnings: IntegrityIssue[],
+  info: IntegrityIssue[]
+): void {
+  const noun = ENTITY_NOUNS[category] ?? 'entity';
+  const expectedPaths = new Set(expected.values());
+  const byLowerPath = new Map<string, { name: string; path: string }>();
+  const byLowerName = new Map<string, { name: string; path: string }>();
+  for (const [name, path] of expected) {
+    if (!byLowerPath.has(path.toLowerCase())) byLowerPath.set(path.toLowerCase(), { name, path });
+    if (!byLowerName.has(name.toLowerCase())) byLowerName.set(name.toLowerCase(), { name, path });
+  }
+  const onDisk = new Set(files.map(f => f.path));
+  const onDiskLower = new Set(files.map(f => f.path.toLowerCase()));
+
+  for (const file of files) {
+    if (expectedPaths.has(file.path)) continue;
+
+    // Only when the exactly spelled file is absent: otherwise that one is read and this is an extra file
+    const loadsFor = byLowerPath.get(file.path.toLowerCase());
+    if (loadsFor && !onDisk.has(loadsFor.path)) {
+      warnings.push({
+        check: 'file-name-case-mismatch',
+        entity: file.path,
+        message: `The ${noun} "${loadsFor.name}" is read from ${loadsFor.path}; this file's path differs from that only in letter case. ` +
+          'It loads on case-insensitive file systems (Windows, macOS by default) but may not be found on case-sensitive ones (Linux).',
+        suggestion: `Rename the file to "${loadsFor.path}" (on a case-insensitive file system in two steps via a temporary name, e.g. with git mv). ` +
+          `Do not delete it: it holds the ${noun}.`,
+      });
+      continue;
+    }
+
+    // Named like a registered entity, but not at the path that entity is read from
+    const namesake = byLowerName.get(file.base.toLowerCase());
+    if (namesake) {
+      const expectedExists = onDiskLower.has(namesake.path.toLowerCase());
+      info.push({
+        check: 'orphaned-file',
+        entity: file.path,
+        message: `File is not read for any ${noun}: the registered ${noun} "${namesake.name}" is read from ${namesake.path}, ` +
+          `the path of its project-bar folder${expectedExists ? '' : ', and that file is missing'}`,
+        suggestion: expectedExists
+          ? `Compare it with ${namesake.path}; delete it if it is a leftover copy`
+          : `If this file holds the ${noun}, move it to ${namesake.path}; otherwise delete it if it is a leftover`,
+      });
+      continue;
+    }
+
+    info.push({
+      check: 'orphaned-file',
+      entity: file.path,
+      message: 'File exists on disk but is not registered in c3proj',
+      suggestion: 'Delete the file if it is a leftover, or register it in the project',
+    });
   }
 }
 
 // ─── Check 11: Backup Files ─────────────────────────────────
 
+/**
+ * .bak files in the entity folders (recursively, including timelines/) and next
+ * to project.c3proj. The project root is not scanned recursively, so files/,
+ * images/, scripts/ and the like stay out of it.
+ */
 async function checkBackupFiles(
   reader: Construct3ProjectReader,
   info: IntegrityIssue[]
 ): Promise<void> {
   const projectDir = reader.getProjectDir();
-  const dirs = ['objectTypes', 'eventSheets', 'layouts', 'families'];
+  const dirs = ['objectTypes', 'eventSheets', 'layouts', 'families', 'timelines'];
 
   for (const dirName of dirs) {
-    try {
-      const dirPath = join(projectDir, dirName);
-      await scanDirForBackups(dirPath, dirName, info);
-    } catch {
-      // Skip missing directories
-    }
+    await scanDirForBackups(join(projectDir, dirName), dirName, info, true);
   }
+  await scanDirForBackups(projectDir, '', info, false);
 }
 
 async function scanDirForBackups(
   dirPath: string,
   prefix: string,
-  info: IntegrityIssue[]
+  info: IntegrityIssue[],
+  recursive: boolean
 ): Promise<void> {
   try {
     const entries = await readdir(dirPath, { withFileTypes: true });
     for (const entry of entries) {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isFile() && entry.name.endsWith('.bak')) {
         info.push({
           check: 'backup-file',
-          entity: `${prefix}/${entry.name}`,
-          message: `Backup file found — may be left over from a failed write operation`,
-          suggestion: `Review and delete if no longer needed`,
+          entity: path,
+          message: 'Backup copy: this server copies a file to <file>.bak before changing or deleting it and keeps the copy afterwards',
+          suggestion: 'Review and delete it if no longer needed',
         });
       }
-      if (entry.isDirectory()) {
-        await scanDirForBackups(join(dirPath, entry.name), `${prefix}/${entry.name}`, info);
+      if (recursive && entry.isDirectory()) {
+        await scanDirForBackups(join(dirPath, entry.name), path, info, true);
       }
     }
   } catch {
-    // Skip unreadable
+    // Directory doesn't exist or not readable — skip
   }
 }
 
@@ -1062,8 +1155,10 @@ async function checkOrphanedObjects(
     info.push({
       check: 'orphaned-object',
       entity: `objectTypes/${orphan.name}`,
-      message: `Object "${orphan.name}" (${orphan.pluginId}) is not referenced in any event sheet or placed in any layout`,
-      suggestion: `Remove the object if unused, or add it to a layout/event sheet`,
+      message: `Object "${orphan.name}" (${orphan.pluginId}) is not used by any event (as condition/action object, object parameter, ` +
+        'expression or in a script action), not used through a family, and has no instance in any layout (including non-world instances)',
+      suggestion: 'Before removing it, check what this analysis cannot see: project script files, objects created by name at runtime, ' +
+        'and script references it does not recognise. delete_object refuses objects that are still referenced.',
     });
   }
 }

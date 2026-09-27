@@ -59,7 +59,8 @@ export async function getObjectDependencies(
     const node = buildObjectNode(index, objName);
     allNodes.push(node);
 
-    if (node.referencedIn.eventSheets.length === 0 && node.referencedIn.layouts.length === 0) {
+    // Same rule as find_orphaned_objects and validate_project
+    if (!index.isObjectUsed(objName)) {
       orphanedObjects.push(objName);
     }
   }
@@ -74,7 +75,8 @@ export async function getObjectDependencies(
       topConnected: allNodes.slice(0, limit),
       orphanedObjects,
       totalObjects: index.allObjects.length,
-      totalReferenced: allNodes.filter(n => n.referenceCount > 0).length,
+      // Used objects (family use included), so totalReferenced + orphanedObjects.length = totalObjects
+      totalReferenced: index.allObjects.length - orphanedObjects.length,
     },
   };
 }
@@ -96,7 +98,9 @@ function buildObjectNode(index: import('./index-builder.js').ProjectIndex, objec
 }
 
 /**
- * Find objects not referenced in any event sheet or placed in any layout.
+ * Find objects not used by any event (directly or through a family) and not
+ * placed in any layout (layers or non-world instances). See index-builder.ts
+ * for what counts as a use in events.
  */
 export async function findOrphanedObjects(
   reader: Construct3ProjectReader
@@ -107,22 +111,7 @@ export async function findOrphanedObjects(
   const orphaned: OrphanedObjectsResult['orphanedObjects'] = [];
 
   for (const objName of index.allObjects) {
-    const eventSheetRefs = index.getEventSheetsForObject(objName);
-    const layoutPlacements = index.objectToLayouts.get(objName) || [];
-
-    // Also check family references — if a family references this object,
-    // it might be used indirectly via the family name
-    const families = index.objectToFamilies.get(objName) || [];
-    let familyReferenced = false;
-    for (const family of families) {
-      const familyRefs = index.getEventSheetsForObject(family);
-      if (familyRefs.length > 0) {
-        familyReferenced = true;
-        break;
-      }
-    }
-
-    if (eventSheetRefs.length === 0 && layoutPlacements.length === 0 && !familyReferenced) {
+    if (!index.isObjectUsed(objName)) {
       const objData = objectTypes.get(objName);
       orphaned.push({
         name: objName,

@@ -103,7 +103,7 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
   // Tool: Find orphaned objects
   server.tool(
     'find_orphaned_objects',
-    'Find objects not referenced in any event sheet or placed in any layout',
+    'Find objects not used by any event (as condition/action object, object parameter, expression or runtime.objects in a script action; directly or through a family) and not placed in any layout (including non-world instances). Project script files are not scanned.',
     {},
     async () => {
       try {

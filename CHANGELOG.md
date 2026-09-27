@@ -16,6 +16,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `find_runtime_traps` tool: finds event logic that loads but hangs or fails at runtime, such as waits for signals nothing raises, waits that start after their signal was raised, and scripts that use function parameters without `localVars` (#20).
 - `construct3://docs/pitfalls` resource with curated Construct 3 pitfalls, and a `debug_stuck_game` prompt that embeds the current trap scan (#20).
 - `eventPath` parameter (`eventPaths` for `move_events_between_sheets`) on the SID-addressed event tools: picks one of several events that share a SID; single-event results name the `eventPath` they acted on (#30).
+- `validate_project` check `file-name-case-mismatch`: warns when an entity file's name differs from its registered name only in case, instead of reporting a live file as orphaned (#31).
 
 ### Changed
 
@@ -29,6 +30,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - Create and rename tools compare names the way the Construct 3 editor does: a name that differs from an existing event sheet, layout, object type or family, layer, animation, event variable or project-bar folder only in case is refused; `create_timeline` refuses a case variant of a timeline in the same folder (#29).
 - `add_event_to_sheet`, `update_event_variable` and `move_events_between_sheets` check event variable and function parameter names like the editor: no clash within the variable's scope (ignoring case), no System expression names, none of the characters the editor removes (#29).
 - `move_events_between_sheets` warns when a copy leaves a SID shared by several events in the target sheet, and `duplicate-sid` reports end each event location with its JSON path (#30).
+- `validate_project` lists leftover `.bak` files in `timelines/` and next to `project.c3proj` too, and its `duplicate-uid` advice gives accurate guidance instead of suggesting a re-save in Construct 3 (#31).
 
 ### Fixed
 
@@ -38,6 +40,9 @@ All notable changes to the Construct3 MCP Server are documented here.
 - Create tools no longer overwrite an existing entity or timeline file whose name differs only in case (Windows, macOS); they refuse to write where a file already exists (#29).
 - Rewriting an existing file keeps its name on disk, including its case, instead of renaming it to the registered spelling (#29).
 - `delete_event_from_sheet`, `update_event_block`, `update_event_block_action`, `update_event_variable` and `move_events_between_sheets` refuse a SID shared by several events in the sheet, dry runs included, and list the candidates, instead of acting on the first match (#30).
+- `validate_project` accepts the editor's Transitions folder in `timelines` instead of reporting a `subfolder-structure` error, so editor-saved projects are no longer `valid: false`; only a nameless folder elsewhere is reported as malformed (#31).
+- `validate_project` skips the editor's `*.uistate.json` files and checks entity files against the path each registered entity is read from (#31).
+- `find_orphaned_objects`, `get_object_dependencies` and `validate_project` count non-world instances, object parameters, expressions and script actions as object uses, so such objects are no longer reported as unused (#31).
 
 ## [1.8.1] - 2026-04-16
 

@@ -132,20 +132,17 @@ export async function analyzePerformance(
     }
   }
 
-  // Check: Orphaned objects
-  const orphanedCount = index.allObjects.filter(obj => {
-    const refs = index.getEventSheetsForObject(obj);
-    const layouts = index.objectToLayouts.get(obj) || [];
-    return refs.length === 0 && layouts.length === 0;
-  }).length;
+  // Check: Orphaned objects (same rule and caveats as find_orphaned_objects and validate_project)
+  const orphanedCount = index.allObjects.filter(obj => !index.isObjectUsed(obj)).length;
 
   if (orphanedCount > 0) {
     issues.push({
       severity: 'info',
       category: 'cleanup',
       location: 'project',
-      message: `${orphanedCount} object(s) not referenced in any event sheet or layout`,
-      suggestion: 'Use find_orphaned_objects to identify and consider removing unused objects',
+      message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (including non-world instances)`,
+      suggestion: 'Use find_orphaned_objects to list them. Before removing one, check what this analysis cannot see: ' +
+        'project script files, objects created by name at runtime, and script references it does not recognise.',
     });
   }
 

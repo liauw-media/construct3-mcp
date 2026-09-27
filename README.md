@@ -100,10 +100,10 @@ node dist/index.js /path/to/your/project.c3proj
 | `get_eventsheet_flow` | Event sheet include hierarchy and layout bindings (Mermaid or JSON) |
 | `get_function_map` | Function definitions and call sites across event sheets |
 | `get_object_dependencies` | Where objects are used (event sheets, layouts, families) |
-| `find_orphaned_objects` | Find objects not referenced in any event sheet or layout |
+| `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including non-world instances) |
 | `get_asset_usage` | Track sound, image, font, and video asset usage |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
-| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). `valid` can be false on projects that load fine (known false positives in [API.md](docs/API.md#validate_project)) |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Some warnings can be false positives (known ones in [API.md](docs/API.md#validate_project)) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 | `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
 | `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
@@ -393,6 +393,7 @@ construct3-mcp/
 │   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
+│   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/
 │   │       ├── index-builder.ts    # Cross-reference index

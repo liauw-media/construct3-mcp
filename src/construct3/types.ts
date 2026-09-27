@@ -468,8 +468,13 @@ export interface Instance {
 export interface ObjectReference {
   objectName: string;
   eventSheet: string;
-  path: string; // e.g., "group:PlayerMovement > block:3 > action:2"
-  context: 'condition' | 'action';
+  path: string; // e.g., "group:Movement > block > action:2"
+  /**
+   * How the object is used: as the object of a condition/action, as a whole
+   * parameter value (object parameters), inside a parameter expression
+   * ("Name.X"), or from a script action/event (runtime.objects.Name).
+   */
+  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script';
 }
 
 /** Node in the event sheet flow graph */

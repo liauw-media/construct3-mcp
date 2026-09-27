@@ -91,7 +91,8 @@ function buildFlowNodes(
     const refs = index.objectToEventSheets;
     let eventCount = 0;
     for (const [, objRefs] of refs) {
-      eventCount += objRefs.filter(r => r.eventSheet === sheetName).length;
+      // One per condition/action (its own object), not its parameter, expression or script references
+      eventCount += objRefs.filter(r => r.eventSheet === sheetName && (r.context === 'condition' || r.context === 'action')).length;
     }
 
     return {

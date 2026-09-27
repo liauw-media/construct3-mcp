@@ -2,12 +2,20 @@
  * Unit tests for project integrity validation.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { join } from 'path';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { cp, mkdtemp, mkdir, readFile, writeFile, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { dirname, join } from 'path';
 import { MockReader } from '../mocks/mock-reader.js';
+import { MockServer } from '../mocks/mock-server.js';
+import { registerAnalysisTools } from '../../src/tools/analysis.js';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { validateProjectIntegrity } from '../../src/construct3/analyzers/integrity.js';
-import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+import { getProjectIndex, resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+import { findOrphanedObjects, getObjectDependencies } from '../../src/construct3/analyzers/object-deps.js';
+import { analyzePerformance } from '../../src/construct3/analyzers/performance.js';
+import { getEventSheetFlow } from '../../src/construct3/analyzers/event-flow.js';
+import { getAssetUsage } from '../../src/construct3/analyzers/asset-usage.js';
 
 // Cast MockReader to 'any' since it implements the same interface as Construct3ProjectReader
 // but is not a class instance of it.
@@ -54,7 +62,7 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(19);
+    expect(result.summary.checksRun).toBe(20);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 
@@ -670,6 +678,29 @@ describe('validateProjectIntegrity', () => {
     expect(warn!.message).toContain('5');
   });
 
+  it('does not claim that re-saving in Construct 3 fixes duplicate UIDs', async () => {
+    const reader = createReader({
+      objects: new Map([
+        ['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 100 }],
+        ['Array1', { name: 'Array1', 'plugin-id': 'Arr', sid: 101 }],
+      ]),
+      layouts: new Map([
+        ['Layout1', {
+          name: 'Layout1', sid: 300,
+          layers: [{ name: 'Layer1', sid: 301, instances: [{ type: 'Sprite1', uid: 7, sid: 302, properties: {} }] }],
+          'nonworld-instances': [{ type: 'Array1', uid: 7, sid: 303, properties: {} }],
+        }],
+      ]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    const warn = result.warnings.find(w => w.check === 'duplicate-uid');
+    expect(warn!.message).toContain('layouts/Layout1/nonworld:Array1');
+    expect(warn!.message).toMatch(/reassign/);
+    expect(warn!.suggestion).not.toMatch(/Re-save the project/);
+    expect(warn!.suggestion).toContain('new unused UID');
+    expect(warn!.suggestion).toContain('UID numbering');
+  });
+
   // ─── Check 6: broken-object-reference ────────────────────
 
   it('detects broken object references in events', async () => {
@@ -829,23 +860,28 @@ describe('validateProjectIntegrity', () => {
 
   // ─── Check 3b: subfolder-structure ────────────────────────
 
-  it('detects subfolder missing name field', async () => {
+  /** validProject() with its project.c3proj containers patched */
+  function withContainers(containers: Record<string, unknown>) {
     const reader = validProject();
-    // Patch the project to add a nameless subfolder in timelines
     const origGetProject = reader.getProject.bind(reader);
-    reader.getProject = () => {
-      const proj = origGetProject();
-      proj.timelines = {
-        items: ['Timeline1'],
-        subfolders: [{ items: ['T2'], subfolders: [] }], // no name!
-      };
-      return proj;
-    };
+    reader.getProject = () => ({ ...origGetProject(), ...containers });
+    return reader;
+  }
+
+  const subfolderErrors = (result: Awaited<ReturnType<typeof validateProjectIntegrity>>) =>
+    result.errors.filter(e => e.check === 'subfolder-structure');
+
+  it('detects subfolder missing name field', async () => {
+    const reader = withContainers({
+      families: { items: [], subfolders: [{ items: [], subfolders: [] }] }, // no name!
+    });
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(false);
     const err = result.errors.find((e: any) => e.check === 'subfolder-structure');
     expect(err).toBeDefined();
+    expect(err!.entity).toBe('families/subfolders[0]');
     expect(err!.message).toContain('missing required "name" field');
+    expect(err!.suggestion).toContain('Add a "name" field');
   });
 
   it('passes subfolder check when all subfolders have names', async () => {
@@ -853,6 +889,79 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     const err = result.errors.find((e: any) => e.check === 'subfolder-structure');
     expect(err).toBeUndefined();
+  });
+
+  it('accepts the editor\'s unnamed Transitions folder under timelines', async () => {
+    // Construct 3 writes the first timelines subfolder without a name key
+    for (const items of [['Transition1'], []]) {
+      const reader = withContainers({
+        timelines: { items: ['Timeline1'], subfolders: [{ items, subfolders: [] }] },
+      });
+      const result = await validateProjectIntegrity(reader);
+      expect(subfolderErrors(result), `items ${JSON.stringify(items)}`).toEqual([]);
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it('accepts the Transitions folder next to named timelines folders, in any position', async () => {
+    const reader = withContainers({
+      timelines: {
+        items: [],
+        subfolders: [
+          { items: ['Timeline1'], subfolders: [], name: 'Folder1' },
+          { items: ['Transition1'], subfolders: [] },
+        ],
+      },
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(subfolderErrors(result)).toEqual([]);
+  });
+
+  it('reports a second unnamed first-level timelines folder, without advising to name the Transitions folder', async () => {
+    const reader = withContainers({
+      timelines: {
+        items: [],
+        subfolders: [{ items: ['Transition1'], subfolders: [] }, { items: ['Timeline2'], subfolders: [] }],
+      },
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.valid).toBe(false);
+    const errors = subfolderErrors(result);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].entity).toBe('timelines/subfolders[1]');
+    expect(errors[0].suggestion).toContain('Transitions folder');
+  });
+
+  it('reports an unnamed folder nested in a timelines folder', async () => {
+    const reader = withContainers({
+      timelines: {
+        items: [],
+        subfolders: [{ name: 'Folder1', items: [], subfolders: [{ items: ['Transition1'], subfolders: [] }] }],
+      },
+    });
+    const result = await validateProjectIntegrity(reader);
+    const errors = subfolderErrors(result);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].entity).toBe('timelines/Folder1/subfolders[0]');
+  });
+
+  it('still requires an items array on the Transitions folder and checks folders inside it', async () => {
+    const reader = withContainers({
+      timelines: { items: [], subfolders: [{ subfolders: [{ items: [], subfolders: [] }] }] },
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(subfolderErrors(result).map(e => e.entity)).toEqual([
+      'timelines/(Transitions)',
+      'timelines/(Transitions)/subfolders[0]',
+    ]);
+  });
+
+  it('does not treat an unnamed folder outside timelines as a Transitions folder', async () => {
+    const reader = withContainers({
+      layouts: { items: ['Layout 1'], subfolders: [{ items: [], subfolders: [] }] },
+    });
+    const result = await validateProjectIntegrity(reader);
+    expect(subfolderErrors(result).map(e => e.entity)).toEqual(['layouts/subfolders[0]']);
   });
 
   // ─── Summary counts ──────────────────────────────────────
@@ -907,6 +1016,176 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     const orphanInfo = result.info.find(i => i.check === 'orphaned-object' && i.entity.includes('UnusedSprite'));
     expect(orphanInfo).toBeDefined();
+    expect(orphanInfo!.message).toContain('non-world instances');
+    expect(orphanInfo!.suggestion).toContain('project script files');
+  });
+
+  /** Objects used only in the less obvious ways, plus unused controls. */
+  function projectWithIndirectUses() {
+    const sprite = (name: string, sid: number) => [name, { name, 'plugin-id': 'Sprite', sid }] as [string, Record<string, unknown>];
+    return createReader({
+      objects: new Map([
+        sprite('Sprite1', 101), sprite('Sprite2', 102), sprite('Sprite3', 103), sprite('Sprite4', 104),
+        sprite('Sprite5', 105), sprite('Sprite6', 106), sprite('Sprite7', 107), sprite('Sprite8', 108),
+        sprite('Count', 109),
+        ['Array1', { name: 'Array1', 'plugin-id': 'Arr', sid: 110 }],
+      ]),
+      families: new Map([['Family1', { name: 'Family1', 'plugin-id': 'Sprite', sid: 120, members: ['Sprite5'] }]]),
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 200,
+        events: [
+          {
+            eventType: 'block', sid: 201,
+            conditions: [{ id: 'on-start-of-layout', objectClass: 'System', sid: 202 }],
+            actions: [
+              // Object parameter (whole value is an object name)
+              { id: 'spawn-another-object', objectClass: 'Sprite1', sid: 203, parameters: { object: ' Sprite2 ', layer: '0', 'image-point': '0' } },
+              // runtime.objects in a script action (array of lines, as the editor saves it)
+              { type: 'script', language: 'javascript', script: ['const inst = runtime.objects.Sprite3.getFirstInstance();'] },
+              // Expression; ".Count" is a member, not the object Count
+              { id: 'set-x', objectClass: 'Sprite1', sid: 204, parameters: { x: 'Sprite4.X + Sprite1.Count' } },
+              // String literals are not references
+              { id: 'wait', objectClass: 'System', sid: 205, parameters: { seconds: 'len("Sprite6.X") + len("Sprite6")' } },
+              // Function call arguments, IID-indexed expression
+              { callFunction: 'Func1', sid: 206, parameters: ['Sprite7(0).X'] },
+            ],
+          },
+          {
+            eventType: 'block', sid: 207,
+            // Family used only as an object parameter
+            conditions: [{ id: 'is-overlapping-another-object', objectClass: 'Sprite1', sid: 208, parameters: { object: 'Family1' } }],
+            actions: [],
+          },
+          { eventType: 'script', language: 'javascript', script: ['globalThis.a = runtime.objects["Sprite8"];'] },
+        ],
+      }]]),
+      layouts: new Map([['Layout1', {
+        name: 'Layout1', sid: 300, eventSheet: 'Sheet1',
+        layers: [{ name: 'Layer1', sid: 301, instances: [{ type: 'Sprite1', uid: 1, sid: 302, properties: {} }] }],
+        'nonworld-instances': [{ type: 'Array1', uid: 2, sid: 303, properties: {} }],
+      }]]),
+      usedAddons: [
+        { type: 'plugin', id: 'Sprite', name: 'Sprite', author: 'Scirra', bundled: false },
+        { type: 'plugin', id: 'Arr', name: 'Array', author: 'Scirra', bundled: false },
+      ],
+    });
+  }
+
+  it('counts non-world instances, object parameters, expressions and script actions as uses', async () => {
+    const result = await validateProjectIntegrity(projectWithIndirectUses());
+    const orphans = result.info.filter(i => i.check === 'orphaned-object').map(i => i.entity);
+    expect(orphans).toEqual(['objectTypes/Sprite6', 'objectTypes/Count']);
+    // Only existing names are recorded, so nothing turns into a broken reference
+    expect(result.warnings.filter(w => w.check === 'broken-object-reference')).toEqual([]);
+  });
+
+  it('records how each object is referenced in the project index', async () => {
+    const reader = projectWithIndirectUses();
+    const index = await getProjectIndex(reader);
+    const contexts = (name: string) => (index.objectToEventSheets.get(name) ?? []).map(r => r.context);
+    expect(contexts('Sprite2')).toEqual(['parameter']);
+    expect(contexts('Sprite3')).toEqual(['script']);
+    expect(contexts('Sprite4')).toEqual(['expression']);
+    expect(contexts('Sprite7')).toEqual(['expression']);
+    expect(contexts('Sprite8')).toEqual(['script']);
+    expect(contexts('Family1')).toEqual(['parameter']);
+    // An object's own condition/action is not repeated by its parameters (Sprite1.Count)
+    expect(contexts('Sprite1')).toEqual(['action', 'action', 'condition']);
+    expect(index.objectToLayouts.get('Array1')).toEqual(['Layout1']);
+    expect(index.isObjectUsed('Sprite5')).toBe(true); // through Family1
+    expect(index.isObjectUsed('Sprite6')).toBe(false);
+  });
+
+  it('does not count variables, sounds, instance variables or layouts that share an object\'s name', async () => {
+    const sprite = (name: string, sid: number) => [name, { name, 'plugin-id': 'Sprite', sid }] as [string, Record<string, unknown>];
+    const reader = createReader({
+      objects: new Map([
+        sprite('Sprite1', 101), sprite('Sprite12', 112), sprite('Sprite13', 113), sprite('Sprite14', 114),
+        sprite('Sprite15', 115), sprite('Sprite16', 116), sprite('Sprite17', 117), sprite('Sprite18', 118),
+      ]),
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 200,
+        events: [
+          // Global event variables named like objects (Construct 3 allows this)
+          { eventType: 'variable', name: 'Sprite16', type: 'number', initialValue: '0', sid: 201 },
+          { eventType: 'variable', name: 'Sprite14', type: 'number', initialValue: '0', sid: 202 },
+          {
+            eventType: 'function-block', functionName: 'Func1', sid: 203,
+            functionParameters: [{ name: 'Sprite13', type: 'number', initialValue: '0', sid: 204 }],
+            conditions: [], actions: [],
+          },
+          {
+            eventType: 'block', sid: 205,
+            // A bare name in an expression parameter is the variable
+            conditions: [{ id: 'compare-two-values', objectClass: 'System', sid: 206, parameters: { 'first-value': 'Sprite16', comparison: 0, 'second-value': '1' } }],
+            actions: [
+              { id: 'play', objectClass: 'Audio', sid: 207, parameters: { 'audio-file': 'Sprite17', loop: 'not-looping', volume: '0', tag: '""' } },
+              { id: 'set-instvar-value', objectClass: 'Sprite1', sid: 208, parameters: { 'instance-variable': 'Sprite18', value: '1' } },
+              { id: 'go-to-layout', objectClass: 'System', sid: 209, parameters: { layout: 'Sprite12' } },
+              { callFunction: 'Func1', sid: 210, parameters: ['Sprite13'] },
+              // An object parameter counts even when a variable has the name
+              { id: 'create-object', objectClass: 'System', sid: 211, parameters: { 'object-to-create': 'Sprite14', layer: '0', x: '0', y: '0' } },
+              // Unknown key, no variable of that name: still counted (conservative)
+              { id: 'custom-action', objectClass: 'Sprite1', sid: 212, parameters: { target: 'Sprite15' } },
+            ],
+          },
+        ],
+      }]]),
+      layouts: new Map([['Layout1', {
+        name: 'Layout1', sid: 300, eventSheet: 'Sheet1',
+        layers: [{ name: 'Layer1', sid: 301, instances: [{ type: 'Sprite1', uid: 1, sid: 302, properties: {} }] }],
+      }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    const orphans = result.info.filter(i => i.check === 'orphaned-object').map(i => i.entity);
+    expect(orphans).toEqual(['objectTypes/Sprite12', 'objectTypes/Sprite13', 'objectTypes/Sprite16', 'objectTypes/Sprite17', 'objectTypes/Sprite18']);
+    const index = await getProjectIndex(reader);
+    expect(index.objectToEventSheets.get('Sprite14')?.map(r => r.context)).toEqual(['parameter']);
+    expect(index.objectToEventSheets.get('Sprite15')?.map(r => r.context)).toEqual(['parameter']);
+    expect(index.objectToEventSheets.has('Sprite16')).toBe(false);
+  });
+
+  it('gives the same orphans in find_orphaned_objects, get_object_dependencies and analyze_performance', async () => {
+    const reader = projectWithIndirectUses();
+    const orphans = await findOrphanedObjects(reader);
+    expect(orphans.orphanedObjects.map(o => o.name)).toEqual(['Sprite6', 'Count']);
+
+    const deps = await getObjectDependencies(reader);
+    expect(deps.projectWide!.orphanedObjects).toEqual(['Sprite6', 'Count']);
+    // Sprite5 (used only through Family1) counts as referenced: the totals add up
+    expect(deps.projectWide!.totalObjects).toBe(10);
+    expect(deps.projectWide!.totalReferenced).toBe(8);
+
+    const perf = await analyzePerformance(reader);
+    const cleanup = perf.issues.find(i => i.category === 'cleanup' && i.location === 'project' && i.message.includes('object(s)'))!;
+    expect(cleanup.message).toMatch(/^2 object\(s\) not used by any event/);
+    expect(cleanup.suggestion).toContain('project script files');
+  });
+
+  it('counts only conditions and actions, not their parameter, expression or script references, as events', async () => {
+    const flow = await getEventSheetFlow(projectWithIndirectUses(), { format: 'json' });
+    const sheet = flow.nodes!.find(n => n.name === 'Sheet1')!;
+    // Conditions: System, Sprite1; actions: Sprite1, Sprite1, System (script and function call have no objectClass)
+    expect(sheet.eventCount).toBe(5);
+  });
+
+  it('counts an object\'s sprite asset as used when the object is used through a family', async () => {
+    // get_asset_usage reads sprite images from an `animations` array
+    const frames = { frames: [{}] };
+    const reader = createReader({
+      objects: new Map([
+        ['Sprite1', { name: 'Sprite1', 'plugin-id': 'Sprite', sid: 101, animations: [frames] }],
+        ['Sprite2', { name: 'Sprite2', 'plugin-id': 'Sprite', sid: 102, animations: [frames] }],
+      ]),
+      families: new Map([['Family1', { name: 'Family1', 'plugin-id': 'Sprite', sid: 120, members: ['Sprite1'] }]]),
+      eventSheets: new Map([['Sheet1', {
+        name: 'Sheet1', sid: 200,
+        events: [{ eventType: 'block', sid: 201, conditions: [], actions: [{ id: 'destroy', objectClass: 'Family1', sid: 202 }] }],
+      }]]),
+    });
+    const usage = await getAssetUsage(reader, { type: 'image' });
+    expect(usage.summary.totalAssets).toBe(2);
+    expect(usage.summary.unusedCount).toBe(1); // Sprite2 only
   });
 
   // ─── Editor load-time rules ──────────────────────────────
@@ -1066,6 +1345,181 @@ describe('validateProjectIntegrity', () => {
   });
 });
 
+// ─── Files on disk: orphaned-file, file-name-case-mismatch, backup-file ───
+
+describe('validateProjectIntegrity file scans', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    resetProjectIndex();
+    dir = await mkdtemp(join(tmpdir(), 'c3-integrity-files-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function writeFiles(paths: string[]): Promise<void> {
+    for (const rel of paths) {
+      const file = join(dir, ...rel.split('/'));
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, '{}', 'utf-8');
+    }
+  }
+
+  type Folder = { items: string[]; subfolders: Array<Folder & { name: string }> };
+
+  /** project.c3proj container for "Name" / "Folder/Sub/Name" entries (project-bar folders). */
+  function containerFor(paths: string[] = []): Folder {
+    const root: Folder = { items: [], subfolders: [] };
+    for (const path of paths) {
+      const parts = path.split('/');
+      const name = parts.pop()!;
+      let folder = root;
+      for (const part of parts) {
+        let sub = folder.subfolders.find(s => s.name === part);
+        if (!sub) {
+          sub = { name: part, items: [], subfolders: [] };
+          folder.subfolders.push(sub);
+        }
+        folder = sub;
+      }
+      folder.items.push(name);
+    }
+    return root;
+  }
+
+  /**
+   * MockReader (all registered entities loadable) that scans `dir` on disk.
+   * Names may carry project-bar folders: "Sub/Layout2" is Layout2 in folder Sub.
+   */
+  function readerFor(names: { objects?: string[]; eventSheets?: string[]; layouts?: string[] }) {
+    const entries = (list: string[] = [], extra: (n: string, i: number) => Record<string, unknown>) =>
+      new Map(list.map(p => p.split('/').pop()!).map((n, i) => [n, { name: n, sid: 500 + i, ...extra(n, i) }]));
+    const reader = createReader({
+      objects: entries(names.objects, () => ({ 'plugin-id': 'Sprite' })),
+      eventSheets: entries(names.eventSheets, () => ({ events: [] })),
+      layouts: entries(names.layouts, () => ({ layers: [] })),
+    });
+    const project = reader.getProject();
+    project.objectTypes = containerFor(names.objects);
+    project.eventSheets = containerFor(names.eventSheets);
+    project.layouts = containerFor(names.layouts);
+    reader.getProject = () => project;
+    reader.getProjectDir = () => dir;
+    return reader;
+  }
+
+  const byCheck = (list: Array<{ check: string; entity: string }>, check: string) =>
+    list.filter(i => i.check === check).map(i => i.entity).sort();
+
+  it('skips the editor\'s *.uistate.json files and scans nested folders', async () => {
+    await writeFiles([
+      'layouts/Layout1.json', 'layouts/Layout1.uistate.json',
+      'layouts/Sub/Layout2.json', 'layouts/Sub/Layout2.uistate.json',
+      'layouts/Sub/Deeper/Layout3.json', 'layouts/Sub/Deeper/Unused2.json',
+      'eventSheets/Sheet1.json', 'eventSheets/Sheet1.uistate.json',
+      'objectTypes/Sprite1.json', 'objectTypes/Stale.uistate.json', 'objectTypes/Unused1.json',
+    ]);
+    const result = await validateProjectIntegrity(readerFor({
+      objects: ['Sprite1'], eventSheets: ['Sheet1'], layouts: ['Layout1', 'Sub/Layout2', 'Sub/Deeper/Layout3'],
+    }));
+    expect(byCheck(result.info, 'orphaned-file')).toEqual(['layouts/Sub/Deeper/Unused2.json', 'objectTypes/Unused1.json']);
+    expect(byCheck(result.warnings, 'file-name-case-mismatch')).toEqual([]);
+  });
+
+  it('warns about file paths that differ from the expected path only in case, without delete advice', async () => {
+    await writeFiles([
+      'layouts/Layout1.json', 'layouts/Sub/Layout2.json', 'layouts/menus/Layout3.json',
+      'objectTypes/sprite1.json', 'objectTypes/Unused1.json',
+      'eventSheets/SHEET1.json',
+    ]);
+    const result = await validateProjectIntegrity(readerFor({
+      objects: ['Sprite1'], eventSheets: ['Sheet1'], layouts: ['layout1', 'Sub/layout2', 'Menus/Layout3'],
+    }));
+    const warnings = result.warnings.filter(w => w.check === 'file-name-case-mismatch');
+    expect(warnings.map(w => w.entity).sort()).toEqual([
+      'eventSheets/SHEET1.json', 'layouts/Layout1.json', 'layouts/Sub/Layout2.json', 'layouts/menus/Layout3.json', 'objectTypes/sprite1.json',
+    ]);
+    const layout1 = warnings.find(w => w.entity === 'layouts/Layout1.json')!;
+    expect(layout1.message).toContain('"layout1" is read from layouts/layout1.json');
+    expect(layout1.suggestion).toContain('Rename the file to "layouts/layout1.json"');
+    // A folder name in different case is a case mismatch too
+    const layout3 = warnings.find(w => w.entity === 'layouts/menus/Layout3.json')!;
+    expect(layout3.suggestion).toContain('Rename the file to "layouts/Menus/Layout3.json"');
+    for (const w of warnings) expect(w.suggestion).not.toMatch(/^Delete|delete the file/i);
+    // The genuine orphan is still reported
+    expect(byCheck(result.info, 'orphaned-file')).toEqual(['objectTypes/Unused1.json']);
+  });
+
+  it('keeps reporting a differently cased file as orphaned when the correctly named file exists too', async () => {
+    // Different folders, so both names can exist on case-insensitive file systems
+    await writeFiles(['layouts/layout1.json', 'layouts/Sub/Layout1.json']);
+    const result = await validateProjectIntegrity(readerFor({ layouts: ['layout1'] }));
+    const orphans = result.info.filter(i => i.check === 'orphaned-file');
+    expect(orphans.map(i => i.entity)).toEqual(['layouts/Sub/Layout1.json']);
+    expect(orphans[0].message).toContain('"layout1" is read from layouts/layout1.json');
+    expect(byCheck(result.warnings, 'file-name-case-mismatch')).toEqual([]);
+  });
+
+  it('never gives delete advice for the loaded file when an exactly named copy sits in another folder', async () => {
+    // layout1 is registered at the root: the reader reads layouts/layout1.json, i.e. Layout1.json on
+    // case-insensitive file systems. Old/layout1.json has the exact name but is never read.
+    await writeFiles(['layouts/Layout1.json', 'layouts/Old/layout1.json']);
+    const result = await validateProjectIntegrity(readerFor({ layouts: ['layout1'] }));
+    expect(byCheck(result.warnings, 'file-name-case-mismatch')).toEqual(['layouts/Layout1.json']);
+    const orphans = result.info.filter(i => i.check === 'orphaned-file');
+    expect(orphans.map(i => i.entity)).toEqual(['layouts/Old/layout1.json']);
+    expect(orphans[0].suggestion).toContain('Compare it with layouts/layout1.json');
+  });
+
+  it('classifies by the project-bar folder the entity is registered in', async () => {
+    // "Layout 1" is registered in folder Sub: Sub/layout 1.json is its file, the root copy is not read
+    await writeFiles(['layouts/Sub/layout 1.json', 'layouts/Layout 1.json']);
+    const result = await validateProjectIntegrity(readerFor({ layouts: ['Sub/Layout 1'] }));
+    const mismatch = result.warnings.filter(w => w.check === 'file-name-case-mismatch');
+    expect(mismatch.map(w => w.entity)).toEqual(['layouts/Sub/layout 1.json']);
+    expect(mismatch[0].suggestion).toContain('Rename the file to "layouts/Sub/Layout 1.json"');
+    const orphans = result.info.filter(i => i.check === 'orphaned-file');
+    expect(orphans.map(i => i.entity)).toEqual(['layouts/Layout 1.json']);
+    expect(orphans[0].message).toContain('"Layout 1" is read from layouts/Sub/Layout 1.json');
+  });
+
+  it('does not claim a case-variant file in another folder loads, and points to the expected path', async () => {
+    // Only a case variant in the wrong folder: it is not read (the entity's file is missing)
+    await writeFiles(['layouts/Old/Layout1.json']);
+    const result = await validateProjectIntegrity(readerFor({ layouts: ['layout1'] }));
+    expect(byCheck(result.warnings, 'file-name-case-mismatch')).toEqual([]);
+    const orphans = result.info.filter(i => i.check === 'orphaned-file');
+    expect(orphans.map(i => i.entity)).toEqual(['layouts/Old/Layout1.json']);
+    expect(orphans[0].message).toContain('layouts/layout1.json');
+    expect(orphans[0].message).toContain('that file is missing');
+    expect(orphans[0].suggestion).toContain('move it to layouts/layout1.json');
+  });
+
+  it('lists .bak files in timelines (with subfolders) and next to project.c3proj, but not elsewhere in the root', async () => {
+    await writeFiles([
+      'project.c3proj.bak',
+      'timelines/Timeline1.json.bak',
+      'timelines/Folder1/Timeline2.json.bak',
+      'timelines/transitions/Transition1.json.bak',
+      'eventSheets/Sheet1.json.bak',
+      'files/data.bak',
+      'scripts/main.js.bak',
+    ]);
+    const result = await validateProjectIntegrity(readerFor({}));
+    expect(byCheck(result.info, 'backup-file')).toEqual([
+      'eventSheets/Sheet1.json.bak',
+      'project.c3proj.bak',
+      'timelines/Folder1/Timeline2.json.bak',
+      'timelines/Timeline1.json.bak',
+      'timelines/transitions/Transition1.json.bak',
+    ]);
+    const bak = result.info.find(i => i.check === 'backup-file')!;
+    expect(bak.message).not.toContain('failed write');
+  });
+});
+
 // ─── Real fixtures ─────────────────────────────────────────
 
 describe('validateProjectIntegrity on real fixtures', () => {
@@ -1088,5 +1542,58 @@ describe('validateProjectIntegrity on real fixtures', () => {
     await reader.loadProject();
     const result = await validateProjectIntegrity(reader);
     expect(result.errors).toEqual([]);
+  });
+
+  it('reports the copy the reader does not load as orphaned, not the one it loads', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'c3-integrity-folders-'));
+    try {
+      await cp(join(__dirname, '..', 'fixtures', 'minimal-project'), dir, { recursive: true });
+      const projectPath = join(dir, 'project.c3proj');
+      const project = JSON.parse(await readFile(projectPath, 'utf-8'));
+      // Move "Layout 1" into project-bar folder Sub; layouts/Layout 1.json stays as a stale copy
+      project.layouts = { items: [], subfolders: [{ items: ['Layout 1'], subfolders: [], name: 'Sub' }] };
+      await writeFile(projectPath, JSON.stringify(project, null, '\t'), 'utf-8');
+      const layout = JSON.parse(await readFile(join(dir, 'layouts', 'Layout 1.json'), 'utf-8'));
+      await mkdir(join(dir, 'layouts', 'Sub'), { recursive: true });
+      await writeFile(join(dir, 'layouts', 'Sub', 'Layout 1.json'), JSON.stringify({ ...layout, width: 4242 }), 'utf-8');
+
+      const reader = new Construct3ProjectReader(projectPath);
+      await reader.loadProject();
+      expect((await reader.readLayout('Layout 1')).width).toBe(4242);
+      const result = await validateProjectIntegrity(reader);
+      expect(result.errors.filter(e => e.check === 'file-existence')).toEqual([]);
+      expect(result.warnings.filter(w => w.check === 'file-name-case-mismatch')).toEqual([]);
+      const orphans = result.info.filter(i => i.check === 'orphaned-file');
+      expect(orphans.map(i => i.entity)).toEqual(['layouts/Layout 1.json']);
+      expect(orphans[0].message).toContain('read from layouts/Sub/Layout 1.json');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validate_project reports a project with the editor\'s Transitions folder as valid', async () => {
+    // Timelines container as the editor saves it: the Transitions folder has no name key
+    const dir = await mkdtemp(join(tmpdir(), 'c3-integrity-transitions-'));
+    try {
+      await cp(join(__dirname, '..', 'fixtures', 'minimal-project'), dir, { recursive: true });
+      const projectPath = join(dir, 'project.c3proj');
+      const project = JSON.parse(await readFile(projectPath, 'utf-8'));
+      project.timelines = { items: ['Timeline1'], subfolders: [{ items: ['Transition1'], subfolders: [] }] };
+      await writeFile(projectPath, JSON.stringify(project, null, '\t'), 'utf-8');
+      await mkdir(join(dir, 'timelines', 'transitions'), { recursive: true });
+      await writeFile(join(dir, 'timelines', 'Timeline1.json'), JSON.stringify({ name: 'Timeline1', tracks: [] }), 'utf-8');
+      await writeFile(join(dir, 'timelines', 'transitions', 'Transition1.json'), JSON.stringify({ name: 'Transition1' }), 'utf-8');
+
+      const reader = new Construct3ProjectReader(projectPath);
+      await reader.loadProject();
+      const server = new MockServer();
+      registerAnalysisTools(server as any, reader);
+      const result = await server.callTool('validate_project', {});
+      const data = JSON.parse(result.content[0].text);
+      expect(data.valid).toBe(true);
+      expect(data.errors).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

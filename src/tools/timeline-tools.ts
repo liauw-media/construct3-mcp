@@ -5,10 +5,13 @@
  * The project.c3proj timelines container tracks their names. Construct 3
  * mirrors its project-bar folders on disk: a timeline at the root is stored
  * in timelines/<name>.json, one in folder "A" > "B" in
- * timelines/A/B/<name>.json. The container's subfolder without a name is the
- * editor's Transitions folder: its items are transitions (easing curves that
- * timelines reference by name), stored in timelines/transitions/<name>.json.
- * The timeline tools list transitions but never read, change or delete them.
+ * timelines/A/B/<name>.json. The container's first-level subfolder without a
+ * name is the editor's Transitions folder (see timeline-folders.ts): its items
+ * are transitions (easing curves that timelines reference by name), stored in
+ * timelines/transitions/<name>.json. A nameless folder anywhere else is
+ * malformed: its names are not listed or resolved, and create_timeline
+ * refuses them so they are not registered twice. The timeline tools list
+ * transitions but never read, change or delete them.
  * JSON shape validated against real Construct 3 projects.
  */
 
@@ -23,6 +26,12 @@ import { resolveProjectPath } from '../construct3/path-utils.js';
 import { atomicReplace, existingSpelling, findFileIgnoringCase } from '../construct3/atomic-write.js';
 import { findFolderPathClash, nameKey } from '../construct3/names.js';
 import { jsonTextStyleOf, parseJsonText, resolveJsonTextStyle, serializeJson } from '../construct3/json-format.js';
+import {
+  TRANSITIONS_DIR,
+  isNamelessFolder,
+  transitionsFolderIndex,
+  type ProjectFolderNode,
+} from '../construct3/timeline-folders.js';
 
 // ─── Timeline Type ─────────────────────────────────────────
 
@@ -160,21 +169,13 @@ async function backupTimeline(path: string): Promise<string | undefined> {
 
 // ─── Locating timeline files ───────────────────────────────
 
-/** Folder on disk, below timelines/, that holds the editor's transitions. */
-const TRANSITIONS_DIR = 'transitions';
-
 interface TimelineLocation {
   kind: 'timeline' | 'transition';
   /** Named project-bar folders from the timelines root, outermost first. */
   folders: string[];
 }
 
-type TimelineFolderNode = { name?: unknown; items?: unknown; subfolders?: unknown };
-
-/** The Transitions folder is the timelines subfolder without a name. */
-function isTransitionsFolder(folder: TimelineFolderNode): boolean {
-  return typeof folder.name !== 'string' || folder.name === '';
-}
+type TimelineFolderNode = ProjectFolderNode;
 
 function folderItems(folder: TimelineFolderNode): string[] {
   return Array.isArray(folder.items) ? folder.items.filter((i): i is string => typeof i === 'string') : [];
@@ -184,32 +185,54 @@ function folderSubfolders(folder: TimelineFolderNode): TimelineFolderNode[] {
   return Array.isArray(folder.subfolders) ? folder.subfolders as TimelineFolderNode[] : [];
 }
 
+/** Every item name in a folder and all its subfolders. */
+function allFolderItems(folder: TimelineFolderNode, into: Set<string>, depth = 0): void {
+  if (depth > 50) return;
+  for (const item of folderItems(folder)) into.add(item);
+  for (const sub of folderSubfolders(folder)) allFolderItems(sub, into, depth + 1);
+}
+
 /**
  * Map every name in the project.c3proj timelines container to where it lives,
- * in project-bar order. Timelines and transitions are kept apart.
+ * in project-bar order. Timelines and transitions are kept apart. Names the
+ * tools cannot resolve to a file are collected in `unresolved`: those in a
+ * nameless folder other than the Transitions folder (malformed, reported by
+ * validate_project) and those in folders inside the Transitions folder.
  */
 function locateTimelines(container: TimelineFolderNode | undefined): {
   timelines: Map<string, TimelineLocation>;
   transitions: Map<string, TimelineLocation>;
+  unresolved: Set<string>;
 } {
   const timelines = new Map<string, TimelineLocation>();
   const transitions = new Map<string, TimelineLocation>();
+  const unresolved = new Set<string>();
+  const transitionsFolder = container ? folderSubfolders(container)[transitionsFolderIndex(container)] : undefined;
   const walk = (folder: TimelineFolderNode, folders: string[]) => {
     for (const item of folderItems(folder)) {
       if (!timelines.has(item)) timelines.set(item, { kind: 'timeline', folders });
     }
     for (const sub of folderSubfolders(folder)) {
-      if (isTransitionsFolder(sub)) {
+      if (sub === transitionsFolder) {
         for (const item of folderItems(sub)) {
           if (!transitions.has(item)) transitions.set(item, { kind: 'transition', folders: [] });
         }
-      } else {
+        for (const inner of folderSubfolders(sub)) allFolderItems(inner, unresolved);
+      } else if (!isNamelessFolder(sub)) {
         walk(sub, [...folders, sub.name as string]);
+      } else {
+        allFolderItems(sub, unresolved);
       }
     }
   };
   if (container) walk(container, []);
-  return { timelines, transitions };
+  return { timelines, transitions, unresolved };
+}
+
+function unresolvedRefusal(name: string): string {
+  return `"${name}" is registered in project.c3proj in a timelines folder the timeline tools cannot resolve: ` +
+    'a folder without a name that is not the editor\'s Transitions folder (only the first unnamed folder directly under timelines is), ' +
+    'or a folder inside the Transitions folder. Run validate_project and fix the folder in project.c3proj first.';
 }
 
 /** Folders below timelines/ that hold the file for this location. */
@@ -281,7 +304,7 @@ async function removeTimelineFromProject(projectPath: string, name: string, fold
 
   let folder: TimelineFolderNode | undefined = project.timelines;
   for (const folderName of folders) {
-    folder = folder && folderSubfolders(folder).find(sf => !isTransitionsFolder(sf) && sf.name === folderName);
+    folder = folder && folderSubfolders(folder).find(sf => !isNamelessFolder(sf) && sf.name === folderName);
   }
   const items = folder && Array.isArray(folder.items) ? folder.items as unknown[] : [];
   const idx = items.indexOf(name);
@@ -324,9 +347,10 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
     },
     async (args) => {
       try {
-        const { timelines, transitions } = locateTimelines(reader.getProject().timelines);
+        const { timelines, transitions, unresolved } = locateTimelines(reader.getProject().timelines);
         const location = timelines.get(args.name) ?? transitions.get(args.name);
         if (!location) {
+          if (unresolved.has(args.name)) return toolError(unresolvedRefusal(args.name));
           const names = [...timelines.keys()];
           const hint = names.length > 0 ? `\nAvailable timelines: ${names.slice(0, 5).join(', ')}` : '\nNo timelines found in this project.';
           return toolError(`Timeline "${args.name}" not found.${hint}`);
@@ -375,12 +399,15 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
         }
 
         const container = reader.getProject().timelines;
-        const { timelines, transitions } = locateTimelines(container);
+        const { timelines, transitions, unresolved } = locateTimelines(container);
         if (timelines.has(args.name)) {
           return toolError(`Timeline "${args.name}" already exists.`);
         }
         if (transitions.has(args.name)) {
           return toolError(`A transition named "${args.name}" already exists. Choose another timeline name.`);
+        }
+        if (unresolved.has(args.name)) {
+          return toolError(`${unresolvedRefusal(args.name)} Creating it again would register the name twice.`);
         }
         if (args.subfolder) {
           const folderClash = findFolderPathClash(container, args.subfolder);
@@ -476,9 +503,10 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
           return toolError('No updates provided. Specify at least one of: totalTime, loop, pingPong, repeatCount, startOnLayout, ignoreSystemTimescale, enabled.');
         }
 
-        const { timelines, transitions } = locateTimelines(reader.getProject().timelines);
+        const { timelines, transitions, unresolved } = locateTimelines(reader.getProject().timelines);
         const location = timelines.get(args.name) ?? transitions.get(args.name);
         if (!location) {
+          if (unresolved.has(args.name)) return toolError(unresolvedRefusal(args.name));
           return toolError(`Timeline "${args.name}" not found. Use list_timelines to see available timelines.`);
         }
         if (location.kind === 'transition') return toolError(transitionRefusal(args.name));
@@ -528,9 +556,10 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
     },
     async (args) => {
       try {
-        const { timelines, transitions } = locateTimelines(reader.getProject().timelines);
+        const { timelines, transitions, unresolved } = locateTimelines(reader.getProject().timelines);
         const location = timelines.get(args.name) ?? transitions.get(args.name);
         if (!location) {
+          if (unresolved.has(args.name)) return toolError(unresolvedRefusal(args.name));
           return toolError(`Timeline "${args.name}" not found. Use list_timelines to see available timelines.`);
         }
         if (location.kind === 'transition') return toolError(transitionRefusal(args.name));

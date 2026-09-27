@@ -130,7 +130,7 @@ Comprehensive project overview including metadata, statistics, addon counts, and
 
 ### `list_timelines`
 
-List all timeline names (root and subfolders) with a count, in project-bar order. No parameters. Transitions (the easing curves in the editor's Transitions folder, which `project.c3proj` keeps as the `timelines` subfolder without a `name`) are returned separately in `transitions`.
+List all timeline names (root and subfolders) with a count, in project-bar order. No parameters. Transitions (the easing curves in the editor's Transitions folder, which `project.c3proj` keeps as the first-level `timelines` subfolder without a `name`) are returned separately in `transitions`. Any other subfolder without a name is malformed (reported by `validate_project`); its items are not listed, the other timeline tools report them as unresolvable, and `create_timeline` refuses their names so they are not registered twice.
 
 ### `get_timeline_details`
 
@@ -175,7 +175,7 @@ Function definitions and call sites across event sheets.
 
 ### `get_object_dependencies`
 
-Where objects are used: event sheets, layouts, families, co-occurring objects.
+Where objects are used: event sheets, layouts, families, co-occurring objects. Event sheet uses include object parameters, expressions and script actions, layout uses include non-world instances (see [`find_orphaned_objects`](#find_orphaned_objects)). The project-wide `orphanedObjects` list follows the same rule as `find_orphaned_objects`, and `totalReferenced` counts the other objects (use through a family included), so the two add up to `totalObjects`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -184,11 +184,18 @@ Where objects are used: event sheets, layouts, families, co-occurring objects.
 
 ### `find_orphaned_objects`
 
-Find objects not referenced in any event sheet or placed in any layout. No parameters.
+Find objects not used by any event and not placed in any layout. No parameters.
+
+An object counts as used when it is the object of a condition or action, or through a family it belongs to, or when it has an instance on a layer or among a layout's non-world instances (`nonworld-instances`, e.g. Array or Dictionary). Events also use an object when (heuristics that rather find too many uses than too few):
+- a parameter's whole value is its name, as in object parameters (`"object": "Sprite2"`, `"object-to-create"`, `"pin-to"`, `"child"`, ...), function call arguments included. Not counted: keys that hold other names (`"audio-file"`, `"instance-variable"`, `"variable"`, `"layout"`), and a bare name that is also a declared event variable or function parameter, since in an expression parameter a bare name is a variable (Construct 3 lets variables share names with objects). Object parameter keys count even then;
+- a parameter expression uses it as `Name.` or `Name(` (`Sprite4.X`, `Sprite4(0).X`), outside `"..."` string literals and not as a member (`Label.Text` does not use an object named `Text`);
+- a script action or script event reads `runtime.objects.Name` or `runtime.objects["Name"]` (also through `this.runtime` and the like).
+
+Only names of existing object types and families are matched. Not detected: project script files, dynamic lookups (`runtime.objects[name]`, destructuring) and objects created by name at runtime. `validate_project`, `get_object_dependencies`, `analyze_performance` and the `delete_object` reference check use the same index.
 
 ### `get_asset_usage`
 
-Track asset usage across the project.
+Track asset usage across the project. Assets are matched to object types by name; `unusedCount` counts the assets without a matching object that is used by the rule of [`find_orphaned_objects`](#find_orphaned_objects) (use through a family included).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -210,9 +217,13 @@ Run integrity checks over the whole project. No parameters.
 
 Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `entity`, `message` and an optional `suggestion`. `valid` is true when there are no errors.
 
-- **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries, conditions/actions that name their behavior only under the legacy `"behavior-type"` key (`legacy-behavior-key`, see [`fix_legacy_behavior_keys`](#fix_legacy_behavior_keys)), and the editor load-time rules below
-- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references, layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, and the partly verified load-time rules below
-- **Info:** JSON files not registered in `project.c3proj`, leftover `.bak` files, orphaned objects
+- **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries (a subfolder without a name or `items`; the first unnamed subfolder directly under `timelines` is the editor's Transitions folder, see [`list_timelines`](#list_timelines), and is accepted), conditions/actions that name their behavior only under the legacy `"behavior-type"` key (`legacy-behavior-key`, see [`fix_legacy_behavior_keys`](#fix_legacy_behavior_keys)), and the editor load-time rules below
+- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references, layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, entity files whose name differs from the registered name only in letter case (`file-name-case-mismatch`), and the partly verified load-time rules below
+- **Info:** JSON files in `objectTypes`, `eventSheets` and `layouts` (subfolders included) not registered in `project.c3proj`, leftover `.bak` files in `objectTypes`, `eventSheets`, `layouts`, `families`, `timelines` (subfolders included) and next to `project.c3proj`, and orphaned objects (see [`find_orphaned_objects`](#find_orphaned_objects))
+
+Entity files are checked against the path each registered entity is read from: `<category>/<project-bar folders>/<name>.json`, since Construct 3 mirrors its project-bar folders on disk. `file-name-case-mismatch`: a file whose path differs from that path only in letter case, such as `layouts/Layout1.json` for a layout `layout1` at the root, is the entity's file on case-insensitive file systems (Windows, macOS by default), where it loads, but may not be found on case-sensitive ones (Linux). The suggestion is to rename it to the expected path; it is never reported as orphaned. Any other file is `orphaned-file`, including a copy named like a registered entity in another folder; its message names the path that entity is read from. The editor's `*.uistate.json` view-state files are not entity files and are skipped.
+
+`duplicate-uid`: instance UIDs (layer and non-world instances, single-global instances) must be unique across the project. According to Scirra ([Construct-bugs #8725](https://github.com/Scirra/Construct-bugs/issues/8725)), Construct 3 tries to cope by reassigning duplicated UIDs, which can still break hierarchies, timelines and events that refer to a specific UID, so re-saving is no fix: give the duplicates new unused UIDs by hand. Duplicates usually come from merging branches; projects edited on several branches should set the "UID numbering" project property to Random.
 
 **Editor load-time rules.** The Construct 3 editor enforces these only when it opens a project, and breaking one can make the whole project fail to open. The rules come from [komabear/c3-skill](https://github.com/komabear/c3-skill) (MIT) and were checked against the Construct 3 manual, real editor-saved projects, and the error messages of the editor's project loader (release r495.2). Where only part of a rule could be verified, it is reported as a warning.
 
@@ -225,10 +236,8 @@ Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `e
 | `family-plugin-mismatch` | error / warning | Every member of a family must use the same plugin; a mixed family fails with *wrong plugin* (error). Members that agree with each other but not with the family's `plugin-id` are a warning. |
 | `duplicate-sid` | error / warning | Two object types or families sharing a SID fail with *object class sid already in use* (error). A SID shared by behaviors or instance variables of object type or family files is a warning: SIDs should be unique, but no load failure is on record for this clash, and the editor's loader checks only object type and family SIDs. Animation and frame SIDs repeated across object types are warnings: a Scirra example project does this and opens. SIDs shared by events, conditions, actions or layout instances are warnings: editor-saved projects contain such duplicates and open, and the editor keeps them when it saves, so re-saving does not fix them. A clash involving a function or custom action parameter is a warning that may break loading, since the loader checks function parameter SIDs. Event sheet locations name the event path and the condition/action index (e.g. `eventSheets/Sheet1 > block (sid 12) > action 0 "wait" (System)`), and an event's own location ends with its JSON path (`eventSheets/Sheet1 > block (sid 12) at events[0].children[1]`), so events sharing a SID under the same parent can be told apart. When events in one sheet share a SID, whatever else also uses it, the suggestion adds that the SID-based event tools refuse it there unless `eventPath` names one of them (see [Events that share a SID](#mutation-tools)); a SID used more than five times lists the first five locations and a count per file, and the paths of the others come from the refused tool call or [`locate_event`](#locate_event). Layout `instanceFolderItem` SIDs legitimately repeat the instance SID and are not checked. |
 
-**Known false positives.** Projects that open fine in Construct 3 can still get these reports; the first one makes `valid` false:
-- Construct 3 itself writes a subfolder without a `name` into `timelines` (its Transitions folder, see [`list_timelines`](#list_timelines)), which is reported as a `subfolder-structure` error.
+**Known false positives.** Projects that open fine in Construct 3 can still get this report (a warning, so `valid` stays true):
 - Built-in function actions use `"objectClass": "Functions"`, which is reported as a `broken-object-reference` warning.
-- The editor's `*.uistate.json` files, and lowercase file names written by older releases (e.g. `objectTypes/text.json` for `Text`), are reported as `orphaned-file` info with the suggestion to delete them. Do not delete them.
 
 ### `get_group_settings`
 
@@ -428,7 +437,7 @@ Delete an object type from the project.
 | `force` | boolean | No | Delete even if referenced (default: false) |
 
 **Behavior:**
-- Checks for references in event sheets, layouts, and families
+- Checks for references in event sheets, layouts, and families (what counts as a reference: see [`find_orphaned_objects`](#find_orphaned_objects); project script files are not scanned)
 - If referenced and `force=false`: returns the reference list and blocks
 - If referenced and `force=true`: deletes with warning (references NOT cleaned up)
 - Backs up the JSON file and removes from c3proj
@@ -1023,7 +1032,7 @@ Replace a frame's image with real PNG data. The PNG is written to the frame's fi
 
 ### `create_timeline`
 
-Create a timeline in `timelines/` (or `timelines/<subfolder>/`) and register it in `project.c3proj`, in the same project-bar folder. The name must not be used by another timeline or by a transition. Construct 3 compares timeline names exactly, but a name that differs only in case from a timeline in the same folder is refused: on Windows and macOS both would be one file. A case variant of a timeline in another folder, or of a transition, is created with a `warnings` entry. A `subfolder` folder that differs from an existing project-bar folder only in case is refused, and an existing file at the target path is never replaced (no backup is made on create).
+Create a timeline in `timelines/` (or `timelines/<subfolder>/`) and register it in `project.c3proj`, in the same project-bar folder. The name must not be used by another timeline, by a transition, or by an entry in a malformed nameless folder (see [`list_timelines`](#list_timelines)). Construct 3 compares timeline names exactly, but a name that differs only in case from a timeline in the same folder is refused: on Windows and macOS both would be one file. A case variant of a timeline in another folder, or of a transition, is created with a `warnings` entry. A `subfolder` folder that differs from an existing project-bar folder only in case is refused, and an existing file at the target path is never replaced (no backup is made on create).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

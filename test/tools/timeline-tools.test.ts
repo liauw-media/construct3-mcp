@@ -9,6 +9,8 @@ import { MockWriter } from '../mocks/mock-writer.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 import { registerTimelineTools } from '../../src/tools/timeline-tools.js';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
+import { validateProjectIntegrity } from '../../src/construct3/analyzers/integrity.js';
+import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 import { EDITOR_RELOAD_NOTE } from '../../src/tools/shared.js';
 import { isCaseInsensitiveFs } from '../helpers/fs-case.js';
 
@@ -96,6 +98,35 @@ describe('list_timelines', () => {
     expect(data.timelines).toEqual(['Timeline 1', 'Intro', 'Open']);
     expect(data.count).toBe(3);
     expect(data.transitions).toEqual(['Transition1', 'Transition2']);
+  });
+
+  it('takes only the first unnamed first-level folder as the Transitions folder', async () => {
+    // A second unnamed folder, or one nested in a named folder, is malformed
+    // (validate_project reports it): its items are neither timelines nor transitions
+    const server = new MockServer();
+    const reader = new MockReader();
+    const origGetProject = reader.getProject.bind(reader);
+    (reader as any).getProject = () => ({
+      ...origGetProject(),
+      timelines: {
+        items: ['Timeline1'],
+        subfolders: [
+          { name: 'Folder1', items: ['Timeline2'], subfolders: [{ items: ['Nested1'], subfolders: [] }] },
+          { items: ['Transition1'], subfolders: [] },
+          { name: '', items: ['Extra1'], subfolders: [] },
+        ],
+      },
+    });
+    registerTimelineTools({ server, reader, writer: new MockWriter(), idGen: new MockIdGenerator() } as any);
+
+    const data = parseResult(await server.callTool('list_timelines', {}));
+    expect(data.timelines).toEqual(['Timeline1', 'Timeline2']);
+    expect(data.transitions).toEqual(['Transition1']);
+    for (const name of ['Nested1', 'Extra1']) {
+      const details = await server.callTool('get_timeline_details', { name });
+      expect(details.isError).toBe(true);
+      expect(details.content[0].text).toContain('cannot resolve');
+    }
   });
 });
 
@@ -371,6 +402,52 @@ describe('timeline tools on a project folder', () => {
     const timelines = await c3projTimelines();
     expect(timelines.subfolders[0].items).toEqual(['Note', 'Fade']);
     expect(timelines.subfolders[1].items).toEqual(['KO', 'Round Intro']);
+  });
+
+  it('leaves backups that validate_project lists, and the project stays valid', async () => {
+    expect((await server.callTool('update_timeline', { name: 'KO', totalTime: 3 })).isError).toBeUndefined();
+    expect((await server.callTool('delete_timeline', { name: 'Door' })).isError).toBeUndefined();
+
+    resetProjectIndex();
+    const reader = new Construct3ProjectReader(projPath);
+    await reader.loadProject();
+    const result = await validateProjectIntegrity(reader);
+    expect(result.info.filter(i => i.check === 'backup-file').map(i => i.entity).sort()).toEqual([
+      'project.c3proj.bak',
+      'timelines/Door.json.bak',
+      'timelines/Steel and Stone/KO.json.bak',
+    ]);
+    // The unnamed Transitions folder in PROJECT_TIMELINES is not a subfolder-structure error
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  it('create_timeline refuses a name registered in a malformed nameless folder instead of registering it twice', async () => {
+    // A nameless folder nested in a named one is not the Transitions folder, so its
+    // items are neither listed nor resolved; they must still block a duplicate.
+    const project = JSON.parse(await readFile(projPath, 'utf-8'));
+    project.timelines = { items: [], subfolders: [{ name: 'A', items: [], subfolders: [{ items: ['X'], subfolders: [] }] }] };
+    await writeFile(projPath, JSON.stringify(project, null, '\t'), 'utf-8');
+    const reader = new Construct3ProjectReader(projPath);
+    await reader.loadProject();
+    const local = new MockServer();
+    registerTimelineTools({ server: local, reader, writer: new MockWriter(), idGen: new MockIdGenerator() } as any);
+    const before = await readFile(projPath, 'utf-8');
+
+    const created = await local.callTool('create_timeline', { name: 'X' });
+    expect(created.isError).toBe(true);
+    expect(created.content[0].text).toContain('would register the name twice');
+    expect(await readFile(projPath, 'utf-8')).toBe(before);
+    expect(existsSync(file('timelines/X.json'))).toBe(false);
+    for (const [tool, args] of [
+      ['update_timeline', { name: 'X', loop: true }],
+      ['delete_timeline', { name: 'X' }],
+    ] as const) {
+      const result = await local.callTool(tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect(result.content[0].text, tool).toContain('cannot resolve');
+    }
+    expect(await readFile(projPath, 'utf-8')).toBe(before);
   });
 
   it('refuses to read, change or delete a transition', async () => {

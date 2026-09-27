@@ -16,6 +16,40 @@ import { parseJsonText, stripBom } from './json-format.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
+/**
+ * Name → project-bar folder path for one project.c3proj container: "" for
+ * root items, "A/B" for items in folder A > B. Construct 3 mirrors these
+ * folders on disk, and the reader loads <category>/<folder path>/<name>.json.
+ * A name listed twice keeps its last position.
+ */
+export function entityFolderPaths(container: { items: string[]; subfolders: Subfolder[] }): Map<string, string> {
+  const map = new Map<string, string>();
+
+  // Root items have no subfolder prefix
+  for (const item of container.items) {
+    map.set(item, '');
+  }
+
+  // Recursively walk subfolders
+  const walkSubfolders = (subfolders: Subfolder[], prefix: string) => {
+    for (const subfolder of subfolders) {
+      const folderPath = prefix ? `${prefix}/${subfolder.name}` : subfolder.name;
+      for (const item of subfolder.items) {
+        map.set(item, folderPath);
+      }
+      walkSubfolders(subfolder.subfolders, folderPath);
+    }
+  };
+
+  walkSubfolders(container.subfolders, '');
+  return map;
+}
+
+/** Project-relative path of a registered entity's file, e.g. "layouts/Menus/Title.json". */
+export function entityFilePath(category: string, folderPath: string, name: string): string {
+  return folderPath ? `${category}/${folderPath}/${name}.json` : `${category}/${name}.json`;
+}
+
 export class Construct3ProjectReader {
   private projectPath: string;
   private projectData: Construct3Project | null = null;
@@ -55,33 +89,10 @@ export class Construct3ProjectReader {
   private buildPathMaps(): void {
     const project = this.getProject();
 
-    this.objectPathMap = this.buildPathMapFromContainer(project.objectTypes);
-    this.eventSheetPathMap = this.buildPathMapFromContainer(project.eventSheets);
-    this.layoutPathMap = this.buildPathMapFromContainer(project.layouts);
-    this.familyPathMap = this.buildPathMapFromContainer(project.families);
-  }
-
-  private buildPathMapFromContainer(container: { items: string[]; subfolders: Subfolder[] }): Map<string, string> {
-    const map = new Map<string, string>();
-
-    // Root items have no subfolder prefix
-    for (const item of container.items) {
-      map.set(item, '');
-    }
-
-    // Recursively walk subfolders
-    const walkSubfolders = (subfolders: Subfolder[], prefix: string) => {
-      for (const subfolder of subfolders) {
-        const folderPath = prefix ? `${prefix}/${subfolder.name}` : subfolder.name;
-        for (const item of subfolder.items) {
-          map.set(item, folderPath);
-        }
-        walkSubfolders(subfolder.subfolders, folderPath);
-      }
-    };
-
-    walkSubfolders(container.subfolders, '');
-    return map;
+    this.objectPathMap = entityFolderPaths(project.objectTypes);
+    this.eventSheetPathMap = entityFolderPaths(project.eventSheets);
+    this.layoutPathMap = entityFolderPaths(project.layouts);
+    this.familyPathMap = entityFolderPaths(project.families);
   }
 
   /**

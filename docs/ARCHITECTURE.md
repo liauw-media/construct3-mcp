@@ -198,6 +198,7 @@ Supporting modules next to the templates:
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
 | `construct3/png-generator.ts` | Zero-dependency placeholder PNGs and C3 image file names |
+| `construct3/timeline-folders.ts` | The editor's Transitions folder in the timelines container (first nameless first-level folder, files in `timelines/transitions/`), shared by the timeline tools and `validate_project` |
 | `construct3/types.ts` | TypeScript types for project files and analysis results |
 | `runtime/bridge.ts` | Generates the injectable runtime bridge script (`globalThis.__c3bridge`) |
 | `runtime/zip-writer.ts` | Zero-dependency ZIP writer used to pack `.c3p` files |

@@ -282,7 +282,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_object',
-    'Delete an object type from the project (checks references first)',
+    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances, including non-world instances; families). References in project script files and objects created by name at runtime are not detected.',
     {
       name: z.string().max(200).describe('Object name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
