@@ -175,7 +175,7 @@ Function definitions and call sites across event sheets.
 
 ### `get_object_dependencies`
 
-Where objects are used: event sheets, layouts, families, co-occurring objects. Event sheet uses include object parameters, expressions and script actions, layout uses include non-world instances (see [`find_orphaned_objects`](#find_orphaned_objects)). The project-wide `orphanedObjects` list follows the same rule as `find_orphaned_objects`, and `totalReferenced` counts the other objects (use through a family included), so the two add up to `totalObjects`.
+Where objects are used: event sheets, layouts, families, co-occurring objects. Event sheet uses include object parameters, expressions and script actions; layout uses include instances on sub-layers, non-world instances and object properties of other instances that hold the object's SID (see [`find_orphaned_objects`](#find_orphaned_objects)). The project-wide `orphanedObjects` list follows the same rule as `find_orphaned_objects`, and `totalReferenced` counts the other objects (use through a family included), so the two add up to `totalObjects`. `orphanedFamilyMembers` (present when there are any) lists the orphans that are members of a family, as `{ name, families }`: `delete_object` refuses them until they leave the family.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -186,12 +186,12 @@ Where objects are used: event sheets, layouts, families, co-occurring objects. E
 
 Find objects not used by any event and not placed in any layout. No parameters.
 
-An object counts as used when it is the object of a condition or action, or through a family it belongs to, or when it has an instance on a layer or among a layout's non-world instances (`nonworld-instances`, e.g. Array or Dictionary). Events also use an object when (heuristics that rather find too many uses than too few):
+An object counts as used when it is the object of a condition or action or the object a custom action block (`custom-ace-block`) defines its custom action for (the block's conditions, actions and sub-events count like any others), or through a family it belongs to (a family that events use), or when it has an instance on a layer or sub-layer (`layers[].subLayers`, nested to any depth) or among a layout's non-world instances (`nonworld-instances`, e.g. Array or Dictionary), or when an instance property of another object holds its SID (object properties such as the Particles *Object* property, which editor-saved projects store as the object type's SID). Events also use an object when (heuristics that rather find too many uses than too few):
 - a parameter's whole value is its name, as in object parameters (`"object": "Sprite2"`, `"object-to-create"`, `"pin-to"`, `"child"`, ...), function call arguments included. Not counted: keys that hold other names (`"audio-file"`, `"instance-variable"`, `"variable"`, `"layout"`), and a bare name that is also a declared event variable or function parameter, since in an expression parameter a bare name is a variable (Construct 3 lets variables share names with objects). Object parameter keys count even then;
-- a parameter expression uses it as `Name.` or `Name(` (`Sprite4.X`, `Sprite4(0).X`), outside `"..."` string literals and not as a member (`Label.Text` does not use an object named `Text`);
+- a parameter expression uses it as `Name.` or `Name(` (`Sprite4.X`, `Sprite4(0).X`), outside `"..."` string literals and not as a member (`Label.Text` does not use an object named `Text`). An object parameter whose value is not a plain name (an expression written by hand) is scanned the same way;
 - a script action or script event reads `runtime.objects.Name` or `runtime.objects["Name"]` (also through `this.runtime` and the like).
 
-Only names of existing object types and families are matched. Not detected: project script files, dynamic lookups (`runtime.objects[name]`, destructuring) and objects created by name at runtime. `validate_project`, `get_object_dependencies`, `analyze_performance` and the `delete_object` reference check use the same index.
+Only names of existing object types and families are matched. Not detected: project script files, dynamic lookups (`runtime.objects[name]`, destructuring) and objects created by name at runtime. `validate_project`, `get_object_dependencies`, `analyze_performance` and the `delete_object` reference check use the same index: every object `delete_object` refuses because of a use is not an orphan, and every orphan is deleted without `force`, except an orphan that is a member of a family no event uses. Such orphans list that family in `families`; `delete_object` refuses them until they leave the family (`update_family` with `removeMembers`).
 
 ### `get_asset_usage`
 
@@ -218,12 +218,12 @@ Run integrity checks over the whole project. No parameters.
 Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `entity`, `message` and an optional `suggestion`. `valid` is true when there are no errors.
 
 - **Errors:** registered entities whose file is missing or not valid JSON, missing required fields in objects, sheets and layouts, internal `name` differing from the registered name, malformed subfolder entries (a subfolder without a name or `items`; the first unnamed subfolder directly under `timelines` is the editor's Transitions folder, see [`list_timelines`](#list_timelines), and is accepted), conditions/actions that name their behavior only under the legacy `"behavior-type"` key (`legacy-behavior-key`, see [`fix_legacy_behavior_keys`](#fix_legacy_behavior_keys)), and the editor load-time rules below
-- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references, layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, entity files whose name differs from the registered name only in letter case (`file-name-case-mismatch`), and the partly verified load-time rules below
+- **Warnings:** duplicate SIDs and UIDs (except the SID duplicates listed below as errors), broken object references, layer names repeated within a layout (`duplicate-layer-name`), layouts bound to missing event sheets, broken includes, plugins or behaviors missing from `usedAddons`, leftover `"behavior-type"` keys next to a valid `"behaviorType"`, entity files whose name differs from the registered name only in letter case (`file-name-case-mismatch`), and the partly verified load-time rules below
 - **Info:** JSON files in `objectTypes`, `eventSheets` and `layouts` (subfolders included) not registered in `project.c3proj`, leftover `.bak` files in `objectTypes`, `eventSheets`, `layouts`, `families`, `timelines` (subfolders included) and next to `project.c3proj`, and orphaned objects (see [`find_orphaned_objects`](#find_orphaned_objects))
 
 Entity files are checked against the path each registered entity is read from: `<category>/<project-bar folders>/<name>.json`, since Construct 3 mirrors its project-bar folders on disk. `file-name-case-mismatch`: a file whose path differs from that path only in letter case, such as `layouts/Layout1.json` for a layout `layout1` at the root, is the entity's file on case-insensitive file systems (Windows, macOS by default), where it loads, but may not be found on case-sensitive ones (Linux). The suggestion is to rename it to the expected path; it is never reported as orphaned. Any other file is `orphaned-file`, including a copy named like a registered entity in another folder; its message names the path that entity is read from. The editor's `*.uistate.json` view-state files are not entity files and are skipped.
 
-`duplicate-uid`: instance UIDs (layer and non-world instances, single-global instances) must be unique across the project. According to Scirra ([Construct-bugs #8725](https://github.com/Scirra/Construct-bugs/issues/8725)), Construct 3 tries to cope by reassigning duplicated UIDs, which can still break hierarchies, timelines and events that refer to a specific UID, so re-saving is no fix: give the duplicates new unused UIDs by hand. Duplicates usually come from merging branches; projects edited on several branches should set the "UID numbering" project property to Random.
+`duplicate-uid`: instance UIDs (instances on layers and sub-layers, non-world instances, single-global instances) must be unique across the project; locations of sub-layer instances name the layer path (`layouts/Layout1/layer:Main/layer:HUD/inst:Sprite`). According to Scirra ([Construct-bugs #8725](https://github.com/Scirra/Construct-bugs/issues/8725)), Construct 3 tries to cope by reassigning duplicated UIDs, which can still break hierarchies, timelines and events that refer to a specific UID, so re-saving is no fix: give the duplicates new unused UIDs by hand. Duplicates usually come from merging branches; projects edited on several branches should set the "UID numbering" project property to Random.
 
 **Editor load-time rules.** The Construct 3 editor enforces these only when it opens a project, and breaking one can make the whole project fail to open. The rules come from [komabear/c3-skill](https://github.com/komabear/c3-skill) (MIT) and were checked against the Construct 3 manual, real editor-saved projects, and the error messages of the editor's project loader (release r495.2). Where only part of a rule could be verified, it is reported as a warning.
 
@@ -235,6 +235,10 @@ Entity files are checked against the path each registered entity is read from: `
 | `duplicate-object-name` | error | Object types and families share one name namespace that ignores case. A name listed twice in the `project.c3proj` objectTypes or families tree, two names that differ only in case, and a family named like an object type all fail with *object class name 'X' already used*. |
 | `family-plugin-mismatch` | error / warning | Every member of a family must use the same plugin; a mixed family fails with *wrong plugin* (error). Members that agree with each other but not with the family's `plugin-id` are a warning. |
 | `duplicate-sid` | error / warning | Two object types or families sharing a SID fail with *object class sid already in use* (error). A SID shared by behaviors or instance variables of object type or family files is a warning: SIDs should be unique, but no load failure is on record for this clash, and the editor's loader checks only object type and family SIDs. Animation and frame SIDs repeated across object types are warnings: a Scirra example project does this and opens. SIDs shared by events, conditions, actions or layout instances are warnings: editor-saved projects contain such duplicates and open, and the editor keeps them when it saves, so re-saving does not fix them. A clash involving a function or custom action parameter is a warning that may break loading, since the loader checks function parameter SIDs. Event sheet locations name the event path and the condition/action index (e.g. `eventSheets/Sheet1 > block (sid 12) > action 0 "wait" (System)`), and an event's own location ends with its JSON path (`eventSheets/Sheet1 > block (sid 12) at events[0].children[1]`), so events sharing a SID under the same parent can be told apart. When events in one sheet share a SID, whatever else also uses it, the suggestion adds that the SID-based event tools refuse it there unless `eventPath` names one of them (see [Events that share a SID](#mutation-tools)); a SID used more than five times lists the first five locations and a count per file, and the paths of the others come from the refused tool call or [`locate_event`](#locate_event). Layout `instanceFolderItem` SIDs legitimately repeat the instance SID and are not checked. |
+
+`broken-object-reference`: what `delete_object` and `delete_family` with `force: true` leave behind. Reported are a name that is no object type, family or `System`, used as the object of a condition or action or as the whole value of an object parameter (`"object"`, `"object-to-create"`, `"pin-to"`, `"child"`); layout instances (on any layer or sub-layer, or non-world) of an object type that does not exist, one warning per layout and type with the instance UIDs; family members that are no object type (one warning per family); and object properties that hold the SID of no object type or family. The only object property known to hold a SID is the Particles `"object"` property (`-1` when no object is set), so only that one is checked. Not reported: uses of a deleted object or family in expressions and scripts, which are only recognised by the names of existing objects, and uses of a deleted family's instance variables and behaviors through its members; the `force` warnings of `delete_object` and `delete_family` list them. What Construct 3 does with these leftovers when it opens the project is not verified, so they are warnings.
+
+`duplicate-layer-name`: two or more layers of one layout, sub-layers included, whose names are the same ignoring case, one warning per layout and name with the layer paths. The editor's project loader (release r495.2) looks layer names up ignoring case over all layers of a layout and cannot load such a layout; this was not reproduced in the editor, so it is a warning. [`update_layer`](#update_layer) can rename one of them: it finds a sub-layer by its path, such as `"Main > HUD"`.
 
 **Known false positives.** Projects that open fine in Construct 3 can still get this report (a warning, so `valid` stays true):
 - Built-in function actions use `"objectClass": "Functions"`, which is reported as a `broken-object-reference` warning.
@@ -437,9 +441,9 @@ Delete an object type from the project.
 | `force` | boolean | No | Delete even if referenced (default: false) |
 
 **Behavior:**
-- Checks for references in event sheets, layouts, and families (what counts as a reference: see [`find_orphaned_objects`](#find_orphaned_objects); project script files are not scanned)
-- If referenced and `force=false`: returns the reference list and blocks
-- If referenced and `force=true`: deletes with warning (references NOT cleaned up)
+- Checks for references in event sheets, layouts, and families (what counts as a reference: see [`find_orphaned_objects`](#find_orphaned_objects); project script files are not scanned): uses in events, instances on any layer or sub-layer and non-world instances, object properties of other instances that hold its SID, and membership in any family
+- If referenced and `force=false`: blocks (`action: "delete_blocked"`) and lists where the object is used. `message` sums it up; `references` holds `eventSheets`, `layouts` and `families` (names), `events` (`{ eventSheet, path, context }` with `context` `condition`, `action`, `parameter`, `expression`, `script` or `custom-action`), `instances` (`{ layout, layer, instances }` per layout and layer, `layer` being a path such as `"Main > HUD"` for a sub-layer and absent for non-world instances) and `instanceProperties` (`{ layout, layer, objectType, uid, property }`). Each list is capped at 50 entries; `eventsNotListed`, `instancesNotListed` and `instancePropertiesNotListed` count the rest
+- If referenced and `force=true`: deletes with a warning that names the remaining uses (references NOT cleaned up). [`validate_project`](#validate_project) then reports the dangling instances, object parameters, family memberships and Particles object properties as `broken-object-reference`, but not the uses in expressions and scripts: a second warning lists those
 - Backs up the JSON file and removes from c3proj
 
 ### `create_family`
@@ -473,11 +477,19 @@ At least one parameter besides `name` must be provided. Duplicates and missing e
 
 ### `delete_family`
 
-Delete a family (backs up the JSON file and removes it from c3proj). No reference check.
+Delete a family. The member object types are kept.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | Yes | Family name to delete |
+| `force` | boolean | No | Delete even if referenced (default: false) |
+
+**Behavior:**
+- Checks for references first. Uses of the family's name count as for [`delete_object`](#delete_object): the family as the object of a condition or action or of a custom action, in object parameters, expressions and script actions (`runtime.objects.Family`), and object properties of instances that hold its SID. Uses through a member count too: the `"instance-variable"` parameter or the `behaviorType` of a condition or action whose object is a member, `Member.name` or `Member(0).name` in a parameter expression, and `Self.name` in a parameter expression of a condition or action whose object is a member, where `name` is an instance variable or behavior the member gets from this family only (not one it declares itself or also gets from another family). Not detected: project script files and script access to instance variables and behaviors of member instances (`instVars`, `behaviors`)
+- If referenced and `force=false`: blocks (`action: "delete_blocked"`) and lists where the family is used. `message` sums it up; `references` holds `eventSheets` and `layouts` (names), `events` and `instanceProperties` (as for `delete_object`) and `memberUses` (`{ eventSheet, path, member, kind, name, context }`, `kind` being `instance variable` or `behavior` and `context` `condition`, `action` or `expression`). Each list is capped at 50 entries; `eventsNotListed`, `instancePropertiesNotListed` and `memberUsesNotListed` count the rest
+- If referenced and `force=true`: deletes with a warning that names the remaining uses (references NOT cleaned up). [`validate_project`](#validate_project) then reports the conditions, actions and object parameters that name the family and the Particles object properties that hold its SID as `broken-object-reference`, but not the uses in expressions and scripts or through members: a second warning lists those
+- Values that member instances in layouts hold for the family's instance variables and behaviors are left as they are
+- Backs up the JSON file and removes from c3proj
 
 ### `create_event_sheet`
 
@@ -746,12 +758,12 @@ A name that differs from an existing layout (in any folder) only in case is refu
 
 ### `add_instance_to_layout`
 
-Place an object instance on a layout layer. For copying instances between layouts, read the source with `get_layout_details` and pass instance properties here.
+Place an object instance on a layout layer or sub-layer. For copying instances between layouts, read the source with `get_layout_details` and pass instance properties here.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `layoutName` | string | Yes | Target layout |
-| `layerName` | string | Yes | Target layer |
+| `layerName` | string | Yes | Target layer: any layer or sub-layer of the layout, by name (a sub-layer also by its path, e.g. `"Main > HUD"`) |
 | `objectType` | string | Yes | Object type to place |
 | `x` | number | Yes | X position |
 | `y` | number | Yes | Y position |
@@ -771,6 +783,7 @@ Place an object instance on a layout layer. For copying instances between layout
 
 **Notes:**
 - Blocks global-only objects (singleglobal-inst) from being placed
+- The new UID is above every UID in the project, sub-layer instances included, and the new SID is unused
 - Nonworld-global objects (Array, JSON, Dictionary) are placed in `nonworld-instances` instead of on layers
 - Auto-fills default instance properties for Sprite, Text, TiledBg, NinePatch
 - Warns on unknown instanceVariable or behavior keys (may be inherited from families)
@@ -807,12 +820,12 @@ At least one parameter must be provided.
 
 ### `add_layer`
 
-Add a new layer to a layout.
+Add a new top-level layer to a layout.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `layoutName` | string | Yes | Layout to add the layer to |
-| `layerName` | string | Yes | New layer name (unique within the layout, ignoring case) |
+| `layerName` | string | Yes | New layer name, different from every layer of the layout (sub-layers included) ignoring case, as the editor compares layer names |
 | `index` | number | No | Insert position (0 = bottom; default: on top) |
 | `isInitiallyVisible` | boolean | No | Starts visible (default: true) |
 | `isTransparent` | boolean | No | Transparent background (default: true) |
@@ -824,13 +837,13 @@ A name used by another layer of the layout (sub-layers included) is refused, als
 
 ### `update_layer`
 
-Update properties of an existing layer.
+Update properties of an existing layer or sub-layer.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `layoutName` | string | Yes | Layout name |
-| `layerName` | string | Yes | Layer to update |
-| `newName` | string | No | Rename the layer (must be unused in the layout, ignoring case) |
+| `layerName` | string | Yes | Layer or sub-layer to update, by name (a sub-layer also by its path, e.g. `"Main > HUD"`, which picks one of several layers with the same name) |
+| `newName` | string | No | Rename the layer (must differ from the other layers of the layout, sub-layers included, ignoring case; changing the case of the layer's own name is fine) |
 | `isInitiallyVisible` | boolean | No | Initial visibility |
 | `isInitiallyInteractive` | boolean | No | Initial interactivity |
 | `isTransparent` | boolean | No | Transparency |
@@ -844,21 +857,21 @@ At least one property must be provided. A new name used by another layer of the 
 
 ### `delete_layer`
 
-Delete a layer from a layout.
+Delete a layer or sub-layer from a layout, together with its sub-layers.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `layoutName` | string | Yes | Layout name |
-| `layerName` | string | Yes | Layer to delete |
-| `force` | boolean | No | Delete even if the layer holds instances; they are lost (default: false) |
+| `layerName` | string | Yes | Layer or sub-layer to delete, by name (a sub-layer also by its path, e.g. `"Main > HUD"`) |
+| `force` | boolean | No | Delete even if the layer or its sub-layers hold instances; they are lost (default: false) |
 
 **Behavior:**
-- The last layer of a layout cannot be deleted
-- A layer with instances returns `success: false`, `action: "delete_blocked"` unless `force=true`
+- The last top-level layer of a layout cannot be deleted
+- A layer whose own or sub-layers' instances are not empty returns `success: false`, `action: "delete_blocked"` with `instanceCount` (sub-layers included), and `subLayerCount` when the layer has sub-layers, unless `force=true`
 
 ### `update_instance`
 
-Update a placed instance, found by UID on any layer or among the non-world instances (which ignore position, size, angle, Z elevation and color).
+Update a placed instance, found by UID on any layer or sub-layer or among the non-world instances (which ignore position, size, angle, Z elevation and color).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -878,7 +891,7 @@ At least one property must be provided.
 
 ### `delete_instance_from_layout`
 
-Remove a placed instance by UID from the layout's layers or its non-world instances.
+Remove a placed instance by UID from the layout's layers and sub-layers or its non-world instances.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

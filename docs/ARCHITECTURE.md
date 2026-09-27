@@ -196,6 +196,7 @@ Supporting modules next to the templates:
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
 | `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
+| `construct3/layers.ts` | The layer tree of a layout: walks every layer and nested sub-layer and their instances (non-world instances included), finds layers and instances, compares layer names ignoring case; every walk over layers or layout instances goes through it |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
 | `construct3/png-generator.ts` | Zero-dependency placeholder PNGs and C3 image file names |
 | `construct3/timeline-folders.ts` | The editor's Transitions folder in the timelines container (first nameless first-level folder, files in `timelines/transitions/`), shared by the timeline tools and `validate_project` |

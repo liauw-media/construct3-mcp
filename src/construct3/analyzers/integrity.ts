@@ -8,8 +8,9 @@ import { readdir } from 'fs/promises';
 import { join } from 'path';
 import { entityFolderPaths, entityFilePath, type Construct3ProjectReader } from '../project-reader.js';
 import type { C3Event, Construct3Project, Layout, ObjectType, EventSheet } from '../types.js';
-import { getProjectIndex } from './index-builder.js';
+import { getProjectIndex, OBJECT_SID_PROPERTIES } from './index-builder.js';
 import { isNamelessFolder, transitionsFolderIndex } from '../timeline-folders.js';
+import { forEachLayoutInstance, layerEntries, layerPath, layerPathLabel, repeatedLayerNames, type LayerEntry } from '../layers.js';
 import { findOrphanedObjects } from './object-deps.js';
 import { scanLegacyBehaviorKeys, hasOnlyLegacyBehaviorName, describeLegacyHit } from './legacy-behavior-keys.js';
 import { checkBehaviorName } from './behavior-refs.js';
@@ -105,7 +106,8 @@ export async function validateProjectIntegrity(
 
   // Warning checks
   checkDuplicateUids(layouts, objects, warnings);
-  await checkBrokenObjectReferences(reader, families, warnings);
+  await checkBrokenObjectReferences(reader, objects, families, layouts, warnings);
+  checkDuplicateLayerNames(layouts, warnings);
   checkBrokenEventSheetReferences(layouts, eventSheets, warnings);
   checkBrokenIncludes(eventSheets, warnings);
   checkMissingAddons(objects, reader, warnings);
@@ -117,8 +119,8 @@ export async function validateProjectIntegrity(
 
   // 13 original checks + legacy-behavior-key + expression-syntax,
   // empty-expression, trigger-placement, duplicate-object-name,
-  // family-plugin-mismatch, file-name-case-mismatch
-  const checksRun = 20;
+  // family-plugin-mismatch, file-name-case-mismatch, duplicate-layer-name
+  const checksRun = 21;
 
   return {
     valid: errors.length === 0,
@@ -548,20 +550,18 @@ function checkDuplicateSids(
     }
   }
 
-  // Layouts
+  // Layouts: layers and sub-layers, their instances, non-world instances
   for (const [name, layout] of layouts) {
     const file = `layouts/${name}`;
     track(layout.sid, file, 'layout', file);
-    if (Array.isArray(layout.layers)) {
-      for (const layer of layout.layers) {
-        track(layer.sid, `${file}/layer:${layer.name}`, 'layer', file);
-        if (Array.isArray(layer.instances)) {
-          for (const inst of layer.instances) {
-            track(inst.sid, `${file}/layer:${layer.name}/inst:${inst.type}:${inst.uid}`, 'layout-instance', file);
-          }
-        }
-      }
+    for (const entry of layerEntries(layout.layers)) {
+      track(entry.layer.sid, `${file}/${layerLocation(entry)}`, 'layer', file);
     }
+    forEachLayoutInstance(layout, (inst, entry) => {
+      track(inst.sid, entry
+        ? `${file}/${layerLocation(entry)}/inst:${inst.type}:${inst.uid}`
+        : `${file}/nonworld:${inst.type}:${inst.uid}`, 'layout-instance', file);
+    });
   }
 
   // Families (members do not repeat the family's behavior/variable SIDs in real projects)
@@ -761,6 +761,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const layerLocations = new WeakMap<LayerEntry, string>();
+
+/** Location of a layer in duplicate-ID messages: "layer:Main" or, for a sub-layer, "layer:Main/layer:Sub". */
+function layerLocation(entry: LayerEntry): string {
+  let location = layerLocations.get(entry);
+  if (location === undefined) {
+    location = layerPath(entry).map(name => `layer:${name}`).join('/');
+    layerLocations.set(entry, location);
+  }
+  return location;
+}
+
 // ─── Check 5: Duplicate UIDs ─────────────────────────────────
 
 function checkDuplicateUids(
@@ -777,23 +789,13 @@ function checkDuplicateUids(
     uidMap.set(uid, locations);
   };
 
+  // Instances on every layer and sub-layer, and non-world instances
   for (const [name, layout] of layouts) {
-    if (Array.isArray(layout.layers)) {
-      for (const layer of layout.layers) {
-        if (Array.isArray(layer.instances)) {
-          for (const inst of layer.instances) {
-            track(inst.uid, `layouts/${name}/layer:${layer.name}/inst:${inst.type}`);
-          }
-        }
-      }
-    }
-    // Nonworld instances
-    const nonworld = (layout as Record<string, unknown>)['nonworld-instances'] as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(nonworld)) {
-      for (const inst of nonworld) {
-        track(inst.uid, `layouts/${name}/nonworld:${inst.type}`);
-      }
-    }
+    forEachLayoutInstance(layout, (inst, entry) => {
+      track(inst.uid, entry
+        ? `layouts/${name}/${layerLocation(entry)}/inst:${inst.type}`
+        : `layouts/${name}/nonworld:${inst.type}`);
+    });
   }
 
   // Singleglobal instance UIDs
@@ -827,9 +829,21 @@ function checkDuplicateUids(
 
 // ─── Check 6: Broken Object References ──────────────────────
 
+/**
+ * What delete_object and delete_family with force=true leave behind: names used in events (as
+ * condition/action object, or in an object parameter) and layout instances (on
+ * any layer or sub-layer, or non-world) whose object type does not exist,
+ * family members that are no object type, and object properties (see
+ * OBJECT_SID_PROPERTIES) holding a SID of no object type or family. Warnings:
+ * what Construct 3 does with them on load is not verified. Not found: uses in
+ * expressions and scripts, which the index records only for existing names,
+ * and uses of a deleted family's instance variables and behaviors through members.
+ */
 async function checkBrokenObjectReferences(
   reader: Construct3ProjectReader,
+  objects: Map<string, ObjectType>,
   families: Map<string, Record<string, unknown>>,
+  layouts: Map<string, Layout>,
   warnings: IntegrityIssue[]
 ): Promise<void> {
   const index = await getProjectIndex(reader);
@@ -839,13 +853,105 @@ async function checkBrokenObjectReferences(
     'System',
   ]);
 
-  for (const [objName] of index.objectToEventSheets) {
+  for (const [objName, refs] of index.objectToEventSheets) {
     if (!validNames.has(objName)) {
+      const sheets = [...new Set(refs.map(r => r.eventSheet))];
       warnings.push({
         check: 'broken-object-reference',
         entity: `objectReference/${objName}`,
         message: `Object "${objName}" is referenced in events but does not exist as an object, family, or "System"`,
-        suggestion: `Check for typos or deleted objects. Referenced in event sheets.`,
+        suggestion: `Check for typos or deleted objects. Referenced in event sheet(s): ${listFew(sheets)}.`,
+      });
+    }
+  }
+
+  // Layout instances of object types that do not exist (checked against the registered object types)
+  const objectTypes = new Set(index.allObjects);
+  for (const [layoutName, layout] of layouts) {
+    const missing = new Map<string, string[]>(); // type → where, e.g. 'UID 5 on layer "Main > Sub"'
+    const danglingSids: string[] = []; // e.g. 'property "object" of "Particles1" UID 7 on layer "Main" holds SID 123'
+    forEachLayoutInstance(layout, (inst, entry) => {
+      if (typeof inst.type !== 'string') return;
+      const place = entry ? `on layer "${layerPathLabel(entry)}"` : 'among the non-world instances';
+      if (!objectTypes.has(inst.type)) {
+        missing.set(inst.type, [...(missing.get(inst.type) ?? []), `UID ${String(inst.uid)} ${place}`]);
+        return;
+      }
+      // Object properties holding the SID of an object type or family that does not exist
+      const plugin = objects.get(inst.type)?.['plugin-id'];
+      const sidProperties = typeof plugin === 'string' ? OBJECT_SID_PROPERTIES.get(plugin) : undefined;
+      if (!sidProperties || !isRecord(inst.properties)) return;
+      for (const key of sidProperties) {
+        const value = inst.properties[key];
+        // -1: no object set; SIDs are positive
+        if (typeof value !== 'number' || value <= 0 || index.objectNameForSid(value) !== undefined) continue;
+        danglingSids.push(`property "${key}" of "${inst.type}" UID ${String(inst.uid)} ${place} holds SID ${value}`);
+      }
+    });
+    for (const [type, places] of missing) {
+      warnings.push({
+        check: 'broken-object-reference',
+        entity: `layouts/${layoutName}`,
+        message: `Layout "${layoutName}" has ${places.length} instance(s) of "${type}", which is not an object type in the project: ${listFew(places)}`,
+        suggestion: `Restore the object type "${type}", or remove these instances with delete_instance_from_layout. ` +
+          'delete_object with force=true leaves the instances of the deleted object type behind.',
+      });
+    }
+    if (danglingSids.length > 0) {
+      warnings.push({
+        check: 'broken-object-reference',
+        entity: `layouts/${layoutName}`,
+        message: `Layout "${layoutName}" has ${danglingSids.length} object propert${danglingSids.length === 1 ? 'y' : 'ies'} ` +
+          `naming an object type or family that does not exist (by SID): ${listFew(danglingSids)}`,
+        suggestion: 'Choose another object for the property in Construct 3, or restore the object type. ' +
+          'delete_object and delete_family with force=true leave the deleted object\'s or family\'s SID in these properties.',
+      });
+    }
+  }
+
+  // Family members that are not object types in the project
+  for (const [familyName, family] of families) {
+    if (!Array.isArray(family.members)) continue;
+    const gone = [...new Set((family.members as unknown[]).filter((m): m is string => typeof m === 'string' && !objectTypes.has(m)))];
+    if (gone.length === 0) continue;
+    warnings.push({
+      check: 'broken-object-reference',
+      entity: `families/${familyName}`,
+      message: `Family "${familyName}" lists ${gone.length} member(s) that are not object types in the project: ${listFew(gone.map(m => `"${m}"`))}`,
+      suggestion: `Remove them with update_family (removeMembers), or restore the object type(s). ` +
+        'delete_object with force=true leaves the deleted object in the member list of its families.',
+    });
+  }
+}
+
+/** "a, b, c" or "a, b, c, d, e and 3 more" */
+function listFew(items: string[], max = 5): string {
+  const shown = items.slice(0, max).join(', ');
+  return items.length > max ? `${shown} and ${items.length - max} more` : shown;
+}
+
+// ─── Check 6b: Duplicate Layer Names ────────────────────────
+
+/**
+ * Layer names repeated within a layout's layer tree (sub-layers included),
+ * ignoring case. The editor looks layer names up that way (see layerNameKey)
+ * and, per its loader source, cannot load such a layout; not reproduced in the
+ * editor, so a warning. None of the editor-saved projects checked has one.
+ */
+function checkDuplicateLayerNames(layouts: Map<string, Layout>, warnings: IntegrityIssue[]): void {
+  for (const [layoutName, layout] of layouts) {
+    for (const group of repeatedLayerNames(layout.layers)) {
+      const paths = group.map(entry => `"${layerPathLabel(entry)}"`);
+      const subLayer = group.find(entry => entry.depth > 0);
+      warnings.push({
+        check: 'duplicate-layer-name',
+        entity: `layouts/${layoutName}`,
+        message: `Layout "${layoutName}" has ${group.length} layers named "${String(group[0].layer.name)}" (ignoring case): ` +
+          `${paths.join(', ')}. Construct 3 looks layer names up ignoring case across all layers of a layout, ` +
+          'sub-layers included, and may fail to open this layout.',
+        suggestion: 'Rename all but one of them with update_layer, which finds a layer by its exact name or a sub-layer by its path' +
+          (subLayer ? ` (e.g. "${layerPathLabel(subLayer)}")` : '') +
+          '. Layers with the same name and the same path have to be renamed in the layout file.',
       });
     }
   }
@@ -1152,13 +1258,18 @@ async function checkOrphanedObjects(
 ): Promise<void> {
   const result = await findOrphanedObjects(reader);
   for (const orphan of result.orphanedObjects) {
+    const families = orphan.families ?? [];
     info.push({
       check: 'orphaned-object',
       entity: `objectTypes/${orphan.name}`,
       message: `Object "${orphan.name}" (${orphan.pluginId}) is not used by any event (as condition/action object, object parameter, ` +
-        'expression or in a script action), not used through a family, and has no instance in any layout (including non-world instances)',
+        'expression or in a script action), not used through a family, has no instance in any layout (on any layer or sub-layer, ' +
+        'including non-world instances) and no other instance names it in an object property',
       suggestion: 'Before removing it, check what this analysis cannot see: project script files, objects created by name at runtime, ' +
-        'and script references it does not recognise. delete_object refuses objects that are still referenced.',
+        'and script references it does not recognise. delete_object refuses objects that are still referenced.' +
+        (families.length > 0
+          ? ` It is a member of ${families.map(f => `"${f}"`).join(', ')}: remove it from the family first (update_family removeMembers).`
+          : ''),
     });
   }
 }

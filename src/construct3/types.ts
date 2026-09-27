@@ -414,7 +414,8 @@ export interface Layer {
   sid: number;
   instances: Instance[];
   overriden?: number;
-  subLayers?: unknown[];
+  /** Nested layers of the same shape, to any depth (see layers.ts) */
+  subLayers?: Layer[];
   effectTypes?: Array<Record<string, unknown>>;
   isInitiallyVisible?: boolean;
   isInitiallyInteractive?: boolean;
@@ -472,9 +473,10 @@ export interface ObjectReference {
   /**
    * How the object is used: as the object of a condition/action, as a whole
    * parameter value (object parameters), inside a parameter expression
-   * ("Name.X"), or from a script action/event (runtime.objects.Name).
+   * ("Name.X"), from a script action/event (runtime.objects.Name), or as the
+   * object a custom action block defines a custom action for.
    */
-  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script';
+  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script' | 'custom-action';
 }
 
 /** Node in the event sheet flow graph */

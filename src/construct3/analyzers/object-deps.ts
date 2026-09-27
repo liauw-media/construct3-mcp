@@ -11,6 +11,8 @@ export interface ObjectDependencyResult {
   projectWide?: {
     topConnected: ObjectDependencyNode[];
     orphanedObjects: string[];
+    /** Orphans that are members of a family, with those families: delete_object refuses them until they leave it */
+    orphanedFamilyMembers?: Array<{ name: string; families: string[] }>;
     totalObjects: number;
     totalReferenced: number;
   };
@@ -21,6 +23,8 @@ export interface OrphanedObjectsResult {
     name: string;
     pluginId: string;
     isGlobal: boolean;
+    /** Families (that no event uses) the object is a member of */
+    families?: string[];
   }>;
   count: number;
   totalObjects: number;
@@ -54,6 +58,7 @@ export async function getObjectDependencies(
   // Project-wide view
   const allNodes: ObjectDependencyNode[] = [];
   const orphanedObjects: string[] = [];
+  const orphanedFamilyMembers: Array<{ name: string; families: string[] }> = [];
 
   for (const objName of index.allObjects) {
     const node = buildObjectNode(index, objName);
@@ -62,6 +67,8 @@ export async function getObjectDependencies(
     // Same rule as find_orphaned_objects and validate_project
     if (!index.isObjectUsed(objName)) {
       orphanedObjects.push(objName);
+      const families = index.getObjectUsage(objName).families;
+      if (families.length > 0) orphanedFamilyMembers.push({ name: objName, families });
     }
   }
 
@@ -74,6 +81,7 @@ export async function getObjectDependencies(
     projectWide: {
       topConnected: allNodes.slice(0, limit),
       orphanedObjects,
+      ...(orphanedFamilyMembers.length > 0 ? { orphanedFamilyMembers } : {}),
       totalObjects: index.allObjects.length,
       // Used objects (family use included), so totalReferenced + orphanedObjects.length = totalObjects
       totalReferenced: index.allObjects.length - orphanedObjects.length,
@@ -83,7 +91,12 @@ export async function getObjectDependencies(
 
 function buildObjectNode(index: import('./index-builder.js').ProjectIndex, objectName: string): ObjectDependencyNode {
   const eventSheets = index.getEventSheetsForObject(objectName);
-  const layouts = index.objectToLayouts.get(objectName) || [];
+  // Layouts with an instance (any layer or sub-layer, or non-world) or an object property naming it
+  const usage = index.getObjectUsage(objectName);
+  const layouts = [...new Set([
+    ...(index.objectToLayouts.get(objectName) || []),
+    ...usage.instanceProperties.map(p => p.layout),
+  ])];
   const families = index.objectToFamilies.get(objectName) || [];
   const coOccurs = index.getCoOccurringObjects(objectName);
   const refs = index.objectToEventSheets.get(objectName) || [];
@@ -98,9 +111,11 @@ function buildObjectNode(index: import('./index-builder.js').ProjectIndex, objec
 }
 
 /**
- * Find objects not used by any event (directly or through a family) and not
- * placed in any layout (layers or non-world instances). See index-builder.ts
- * for what counts as a use in events.
+ * Find objects not used by any event (directly or through a family), not
+ * placed in any layout (any layer or sub-layer, or non-world instances) and not
+ * named by an object property of another instance. See index-builder.ts for
+ * what counts as a use. Orphans that are family members list their families:
+ * delete_object refuses them until they leave the family.
  */
 export async function findOrphanedObjects(
   reader: Construct3ProjectReader
@@ -113,10 +128,12 @@ export async function findOrphanedObjects(
   for (const objName of index.allObjects) {
     if (!index.isObjectUsed(objName)) {
       const objData = objectTypes.get(objName);
+      const families = index.getObjectUsage(objName).families;
       orphaned.push({
         name: objName,
         pluginId: objData?.['plugin-id'] || 'unknown',
         isGlobal: objData?.isGlobal === true,
+        ...(families.length > 0 ? { families } : {}),
       });
     }
   }

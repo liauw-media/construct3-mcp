@@ -285,16 +285,25 @@ Returns an error — the startup layout cannot be deleted.
 
 **Claude uses**: `delete_object` with `name: "Enemy"`
 
-**If referenced** (e.g., placed on LevelSelect layout):
+**If referenced** (e.g., a condition in the Game event sheet, and two instances on the sub-layer Enemies of the layer Main in the LevelSelect layout):
 ```json
 {
   "success": false,
+  "entity": "Enemy",
+  "category": "object",
   "action": "delete_blocked",
-  "message": "Object is still referenced. Use force=true to delete anyway.",
+  "message": "Object is still referenced: used 1 time(s) in events of \"Game\" (1 condition object); 2 instance(s) in layout \"LevelSelect\" (layer \"Main > Enemies\"). Use force=true to delete anyway (references will NOT be cleaned up).",
   "references": {
-    "eventSheets": [],
+    "eventSheets": ["Game"],
     "layouts": ["LevelSelect"],
-    "families": []
+    "families": [],
+    "events": [
+      { "eventSheet": "Game", "path": "block > condition:0", "context": "condition" }
+    ],
+    "instances": [
+      { "layout": "LevelSelect", "layer": "Main > Enemies", "instances": 2 }
+    ],
+    "instanceProperties": []
   }
 }
 ```
@@ -302,7 +311,7 @@ Returns an error — the startup layout cannot be deleted.
 **Force delete:**
 > "Force delete Enemy even though it's referenced"
 
-Returns success with a warning that references were NOT cleaned up.
+Returns success with a warning that names the remaining uses (references are NOT cleaned up). Afterwards `validate_project` reports the leftover instances, object parameters and family memberships as `broken-object-reference`; uses in expressions and scripts are not reported, and a second warning of the delete lists them.
 
 ### Update Project Metadata
 

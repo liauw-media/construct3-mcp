@@ -5,6 +5,7 @@
 
 import type { Construct3ProjectReader } from './project-reader.js';
 import type { AnimationsContainer, C3Event, Layout, RootFileFolders } from './types.js';
+import { forEachLayoutInstance, layerEntries } from './layers.js';
 
 const SID_MIN = 100_000_000_000_000; // 15-digit minimum
 const SID_MAX = 999_999_999_999_999; // 15-digit maximum
@@ -239,21 +240,14 @@ export class IdGenerator {
     }
   }
 
+  /** Layer SIDs, instance SIDs and UIDs on every layer and sub-layer, and of non-world instances. */
   private scanLayoutSids(layout: Layout): void {
-    for (const layer of layout.layers) {
+    for (const { layer } of layerEntries(layout.layers)) {
       this.collectSid(layer.sid);
-      for (const instance of layer.instances) {
-        this.collectSid(instance.sid);
-        this.trackUid(instance.uid);
-      }
     }
-    // Nonworld instances
-    const nonworld = layout['nonworld-instances'];
-    if (Array.isArray(nonworld)) {
-      for (const inst of nonworld as Array<{ sid?: unknown; uid?: unknown }>) {
-        this.collectSid(inst.sid);
-        this.trackUid(inst.uid);
-      }
-    }
+    forEachLayoutInstance(layout, instance => {
+      this.collectSid(instance.sid);
+      this.trackUid(instance.uid);
+    });
   }
 }

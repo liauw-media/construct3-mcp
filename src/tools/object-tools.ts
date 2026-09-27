@@ -5,12 +5,13 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult, ObjectType, Instance, Layout } from '../construct3/types.js';
+import type { WriteResult, ObjectType, Instance, ObjectReference } from '../construct3/types.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
 import { validateName, validateSubfolder, toolResult, toolError, notFoundError, folderCaseClashError } from './shared.js';
 import { findFolderPathClash } from '../construct3/names.js';
-import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
+import { getProjectIndex, type FamilyMemberUse, type ObjectUsage } from '../construct3/analyzers/index-builder.js';
+import { forEachLayoutInstance } from '../construct3/layers.js';
 import {
   checkFamilyPlugins,
   findObjectClassNameClash,
@@ -282,7 +283,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_object',
-    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances, including non-world instances; families). References in project script files and objects created by name at runtime are not detected.',
+    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. References in project script files and objects created by name at runtime are not detected.',
     {
       name: z.string().max(200).describe('Object name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -295,13 +296,12 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           return notFoundError('Object', args.name, reader.findNearestName(args.name, 'objects'), 'list_objects');
         }
 
-        // Check references
+        // Check references: the same index find_orphaned_objects and get_object_dependencies use
         const index = await getProjectIndex(reader);
-        const eventSheetRefs = index.getEventSheetsForObject(args.name);
-        const layoutRefs = index.objectToLayouts.get(args.name) || [];
-        const familyRefs = index.objectToFamilies.get(args.name) || [];
-
-        const hasRefs = eventSheetRefs.length > 0 || layoutRefs.length > 0 || familyRefs.length > 0;
+        const usage = index.getObjectUsage(args.name);
+        const hasRefs = index.isObjectReferenced(args.name);
+        const eventSheetRefs = [...new Set(usage.events.map(r => r.eventSheet))];
+        const layoutRefs = [...new Set([...usage.placements, ...usage.instanceProperties].map(p => p.layout))];
 
         if (hasRefs && !args.force) {
           return toolResult({
@@ -309,18 +309,22 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             entity: args.name,
             category: 'object',
             action: 'delete_blocked',
-            message: 'Object is still referenced. Use force=true to delete anyway (references will NOT be cleaned up).',
+            message: `Object is still referenced: ${describeObjectUsage(usage)}. ` +
+              'Use force=true to delete anyway (references will NOT be cleaned up).',
             references: {
               eventSheets: eventSheetRefs,
               layouts: layoutRefs,
-              families: familyRefs,
+              families: usage.families,
+              ...usageDetails(usage),
             },
           });
         }
 
         const warnings: string[] = [];
         if (hasRefs && args.force) {
-          warnings.push(`Object deleted but still referenced in: ${[...eventSheetRefs, ...layoutRefs].join(', ')}. References were NOT cleaned up.`);
+          warnings.push(`Object deleted but still referenced: ${describeObjectUsage(usage)}. References were NOT cleaned up.`);
+          const unreported = unreportedUsesWarning(usage.events);
+          if (unreported) warnings.push(unreported);
         }
 
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
@@ -551,15 +555,47 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_family',
-    'Delete a family from the project',
+    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions and runtime.objects in script actions; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. The member object types are kept. References in project script files and script access to instance variables and behaviors of member instances are not detected.',
     {
       name: z.string().max(200).describe('Family name to delete'),
+      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
     },
     async (args) => {
       try {
         const existing = await reader.listFamilies();
         if (!existing.includes(args.name)) {
           return toolError(`Family "${args.name}" not found. Use list_families to see available families.`);
+        }
+
+        // Check references: uses by name (as for delete_object) and uses through members
+        const index = await getProjectIndex(reader);
+        const { events, instanceProperties } = index.getObjectUsage(args.name);
+        const usage: ObjectUsage = { events, placements: [], instanceProperties, families: [], usedFamilies: [] };
+        const memberUses = index.getFamilyMemberUses(args.name);
+        const hasRefs = events.length > 0 || instanceProperties.length > 0 || memberUses.length > 0;
+        const description = [describeObjectUsage(usage), describeMemberUses(memberUses)].filter(Boolean).join('; ');
+
+        if (hasRefs && !args.force) {
+          return toolResult({
+            success: false,
+            entity: args.name,
+            category: 'family',
+            action: 'delete_blocked',
+            message: `Family is still referenced: ${description}. ` +
+              'Use force=true to delete anyway (references will NOT be cleaned up).',
+            references: {
+              eventSheets: [...new Set([...events, ...memberUses].map(r => r.eventSheet))],
+              layouts: [...new Set(instanceProperties.map(p => p.layout))],
+              ...boundedLists({ events: eventUseList(events), instanceProperties, memberUses }),
+            },
+          });
+        }
+
+        const warnings: string[] = [];
+        if (hasRefs && args.force) {
+          warnings.push(`Family deleted but still referenced: ${description}. References were NOT cleaned up.`);
+          const unreported = unreportedUsesWarning(events, memberUses);
+          if (unreported) warnings.push(unreported);
         }
 
         const subfolder = writer.getSubfolderForEntity('families', args.name);
@@ -571,6 +607,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           entity: args.name,
           category: 'family',
           action: 'deleted',
+          warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
         };
         return toolResult(result);
@@ -582,9 +619,116 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
   );
 }
 
+/** At most this many uses of each kind are listed in a delete_object or delete_family response. */
+const MAX_LISTED_USES = 50;
+
+const EVENT_USE_LABELS: Record<ObjectReference['context'], string> = {
+  condition: 'condition object',
+  action: 'action object',
+  parameter: 'object parameter',
+  expression: 'expression',
+  script: 'script',
+  'custom-action': 'custom action definition',
+};
+
+/** A short list for messages: the first few items and how many more there are. */
+function listSome(items: string[], max = 5): string {
+  const shown = items.slice(0, max).join(', ');
+  return items.length > max ? `${shown} and ${items.length - max} more` : shown;
+}
+
 /**
- * Ensure all layout instances of an object type have the standard
- * `behaviors` and `instanceVariables` dicts that C3 expects.
+ * One sentence on what refers to an object, e.g. 'used 3 time(s) in events of
+ * "Sheet1" (2 object parameter, 1 script); 2 instance(s) in layout "Layout1"
+ * (layer "Main > Sub")'.
+ */
+function describeObjectUsage(usage: ObjectUsage): string {
+  const parts: string[] = [];
+  if (usage.events.length > 0) {
+    const byContext = new Map<string, number>();
+    for (const ref of usage.events) {
+      const label = EVENT_USE_LABELS[ref.context] ?? ref.context;
+      byContext.set(label, (byContext.get(label) ?? 0) + 1);
+    }
+    const sheets = [...new Set(usage.events.map(r => `"${r.eventSheet}"`))];
+    const kinds = [...byContext].map(([label, count]) => `${count} ${label}`).join(', ');
+    parts.push(`used ${usage.events.length} time(s) in events of ${listSome(sheets)} (${kinds})`);
+  }
+  if (usage.placements.length > 0) {
+    const total = usage.placements.reduce((sum, p) => sum + p.instances, 0);
+    const where = usage.placements.map(p =>
+      `"${p.layout}" (${p.layer !== undefined ? `layer "${p.layer}"` : 'non-world'})`);
+    parts.push(`${total} instance(s) in layout ${listSome(where)}`);
+  }
+  if (usage.instanceProperties.length > 0) {
+    const where = usage.instanceProperties.map(p =>
+      `"${p.property}" of "${p.objectType}" UID ${String(p.uid)} in layout "${p.layout}"`);
+    parts.push(`named by the object propert${where.length === 1 ? 'y' : 'ies'} ${listSome(where)}`);
+  }
+  if (usage.families.length > 0) {
+    parts.push(`member of family ${listSome(usage.families.map(f => `"${f}"`))}`);
+  }
+  return parts.join('; ');
+}
+
+/**
+ * One sentence on the uses of a family's instance variables and behaviors
+ * through its members, e.g. 'its instance variables or behaviors used 2
+ * time(s) through members in events of "Sheet1" (instance variable "hp" of
+ * "Sprite1", behavior "Fade" of "Sprite1")'; empty when there are none.
+ */
+function describeMemberUses(uses: FamilyMemberUse[]): string {
+  if (uses.length === 0) return '';
+  const sheets = [...new Set(uses.map(u => `"${u.eventSheet}"`))];
+  const what = [...new Set(uses.map(u => `${u.kind} "${u.name}" of "${u.member}"`))];
+  return `its instance variables or behaviors used ${uses.length} time(s) through members in events of ${listSome(sheets)} (${listSome(what)})`;
+}
+
+/** Event uses as listed in a refusal: where and how. */
+function eventUseList(events: ObjectReference[]): Array<Pick<ObjectReference, 'eventSheet' | 'path' | 'context'>> {
+  return events.map(({ eventSheet, path, context }) => ({ eventSheet, path, context }));
+}
+
+/** The uses behind a delete_object refusal, bounded to MAX_LISTED_USES per kind. */
+function usageDetails(usage: ObjectUsage): Record<string, unknown> {
+  return boundedLists({
+    events: eventUseList(usage.events),
+    instances: usage.placements,
+    instanceProperties: usage.instanceProperties,
+  });
+}
+
+/** Each list cut to MAX_LISTED_USES entries, with `<kind>NotListed` counting the rest. */
+function boundedLists(lists: Record<string, unknown[]>): Record<string, unknown> {
+  const details: Record<string, unknown> = {};
+  for (const [kind, list] of Object.entries(lists)) {
+    details[kind] = list.slice(0, MAX_LISTED_USES);
+    if (list.length > MAX_LISTED_USES) details[`${kind}NotListed`] = list.length - MAX_LISTED_USES;
+  }
+  return details;
+}
+
+/**
+ * The force-delete warning for the uses validate_project cannot report
+ * afterwards (it reports the other leftovers as broken-object-reference):
+ * uses in expressions and scripts, which are recognised by the names of
+ * existing objects only, and uses of a family's instance variables and
+ * behaviors through its members. Empty when there are none.
+ */
+function unreportedUsesWarning(events: ObjectReference[], memberUses: FamilyMemberUse[] = []): string {
+  const inCode = events.filter(r => r.context === 'expression' || r.context === 'script');
+  if (inCode.length === 0 && memberUses.length === 0) return '';
+  const counts: string[] = [];
+  if (inCode.length > 0) counts.push(`${inCode.length} use(s) in expressions and scripts`);
+  if (memberUses.length > 0) counts.push(`${memberUses.length} use(s) of its instance variables and behaviors through members`);
+  const where = [...new Set([...inCode, ...memberUses].map(r => `"${r.eventSheet}" ${r.path}`))];
+  return `validate_project will not report its ${counts.join(' and ')} (${listSome(where)}): fix them now.`;
+}
+
+/**
+ * Ensure all layout instances of an object type (on every layer and sub-layer,
+ * and non-world instances) have the standard `behaviors` and
+ * `instanceVariables` dicts that C3 expects.
  * Without these, C3 may fail to load the project after a behavior or
  * variable is added to the object type definition.
  *
@@ -601,23 +745,11 @@ async function syncLayoutInstances(
   for (const [layoutName, layout] of layouts) {
     let modified = false;
 
-    for (const layer of layout.layers) {
-      for (const instance of layer.instances) {
-        if (instance.type === objectName) {
-          modified = ensureInstanceFields(instance) || modified;
-        }
+    forEachLayoutInstance(layout, instance => {
+      if (instance.type === objectName) {
+        modified = ensureInstanceFields(instance) || modified;
       }
-    }
-
-    // Also check nonworld-instances
-    const nonworld = (layout as Record<string, unknown>)['nonworld-instances'] as Instance[] | undefined;
-    if (Array.isArray(nonworld)) {
-      for (const instance of nonworld) {
-        if (instance.type === objectName) {
-          modified = ensureInstanceFields(instance) || modified;
-        }
-      }
-    }
+    });
 
     if (modified) {
       const subfolder = writer.getSubfolderForEntity('layouts', layoutName);

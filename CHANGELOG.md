@@ -17,6 +17,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `construct3://docs/pitfalls` resource with curated Construct 3 pitfalls, and a `debug_stuck_game` prompt that embeds the current trap scan (#20).
 - `eventPath` parameter (`eventPaths` for `move_events_between_sheets`) on the SID-addressed event tools: picks one of several events that share a SID; single-event results name the `eventPath` they acted on (#30).
 - `validate_project` check `file-name-case-mismatch`: warns when an entity file's name differs from its registered name only in case, instead of reporting a live file as orphaned (#31).
+- `validate_project` check `duplicate-layer-name`: layers of one layout, sub-layers included, whose names are the same ignoring case (#35).
+- `delete_family` checks references before deleting (events, object properties, uses of its instance variables and behaviors through members) and takes `force` (#35).
 
 ### Changed
 
@@ -31,6 +33,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `add_event_to_sheet`, `update_event_variable` and `move_events_between_sheets` check event variable and function parameter names like the editor: no clash within the variable's scope (ignoring case), no System expression names, none of the characters the editor removes (#29).
 - `move_events_between_sheets` warns when a copy leaves a SID shared by several events in the target sheet, and `duplicate-sid` reports end each event location with its JSON path (#30).
 - `validate_project` lists leftover `.bak` files in `timelines/` and next to `project.c3proj` too, and its `duplicate-uid` advice gives accurate guidance instead of suggesting a re-save in Construct 3 (#31).
+- Layout tools handle nested sub-layers (`layers[].subLayers`): `add_instance_to_layout`, `update_instance`, `delete_instance_from_layout`, `update_layer` and `delete_layer` find layers and instances at any depth (a sub-layer also by a path such as `"Main > HUD"`), and `add_layer` refuses a name any layer or sub-layer uses (#35).
+- A blocked `delete_object` or `delete_family` lists where the object is used; a forced delete names the uses it leaves behind, and `validate_project` reports dangling instances, object parameters, family members and object properties as `broken-object-reference` (#35).
 
 ### Fixed
 
@@ -43,6 +47,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `validate_project` accepts the editor's Transitions folder in `timelines` instead of reporting a `subfolder-structure` error, so editor-saved projects are no longer `valid: false`; only a nameless folder elsewhere is reported as malformed (#31).
 - `validate_project` skips the editor's `*.uistate.json` files and checks entity files against the path each registered entity is read from (#31).
 - `find_orphaned_objects`, `get_object_dependencies` and `validate_project` count non-world instances, object parameters, expressions and script actions as object uses, so such objects are no longer reported as unused (#31).
+- `delete_object` without `force` no longer deletes object types that are still used as non-world instances, in object parameters, expressions or scripts, on sub-layers, or through object properties of other instances (#35).
+- New instance UIDs are allocated above every UID in the project, sub-layer instances included, and the duplicate UID/SID checks and the dependency and orphan analysis look into sub-layers (#35).
 
 ## [1.8.1] - 2026-04-16
 

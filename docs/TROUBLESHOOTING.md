@@ -108,12 +108,20 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "Object is still referenced"
 
-**Cause**: `delete_object` found references in event sheets, layouts, or families.
+**Cause**: `delete_object` found references in event sheets, layouts (instances on any layer or sub-layer, non-world instances, object properties of other instances), or families.
 
 **Solutions**:
 - Remove all references first, then delete
-- Use `force: true` to delete anyway (references will NOT be cleaned up — you'll need to fix them manually)
+- Use `force: true` to delete anyway (references will NOT be cleaned up — you'll need to fix them manually; `validate_project` then reports the leftover instances, object parameters, family memberships and Particles object properties as `broken-object-reference`; uses in expressions and scripts are not reported, so fix the ones the force warning lists)
 - The error response lists all locations where the object is referenced
+
+### "Family is still referenced"
+
+**Cause**: `delete_family` found events or object properties that name the family, or conditions, actions and expressions that use its instance variables or behaviors through a member object type (`references.memberUses`).
+
+**Solutions**:
+- Remove those uses first, then delete
+- Use `force: true` to delete anyway (references will NOT be cleaned up; `validate_project` does not report the uses in expressions and scripts or through members, so fix the ones the force warning lists)
 
 ### Backup files (.bak)
 

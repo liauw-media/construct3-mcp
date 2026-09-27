@@ -603,6 +603,62 @@ describe('update_family', () => {
 // ─── delete_family ────────────────────────────────────────
 
 describe('delete_family', () => {
+  beforeEach(() => resetProjectIndex());
+
+  type Json = Record<string, any>;
+  const spriteObject = (name: string, sid: number, extra: Json = {}): [string, Json] =>
+    [name, { name, 'plugin-id': 'Sprite', sid, instanceVariables: [], behaviorTypes: [], ...extra }];
+  const family1 = (extra: Json = {}): [string, Json] =>
+    ['Family1', { name: 'Family1', 'plugin-id': 'Sprite', sid: 120, instanceVariables: [], behaviorTypes: [], members: ['Sprite1'], ...extra }];
+  const sheet = (actionsAndConditions: { conditions?: Json[]; actions?: Json[] }): Map<string, Json> =>
+    new Map([['Sheet1', {
+      name: 'Sheet1', sid: 200,
+      events: [{ eventType: 'block', sid: 201, conditions: [], actions: [], ...actionsAndConditions }],
+    }]]);
+
+  /** Family1 named by a condition, an object parameter, an expression, a script action and a Particles object property */
+  function namedFamilyProject(): Json {
+    return {
+      objects: new Map([
+        spriteObject('Sprite1', 101), spriteObject('Sprite2', 102),
+        ['Emitter', { name: 'Emitter', 'plugin-id': 'Particles', sid: 110 }],
+      ]),
+      families: new Map([family1()]),
+      eventSheets: sheet({
+        conditions: [{ id: 'compare-x', objectClass: 'Family1', sid: 202, parameters: { comparison: 0, 'x-co-ordinate': '0' } }],
+        actions: [
+          { id: 'move-to-object', objectClass: 'Sprite2', sid: 203, parameters: { where: 'behind', object: 'Family1' } },
+          { id: 'set-x', objectClass: 'Sprite2', sid: 204, parameters: { x: 'Family1.X + 1' } },
+          { type: 'script', script: ['runtime.objects.Family1.getFirstInstance();'] },
+        ],
+      }),
+      layouts: new Map([['Layout1', {
+        name: 'Layout1', sid: 300,
+        layers: [{ name: 'Main', sid: 301, instances: [
+          { type: 'Emitter', uid: 1, sid: 311, properties: { object: 120 }, instanceVariables: {}, behaviors: {}, world: {} },
+        ] }],
+      }]]),
+    };
+  }
+
+  /** Family1's variable "hp" and behavior "Fade" used through its member Sprite1 only */
+  function memberUseProject(sprite1: Json = {}): Json {
+    return {
+      objects: new Map([spriteObject('Sprite1', 101, sprite1)]),
+      families: new Map([family1({
+        instanceVariables: [{ name: 'hp', type: 'number', initialValue: 0, desc: '', sid: 121 }],
+        behaviorTypes: [{ behaviorId: 'Fade', name: 'Fade', sid: 122 }],
+      })]),
+      eventSheets: sheet({
+        conditions: [{ id: 'compare-instance-variable', objectClass: 'Sprite1', sid: 202, parameters: { 'instance-variable': 'hp', comparison: 0, value: '0' } }],
+        actions: [
+          { id: 'start-fade', objectClass: 'Sprite1', behaviorType: 'Fade', sid: 203 },
+          { id: 'set-x', objectClass: 'Sprite1', sid: 204, parameters: { x: 'Sprite1.hp + 1' } },
+        ],
+      }),
+    };
+  }
+
   it('registers the tool', () => {
     const { server } = setup();
     expect(server.hasTool('delete_family')).toBe(true);
@@ -614,6 +670,113 @@ describe('delete_family', () => {
     });
     const result = await server.callTool('delete_family', { name: 'TestFamily' });
     expect(parseResult(result).success).toBe(true);
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
+  });
+
+  it('deletes an unused family with members; uses of the members themselves do not count', async () => {
+    const { server, writer } = setup({
+      objects: new Map([spriteObject('Sprite1', 101, { instanceVariables: [{ name: 'speed', type: 'number', sid: 105 }] })]),
+      families: new Map([family1({ instanceVariables: [{ name: 'hp', type: 'number', sid: 121 }] })]),
+      eventSheets: sheet({
+        conditions: [{ id: 'compare-instance-variable', objectClass: 'Sprite1', sid: 202, parameters: { 'instance-variable': 'speed', comparison: 0, value: '0' } }],
+        actions: [{ id: 'set-x', objectClass: 'Sprite1', sid: 203, parameters: { x: 'Sprite1.X + Sprite1.speed + "Sprite1.hp"' } }],
+      }),
+    });
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.action).toBe('deleted');
+    expect(data.warnings).toBeUndefined();
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
+    expect(writer.callsFor('removeFromProject')).toHaveLength(1);
+  });
+
+  it('refuses a family named in events and object properties', async () => {
+    const { server, writer } = setup(namedFamilyProject());
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.success).toBe(false);
+    expect(data.action).toBe('delete_blocked');
+    expect(data.references.events.map((e: Json) => e.context)).toEqual(['condition', 'parameter', 'expression', 'script']);
+    expect(data.references.instanceProperties).toEqual([
+      { layout: 'Layout1', layer: 'Main', objectType: 'Emitter', uid: 1, property: 'object' },
+    ]);
+    expect(data.references.eventSheets).toEqual(['Sheet1']);
+    expect(data.references.layouts).toEqual(['Layout1']);
+    expect(data.references.memberUses).toEqual([]);
+    expect(data.message).toContain('Family is still referenced: used 4 time(s) in events of "Sheet1"');
+    expect(data.message).toContain('named by the object property "object" of "Emitter" UID 1 in layout "Layout1"');
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(0);
+    expect(writer.callsFor('removeFromProject')).toHaveLength(0);
+  });
+
+  it('refuses a family whose variable or behavior a member uses', async () => {
+    const { server, writer } = setup(memberUseProject());
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.action).toBe('delete_blocked');
+    expect(data.references.events).toEqual([]);
+    expect(data.references.eventSheets).toEqual(['Sheet1']);
+    expect(data.references.memberUses).toEqual([
+      { eventSheet: 'Sheet1', path: 'block > condition:0', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'condition' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', member: 'Sprite1', kind: 'behavior', name: 'Fade', context: 'action' },
+      { eventSheet: 'Sheet1', path: 'block > action:1', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
+    ]);
+    expect(data.message).toContain('its instance variables or behaviors used 3 time(s) through members in events of "Sheet1" ' +
+      '(instance variable "hp" of "Sprite1", behavior "Fade" of "Sprite1")');
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(0);
+  });
+
+  it('refuses a family whose variable or behavior a member uses through Self', async () => {
+    const project = memberUseProject();
+    project.eventSheets = sheet({
+      conditions: [{ id: 'compare-x', objectClass: 'Sprite1', sid: 202, parameters: { comparison: 0, 'x-co-ordinate': 'Self.hp' } }],
+      actions: [{ id: 'set-x', objectClass: 'Sprite1', sid: 203, parameters: { x: 'Self.Fade.FadeInTime' } }],
+    });
+    const { server, writer } = setup(project);
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.action).toBe('delete_blocked');
+    expect(data.references.memberUses).toEqual([
+      { eventSheet: 'Sheet1', path: 'block > condition:0', member: 'Sprite1', kind: 'instance variable', name: 'hp', context: 'expression' },
+      { eventSheet: 'Sheet1', path: 'block > action:0', member: 'Sprite1', kind: 'behavior', name: 'Fade', context: 'expression' },
+    ]);
+    expect(data.message).toContain('(instance variable "hp" of "Sprite1", behavior "Fade" of "Sprite1")');
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(0);
+  });
+
+  it('does not count Self in a condition or action on an object that is not a member', async () => {
+    const project = memberUseProject();
+    project.objects.set(...spriteObject('Sprite2', 102, { instanceVariables: [{ name: 'hp', type: 'number', sid: 106 }] }));
+    project.eventSheets = sheet({
+      actions: [{ id: 'set-x', objectClass: 'Sprite2', sid: 203, parameters: { x: 'Self.hp' } }],
+    });
+    const { server, writer } = setup(project);
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.action).toBe('deleted');
+    expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
+  });
+
+  it('does not count a variable the member declares itself', async () => {
+    const { server } = setup(memberUseProject({ instanceVariables: [{ name: 'hp', type: 'number', sid: 105 }] }));
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1' }));
+    expect(data.action).toBe('delete_blocked');
+    expect(data.references.memberUses.map((u: Json) => `${u.kind} ${u.name}`)).toEqual(['behavior Fade']);
+  });
+
+  it('with force deletes the family and names the uses validate_project will not report', async () => {
+    const project = namedFamilyProject();
+    const member = memberUseProject();
+    project.families = member.families;
+    project.eventSheets.get('Sheet1').events.push(...member.eventSheets.get('Sheet1').events);
+    const { server, writer } = setup(project);
+
+    const data = parseResult(await server.callTool('delete_family', { name: 'Family1', force: true }));
+    expect(data.action).toBe('deleted');
+    expect(data.warnings).toHaveLength(2);
+    expect(data.warnings[0]).toContain('Family deleted but still referenced: used 4 time(s) in events of "Sheet1"');
+    expect(data.warnings[0]).toContain('its instance variables or behaviors used 3 time(s) through members');
+    expect(data.warnings[1]).toContain('validate_project will not report its 2 use(s) in expressions and scripts ' +
+      'and 3 use(s) of its instance variables and behaviors through members');
+    expect(data.warnings[1]).toContain('"Sheet1" block > action:1');
+    expect(data.warnings[1]).toContain('"Sheet1" block > action:2');
+    expect(data.warnings[1]).toContain('"Sheet1" block > condition:0');
     expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
     expect(writer.callsFor('removeFromProject')).toHaveLength(1);
   });

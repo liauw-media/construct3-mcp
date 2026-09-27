@@ -3,7 +3,10 @@
  * Foundation for all analysis features: builds lazily on first use, cached.
  *
  * Objects count as used in events when they are the object of a condition or
- * action, and also (heuristics that err on the side of finding a reference):
+ * action, or the objectClass of a custom action block (eventType
+ * "custom-ace-block", context "custom-action"; its conditions, actions and
+ * sub-events are indexed like those of a function block), and also
+ * (heuristics that err on the side of finding a reference):
  * - parameter: a condition/action/function-call parameter whose whole value is
  *   the name of an object type or family, as in object parameters
  *   ("object", "object-to-create", "pin-to", "child", ...). Not counted: keys
@@ -19,8 +22,25 @@
  *   Dynamic lookups (runtime.objects[name]), destructuring and project script
  *   files are not analysed.
  * Only names of existing object types and families are recorded this way, so
- * these references never show up as broken references. Layout placements
- * include non-world instances ("nonworld-instances", e.g. Array, Dictionary).
+ * these references never show up as broken references; the exception are the
+ * object parameter keys below, whose values name an object type or family in
+ * every editor-saved project checked, so a name-shaped value naming neither is
+ * recorded and reported as a broken reference (an object deleted with force);
+ * any other value there is scanned like an expression. Layout placements
+ * cover instances on every layer and sub-layer (layers[].subLayers, nested to
+ * any depth) and non-world instances ("nonworld-instances", e.g. Array,
+ * Dictionary). An instance property whose value is the SID of an object type
+ * or family (object properties such as the Particles "object" property, which
+ * editor-saved projects store as the SID) is a reference to that object too.
+ *
+ * A family's instance variables and behaviors can also be used through its
+ * member object types without naming the family (getFamilyMemberUses): the
+ * "instance-variable" parameter or the behaviorType of a condition/action on a
+ * member, "Member.name" / "Member(0).name" in a parameter expression, and
+ * "Self.name" in a parameter expression of a condition/action on the member. Only
+ * names the member gets from that family alone count (not ones the member
+ * declares itself or also gets from another family), since only those break
+ * when the family is deleted.
  */
 
 import type { Construct3ProjectReader } from '../project-reader.js';
@@ -36,6 +56,65 @@ import type {
   ObjectReference,
   Layout,
 } from '../types.js';
+import { forEachLayoutInstance, layerPathLabel } from '../layers.js';
+
+/** Instances of an object type in one layout, on one layer (or among the non-world instances). */
+export interface InstancePlacement {
+  layout: string;
+  /** Layer path, e.g. "Main" or "Main > Sub" for a sub-layer; absent for non-world instances */
+  layer?: string;
+  /** Number of instances there */
+  instances: number;
+}
+
+/** A layout instance property that holds an object type's or family's SID (an object property). */
+export interface InstancePropertyReference {
+  layout: string;
+  /** Layer path of the instance; absent for a non-world instance */
+  layer?: string;
+  /** Object type and UID of the instance the property belongs to */
+  objectType: string;
+  uid: unknown;
+  property: string;
+}
+
+/** Everything the index knows that refers to one object type. */
+export interface ObjectUsage {
+  /** Uses in events: condition/action object, object parameter, expression, script */
+  events: ObjectReference[];
+  /** Layout instances, per layout and layer (sub-layers and non-world instances included) */
+  placements: InstancePlacement[];
+  /** Instance properties of other objects that hold this object's SID */
+  instanceProperties: InstancePropertyReference[];
+  /** Families the object is a member of */
+  families: string[];
+  /** Of those, the families that events use */
+  usedFamilies: string[];
+}
+
+/** A use of a family's instance variable or behavior through one of its member object types. */
+export interface FamilyMemberUse {
+  eventSheet: string;
+  /** Event path, as in ObjectReference.path */
+  path: string;
+  /** The member object type the use goes through */
+  member: string;
+  kind: 'instance variable' | 'behavior';
+  /** Name of the instance variable or behavior */
+  name: string;
+  /**
+   * The "instance-variable" parameter or behaviorType of a condition or
+   * action on the member, or a parameter expression ("Member.name", or
+   * "Self.name" in a condition or action on the member)
+   */
+  context: 'condition' | 'action' | 'expression';
+}
+
+/** Per member object type: instance variable / behavior name → the one family it comes from. */
+interface FamilyOnlyNames {
+  variables: Map<string, string>;
+  behaviors: Map<string, string>;
+}
 
 const MAX_NODES = 100_000;
 const MAX_DEPTH = 50;
@@ -50,6 +129,21 @@ const OBJECT_PARAMETER_KEYS = new Set(['object', 'object-to-create', 'pin-to', '
  * an instance variable, an event variable, a layout. Never object references.
  */
 const NON_OBJECT_PARAMETER_KEYS = new Set(['audio-file', 'instance-variable', 'variable', 'layout']);
+/**
+ * Shaped like an object type or family name: letters, digits and underscores,
+ * at least one of them not a digit (editor-saved object names can start with a
+ * digit). Object parameter values in editor-saved projects are always such names.
+ */
+const NAME_SHAPED = /^[\p{L}\p{N}_]*[\p{L}_][\p{L}\p{N}_]*$/u;
+/**
+ * Instance properties known to hold the SID of an object type or family, per
+ * plugin. Editor-saved projects store the Particles "object" property (the
+ * object to spawn as particles) as the object type's SID, or -1 when none is
+ * set. SIDs are positive, so other values are no reference.
+ */
+export const OBJECT_SID_PROPERTIES: ReadonlyMap<string, readonly string[]> = new Map([
+  ['Particles', ['object']],
+]);
 
 /** C3 expression string literal ("" escapes a quote); an unterminated one runs to the end. */
 const EXPRESSION_STRING_LITERAL = /"(?:[^"]|"")*(?:"|$)/g;
@@ -63,6 +157,101 @@ const SCRIPT_OBJECT_ACCESS =
 export function expressionObjectTokens(expression: string): string[] {
   const code = expression.replace(EXPRESSION_STRING_LITERAL, '""');
   return [...code.matchAll(EXPRESSION_OBJECT_TOKEN)].map(m => m[1]);
+}
+
+/**
+ * In a C3 expression of a condition or action, the object the condition or
+ * action is on ("Self.X"). Editor-saved projects write it with this case.
+ */
+const SELF = 'Self';
+
+/** Identifier that does not continue another name or a member access ("a.b" yields only "a"). */
+const EXPRESSION_IDENTIFIER = /(?<![\p{L}\p{N}_.$])[\p{L}_][\p{L}\p{N}_]*/gu;
+/** ".name" right at lastIndex, whitespace allowed around the dot */
+const EXPRESSION_MEMBER_NAME = /\s*\.\s*([\p{L}_][\p{L}\p{N}_]*)/uy;
+
+/**
+ * Member accesses on names in a C3 expression, as [name, member] pairs:
+ * "Sprite.hp" and "Sprite(Sprite.Count - 1).hp" yield ["Sprite", "hp"] (and
+ * the inner ["Sprite", "Count"]); "Sprite.Fade.Time" yields ["Sprite", "Fade"].
+ * String literals are skipped.
+ */
+export function expressionMemberAccesses(expression: string): Array<[string, string]> {
+  const code = expression.replace(EXPRESSION_STRING_LITERAL, '""');
+  const accesses: Array<[string, string]> = [];
+  for (const match of code.matchAll(EXPRESSION_IDENTIFIER)) {
+    let i = match.index + match[0].length;
+    while (i < code.length && /\s/.test(code[i])) i++;
+    if (code[i] === '(') {
+      // Instance index: skip to the matching ")"
+      let depth = 0;
+      for (; i < code.length; i++) {
+        if (code[i] === '(') depth++;
+        else if (code[i] === ')' && --depth === 0) break;
+      }
+      if (depth !== 0) continue;
+      i++;
+    }
+    EXPRESSION_MEMBER_NAME.lastIndex = i;
+    const member = EXPRESSION_MEMBER_NAME.exec(code);
+    if (member) accesses.push([match[0], member[1]]);
+  }
+  return accesses;
+}
+
+/** Names of the named entries (instance variables, behaviors) of an object type or family. */
+function entryNames(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map(entry => (entry && typeof entry === 'object' ? (entry as { name?: unknown }).name : undefined))
+    .filter((name): name is string => typeof name === 'string' && name !== '');
+}
+
+/**
+ * For every family member: the instance variables and behaviors it gets from
+ * exactly one family and does not declare itself (deleting that family takes
+ * them away from the member).
+ */
+function familyOnlyMemberNames(
+  objectTypes: ReadonlyMap<string, unknown>,
+  families: ReadonlyMap<string, Record<string, unknown>>,
+): Map<string, FamilyOnlyNames> {
+  const providers = new Map<string, { variables: Map<string, Set<string>>; behaviors: Map<string, Set<string>> }>();
+  const add = (into: Map<string, Set<string>>, name: string, family: string) => {
+    if (!into.has(name)) into.set(name, new Set());
+    into.get(name)!.add(family);
+  };
+  for (const [familyName, family] of families) {
+    if (!Array.isArray(family?.members)) continue;
+    const variables = entryNames(family.instanceVariables);
+    const behaviors = entryNames(family.behaviorTypes);
+    if (variables.length === 0 && behaviors.length === 0) continue;
+    for (const member of family.members) {
+      if (typeof member !== 'string') continue;
+      if (!providers.has(member)) providers.set(member, { variables: new Map(), behaviors: new Map() });
+      const own = providers.get(member)!;
+      for (const name of variables) add(own.variables, name, familyName);
+      for (const name of behaviors) add(own.behaviors, name, familyName);
+    }
+  }
+
+  const result = new Map<string, FamilyOnlyNames>();
+  for (const [member, provided] of providers) {
+    const data = objectTypes.get(member) as { instanceVariables?: unknown; behaviorTypes?: unknown } | undefined;
+    const pick = (from: Map<string, Set<string>>, declared: Set<string>) => {
+      const names = new Map<string, string>();
+      for (const [name, fams] of from) {
+        if (fams.size === 1 && !declared.has(name)) names.set(name, [...fams][0]);
+      }
+      return names;
+    };
+    const names = {
+      variables: pick(provided.variables, new Set(entryNames(data?.instanceVariables))),
+      behaviors: pick(provided.behaviors, new Set(entryNames(data?.behaviorTypes))),
+    };
+    if (names.variables.size > 0 || names.behaviors.size > 0) result.set(member, names);
+  }
+  return result;
 }
 
 /** Names accessed as runtime.objects.Name / runtime.objects["Name"] in script text */
@@ -110,8 +299,12 @@ export class ProjectIndex {
   /** Layout → event sheet binding */
   layoutToEventSheet: Map<string, string> = new Map();
 
-  /** Object → layout placements */
+  /** Object → layouts with an instance of it (any layer or sub-layer, or non-world) */
   objectToLayouts: Map<string, string[]> = new Map();
+  /** Object → its instances per layout and layer */
+  objectPlacements: Map<string, InstancePlacement[]> = new Map();
+  /** Object or family → instance properties that hold its SID */
+  objectToInstanceProperties: Map<string, InstancePropertyReference[]> = new Map();
 
   /** Function definitions & call sites */
   functionDefinitions: Map<string, { sheet: string; params: string[] }> = new Map();
@@ -120,6 +313,8 @@ export class ProjectIndex {
   /** Family membership */
   familyMembers: Map<string, string[]> = new Map();
   objectToFamilies: Map<string, string[]> = new Map();
+  /** Family → uses of its instance variables and behaviors through member object types */
+  familyMemberUses: Map<string, FamilyMemberUse[]> = new Map();
 
   /** All event sheet names */
   allEventSheets: string[] = [];
@@ -135,6 +330,10 @@ export class ProjectIndex {
   private referableNames: Set<string> = new Set();
   /** Event variable and function parameter names declared in any event sheet */
   private variableNames: Set<string> = new Set();
+  /** SID → name of every object type and family (for object properties that store a SID) */
+  private namesBySid: Map<number, string> = new Map();
+  /** Member object type → instance variables and behaviors it gets from one family only */
+  private familyOnlyNames: Map<string, FamilyOnlyNames> = new Map();
 
   private built = false;
 
@@ -149,6 +348,11 @@ export class ProjectIndex {
     this.allObjects = await reader.listObjectTypes();
     this.allLayouts = await reader.listLayouts();
     this.referableNames = new Set([...this.allObjects, ...(await reader.listFamilies())]);
+
+    // Instance variables and behaviors members get from a family (for the member uses found in events)
+    const objectTypes = await reader.readAllObjectTypes();
+    const families = await reader.readAllFamilies();
+    this.familyOnlyNames = familyOnlyMemberNames(objectTypes, families);
 
     // Index event sheets (variable names first: parameters are checked against them)
     const eventSheets = await reader.readAllEventSheets();
@@ -172,6 +376,12 @@ export class ProjectIndex {
       }
     }
 
+    // SIDs of object types and families, which object properties of instances store
+    for (const [name, data] of [...objectTypes, ...families]) {
+      const sid = (data as { sid?: unknown } | null)?.sid;
+      if (typeof sid === 'number' && !this.namesBySid.has(sid)) this.namesBySid.set(sid, name);
+    }
+
     // Index layouts
     const layouts = await reader.readAllLayouts();
     for (const [layoutName, layout] of layouts) {
@@ -179,7 +389,6 @@ export class ProjectIndex {
     }
 
     // Index families
-    const families = await reader.readAllFamilies();
     for (const [familyName, familyData] of families) {
       this.indexFamily(familyName, familyData);
     }
@@ -262,6 +471,32 @@ export class ProjectIndex {
             stack.push({ event: func.children[i], path: funcPath, depth: depth + 1 });
           }
         }
+      } else if ((eventType as string) === 'custom-ace-block') {
+        // Custom action block: a custom action of its objectClass (object type or
+        // family), with conditions, actions and sub-events like a function block
+        const custom = event as unknown as {
+          objectClass?: unknown; aceName?: unknown; conditions?: Condition[]; actions?: Action[]; children?: C3Event[];
+        };
+        const customLabel = `custom-action:${String(custom.objectClass)}.${String(custom.aceName)}`;
+        const customPath = path ? `${path} > ${customLabel}` : customLabel;
+        if (typeof custom.objectClass === 'string' && custom.objectClass !== '') {
+          this.addObjectReference(custom.objectClass, sheetName, customPath, 'custom-action');
+        }
+        if (Array.isArray(custom.conditions)) {
+          for (let i = 0; i < custom.conditions.length; i++) {
+            this.indexCondition(sheetName, custom.conditions[i], `${customPath} > condition:${i}`);
+          }
+        }
+        if (Array.isArray(custom.actions)) {
+          for (let i = 0; i < custom.actions.length; i++) {
+            this.indexAction(sheetName, custom.actions[i], `${customPath} > action:${i}`);
+          }
+        }
+        if (Array.isArray(custom.children)) {
+          for (let i = custom.children.length - 1; i >= 0; i--) {
+            stack.push({ event: custom.children[i], path: customPath, depth: depth + 1 });
+          }
+        }
       } else if (eventType === 'group') {
         const group = event as GroupEvent;
         const groupPath = path ? `${path} > group:${group.title}` : `group:${group.title}`;
@@ -291,6 +526,7 @@ export class ProjectIndex {
       this.addObjectReference(condition.objectClass, sheetName, path, 'condition');
     }
     this.indexParameters(sheetName, condition.parameters, path, condition.objectClass);
+    this.indexFamilyMemberUses(sheetName, condition as unknown as Record<string, unknown>, path, 'condition');
   }
 
   private indexAction(sheetName: string, action: Action, path: string): void {
@@ -305,6 +541,7 @@ export class ProjectIndex {
       this.addObjectReference(stdAction.objectClass, sheetName, path, 'action');
     }
     this.indexParameters(sheetName, stdAction.parameters, path, stdAction.objectClass);
+    this.indexFamilyMemberUses(sheetName, action as unknown as Record<string, unknown>, path, 'action');
 
     // Check for function calls
     if (stdAction.callFunction) {
@@ -337,6 +574,13 @@ export class ProjectIndex {
         if (!found.has(whole) && this.isObjectParameter(key, whole)) found.set(whole, 'parameter');
         continue;
       }
+      // An object parameter holding a name of no object type or family (e.g. one deleted
+      // with force): recorded, so validate_project reports it as a broken reference. Any
+      // other value (an expression written by hand) is scanned for object names below.
+      if (key !== undefined && OBJECT_PARAMETER_KEYS.has(key) && NAME_SHAPED.test(whole)) {
+        if (!found.has(whole)) found.set(whole, 'parameter');
+        continue;
+      }
       for (const name of expressionObjectTokens(value)) {
         if (this.referableNames.has(name) && !found.has(name)) found.set(name, 'expression');
       }
@@ -355,6 +599,60 @@ export class ProjectIndex {
     if (key !== undefined && OBJECT_PARAMETER_KEYS.has(key)) return true;
     if (key !== undefined && NON_OBJECT_PARAMETER_KEYS.has(key)) return false;
     return !this.variableNames.has(name);
+  }
+
+  /**
+   * Uses of family instance variables and behaviors through a member in one
+   * condition/action: its "instance-variable" parameter and behaviorType when
+   * its objectClass is a member, and "Member.name" in any parameter expression,
+   * as well as "Self.name" when its objectClass is a member ("Self" is the
+   * condition's or action's own object).
+   */
+  private indexFamilyMemberUses(
+    sheetName: string, ace: Record<string, unknown>, path: string, context: 'condition' | 'action',
+  ): void {
+    if (this.familyOnlyNames.size === 0) return;
+    const found = new Map<string, FamilyMemberUse & { family: string }>();
+    const record = (member: string, kind: FamilyMemberUse['kind'], name: string, useContext: FamilyMemberUse['context']) => {
+      const names = this.familyOnlyNames.get(member);
+      const family = (kind === 'instance variable' ? names?.variables : names?.behaviors)?.get(name);
+      if (family === undefined) return;
+      const key = [family, member, kind, name, useContext].join('\0');
+      if (!found.has(key)) found.set(key, { family, eventSheet: sheetName, path, member, kind, name, context: useContext });
+    };
+
+    const parameters = ace.parameters;
+    const ownMember = typeof ace.objectClass === 'string' && this.familyOnlyNames.has(ace.objectClass)
+      ? ace.objectClass
+      : undefined;
+    if (ownMember !== undefined) {
+      const variable = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
+        ? (parameters as Record<string, unknown>)['instance-variable']
+        : undefined;
+      if (typeof variable === 'string') record(ownMember, 'instance variable', variable, context);
+      // "behavior-type": the key older versions of this server wrote
+      const behavior = ace.behaviorType ?? ace['behavior-type'];
+      if (typeof behavior === 'string') record(ownMember, 'behavior', behavior, context);
+    }
+
+    const values = Array.isArray(parameters)
+      ? parameters
+      : parameters && typeof parameters === 'object' ? Object.values(parameters) : [];
+    for (const value of values) {
+      if (typeof value !== 'string' || !value.includes('.')) continue;
+      for (const [object, name] of expressionMemberAccesses(value)) {
+        // "Self" (as editor-saved projects write it) is the member the condition/action is on
+        const member = object === SELF ? ownMember : object;
+        if (member === undefined || !this.familyOnlyNames.has(member)) continue;
+        record(member, 'instance variable', name, 'expression');
+        record(member, 'behavior', name, 'expression');
+      }
+    }
+
+    for (const { family, ...use } of found.values()) {
+      if (!this.familyMemberUses.has(family)) this.familyMemberUses.set(family, []);
+      this.familyMemberUses.get(family)!.push(use);
+    }
   }
 
   /** Objects a script action or script event accesses through runtime.objects. */
@@ -382,21 +680,21 @@ export class ProjectIndex {
       this.layoutToEventSheet.set(layoutName, eventSheet);
     }
 
-    // Index object placements from instances on layers and non-world instances
-    if (Array.isArray(layout.layers)) {
-      for (const layer of layout.layers) {
-        if (Array.isArray(layer.instances)) {
-          for (const instance of layer.instances) this.addLayoutPlacement(instance?.type, layoutName);
-        }
-      }
-    }
-    const nonworld = layout['nonworld-instances'];
-    if (Array.isArray(nonworld)) {
-      for (const instance of nonworld) this.addLayoutPlacement(instance?.type, layoutName);
-    }
+    // Index object placements from instances on every layer and sub-layer and
+    // non-world instances, and object properties that hold a SID
+    forEachLayoutInstance(layout, (instance, entry) => {
+      const layer = entry ? layerPathLabel(entry) : undefined;
+      this.addLayoutPlacement(instance.type, layoutName, layer);
+      this.indexInstanceProperties(instance.properties, {
+        layout: layoutName,
+        ...(layer !== undefined ? { layer } : {}),
+        objectType: typeof instance.type === 'string' ? instance.type : String(instance.type),
+        uid: instance.uid,
+      });
+    });
   }
 
-  private addLayoutPlacement(type: unknown, layoutName: string): void {
+  private addLayoutPlacement(type: unknown, layoutName: string, layer: string | undefined): void {
     if (typeof type !== 'string' || type === '') return;
     if (!this.objectToLayouts.has(type)) {
       this.objectToLayouts.set(type, []);
@@ -404,6 +702,30 @@ export class ProjectIndex {
     const layouts = this.objectToLayouts.get(type)!;
     if (!layouts.includes(layoutName)) {
       layouts.push(layoutName);
+    }
+    if (!this.objectPlacements.has(type)) {
+      this.objectPlacements.set(type, []);
+    }
+    const placements = this.objectPlacements.get(type)!;
+    const same = placements.find(p => p.layout === layoutName && p.layer === layer);
+    if (same) {
+      same.instances++;
+    } else {
+      placements.push({ layout: layoutName, ...(layer !== undefined ? { layer } : {}), instances: 1 });
+    }
+  }
+
+  /** Instance property values that are the SID of an object type or family (object properties). */
+  private indexInstanceProperties(properties: unknown, instance: Omit<InstancePropertyReference, 'property'>): void {
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return;
+    for (const [property, value] of Object.entries(properties)) {
+      if (typeof value !== 'number') continue;
+      const name = this.namesBySid.get(value);
+      if (name === undefined) continue;
+      if (!this.objectToInstanceProperties.has(name)) {
+        this.objectToInstanceProperties.set(name, []);
+      }
+      this.objectToInstanceProperties.get(name)!.push({ ...instance, property });
     }
   }
 
@@ -428,15 +750,51 @@ export class ProjectIndex {
     return [...new Set(refs.map(r => r.eventSheet))];
   }
 
+  /** Everything the index knows that refers to an object type (see ObjectUsage). A family counts as used when events or object properties name it. */
+  getObjectUsage(objectName: string): ObjectUsage {
+    const families = [...new Set(this.objectToFamilies.get(objectName) ?? [])];
+    return {
+      events: this.objectToEventSheets.get(objectName) ?? [],
+      placements: this.objectPlacements.get(objectName) ?? [],
+      instanceProperties: this.objectToInstanceProperties.get(objectName) ?? [],
+      families,
+      usedFamilies: families.filter(family =>
+        this.getEventSheetsForObject(family).length > 0 || (this.objectToInstanceProperties.get(family) ?? []).length > 0),
+    };
+  }
+
+  /**
+   * Uses of a family's instance variables and behaviors through its member
+   * object types (see FamilyMemberUse); these break when the family is deleted.
+   */
+  getFamilyMemberUses(familyName: string): FamilyMemberUse[] {
+    return this.familyMemberUses.get(familyName) ?? [];
+  }
+
+  /** The object type or family with this SID, if any (for object properties that store a SID). */
+  objectNameForSid(sid: number): string | undefined {
+    return this.namesBySid.get(sid);
+  }
+
   /**
    * True when an object is used by an event (directly, or through one of its
-   * families) or has an instance in a layout. Objects for which this is false
-   * are the orphaned objects.
+   * families), has an instance in a layout (any layer or sub-layer, or
+   * non-world) or is named by another instance's object property. Objects for
+   * which this is false are the orphaned objects.
    */
   isObjectUsed(objectName: string): boolean {
-    if (this.getEventSheetsForObject(objectName).length > 0) return true;
-    if ((this.objectToLayouts.get(objectName) ?? []).length > 0) return true;
-    return (this.objectToFamilies.get(objectName) ?? []).some(family => this.getEventSheetsForObject(family).length > 0);
+    const usage = this.getObjectUsage(objectName);
+    return usage.events.length > 0 || usage.placements.length > 0 ||
+      usage.instanceProperties.length > 0 || usage.usedFamilies.length > 0;
+  }
+
+  /**
+   * True when deleting the object would leave something that refers to it:
+   * any use (isObjectUsed) or a family membership, even of a family no event
+   * uses. delete_object refuses these objects without force.
+   */
+  isObjectReferenced(objectName: string): boolean {
+    return this.isObjectUsed(objectName) || (this.objectToFamilies.get(objectName) ?? []).length > 0;
   }
 
   /**

@@ -99,11 +99,11 @@ node dist/index.js /path/to/your/project.c3proj
 |------|-------------|
 | `get_eventsheet_flow` | Event sheet include hierarchy and layout bindings (Mermaid or JSON) |
 | `get_function_map` | Function definitions and call sites across event sheets |
-| `get_object_dependencies` | Where objects are used (event sheets, layouts, families) |
-| `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including non-world instances) |
+| `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families) |
+| `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances) |
 | `get_asset_usage` | Track sound, image, font, and video asset usage |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
-| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Some warnings can be false positives (known ones in [API.md](docs/API.md#validate_project)) |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, missing addons, legacy `"behavior-type"` keys, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Some warnings can be false positives (known ones in [API.md](docs/API.md#validate_project)) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 | `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
 | `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
@@ -117,10 +117,10 @@ node dist/index.js /path/to/your/project.c3proj
 |------|-------------|
 | `create_object` | Create a new object type (Sprite, Text, TiledBg, global plugins, etc.); refuses names that clash with an object type or family, ignoring case |
 | `update_object_properties` | Add/remove instance variables and behaviors, change global status |
-| `delete_object` | Delete an object (with reference checking and optional force) |
+| `delete_object` | Delete an object; refused while anything uses it (events, instances on any layer or sub-layer, families), listing where, unless forced |
 | `create_family` | Create a family; refuses name clashes and members of mixed plugins (load-time checked) |
 | `update_family` | Add/remove members and shared instance variables; refuses member changes that mix plugins (load-time checked) |
-| `delete_family` | Delete a family |
+| `delete_family` | Delete a family; refused while events or object properties name it or events use its instance variables or behaviors through a member, listing where, unless forced |
 
 **Event sheets**
 
@@ -147,12 +147,12 @@ Event SIDs are not always unique in editor-saved sheets. The tools that find an 
 | `create_layout` | Create a new layout with configurable layers; refuses names that differ from an existing layout only in case |
 | `update_layout` | Update layout event sheet binding and dimensions |
 | `delete_layout` | Delete a layout (blocks startup layout, checks references) |
-| `add_layer` | Add a layer (position, visibility, transparency, parallax, blend mode); refuses a name used by another layer of the layout, ignoring case |
-| `update_layer` | Rename a layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation; refuses a new name used by another layer, ignoring case |
-| `delete_layer` | Delete a layer (never the last one; blocked while it holds instances unless forced) |
-| `add_instance_to_layout` | Place an object instance on a layout layer with full property control |
-| `update_instance` | Update a placed instance by UID (position, size, angle, color, visibility, tags, instance variables) |
-| `delete_instance_from_layout` | Remove a placed instance by UID (layers and non-world instances) |
+| `add_layer` | Add a layer (position, visibility, transparency, parallax, blend mode); refuses a name any layer or sub-layer of the layout uses, ignoring case |
+| `update_layer` | Rename a layer or sub-layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation; refuses a new name used by another layer or sub-layer, ignoring case |
+| `delete_layer` | Delete a layer or sub-layer with its sub-layers (never the last top-level one; blocked while they hold instances unless forced) |
+| `add_instance_to_layout` | Place an object instance on a layout layer or sub-layer with full property control |
+| `update_instance` | Update a placed instance by UID on any layer or sub-layer (position, size, angle, color, visibility, tags, instance variables) |
+| `delete_instance_from_layout` | Remove a placed instance by UID (layers, sub-layers and non-world instances) |
 
 **Sprite animations**
 
@@ -236,7 +236,7 @@ Steps 2, 4 and 5 apply in full to writes that go through the project writer: obj
 **Close and reopen the project in Construct 3 before saving there.** The editor keeps an open project in memory, so saving from a session that was opened before these edits can overwrite them. Its Project Bar reload (F9) re-reads script files only, not event sheets, layouts or `project.c3proj`. Every response that reports a completed write carries this reminder as `editorNote`. Error responses do not, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
 Additional safeguards:
-- **Reference checking** — `delete_object`, `delete_event_sheet`, and `delete_layout` scan for references before deleting.
+- **Reference checking** — `delete_object`, `delete_family`, `delete_event_sheet`, and `delete_layout` scan for references before deleting.
 - **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error.
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
@@ -388,6 +388,7 @@ construct3-mcp/
 │   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
 │   │   ├── templates.ts            # Object, event sheet, layout templates
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
+│   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
 │   │   ├── names.ts                # Case-insensitive name and folder comparison
 │   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters

@@ -5,6 +5,7 @@
 import type { Construct3ProjectReader } from '../project-reader.js';
 import type { PerformanceIssue, C3Event, BlockEvent, GroupEvent, FunctionBlockEvent } from '../types.js';
 import { getProjectIndex } from './index-builder.js';
+import { forEachLayerInstance } from '../layers.js';
 
 export interface PerformanceResult {
   summary: { critical: number; warning: number; info: number };
@@ -91,13 +92,9 @@ export async function analyzePerformance(
   for (const [layoutName, layout] of layouts) {
     if (scopeLayout && layoutName !== scopeLayout) continue;
 
-    // Check: Layout with > 500 instances
+    // Check: Layout with > 500 instances (on all layers and sub-layers)
     let instanceCount = 0;
-    if (layout.layers) {
-      for (const layer of layout.layers) {
-        instanceCount += layer.instances?.length || 0;
-      }
-    }
+    forEachLayerInstance(layout.layers, () => { instanceCount++; });
     if (instanceCount > 500) {
       issues.push({
         severity: 'warning',
@@ -140,7 +137,7 @@ export async function analyzePerformance(
       severity: 'info',
       category: 'cleanup',
       location: 'project',
-      message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (including non-world instances)`,
+      message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (on any layer or sub-layer, including non-world instances)`,
       suggestion: 'Use find_orphaned_objects to list them. Before removing one, check what this analysis cannot see: ' +
         'project script files, objects created by name at runtime, and script references it does not recognise.',
     });

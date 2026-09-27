@@ -62,7 +62,7 @@ describe('validateProjectIntegrity', () => {
     const result = await validateProjectIntegrity(reader);
     expect(result.valid).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(20);
+    expect(result.summary.checksRun).toBe(21);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 

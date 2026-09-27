@@ -55,6 +55,7 @@ construct3-mcp/
 │   │   ├── id-generator.ts         # SID/UID/imageSpriteId generation with collision avoidance
 │   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
+│   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
 │   │   ├── names.ts                # Case-insensitive name and folder comparison
 │   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
@@ -247,6 +248,7 @@ Tests prove what the files look like, not that Construct 3 accepts them. Before 
 - [ ] `create_layout` with custom layers
 - [ ] `add_instance_to_layout`
 - [ ] `delete_object` with and without force
+- [ ] `delete_family` with and without force
 - [ ] `delete_event_sheet` with and without force
 - [ ] `delete_layout` on non-first layout
 - [ ] `delete_layout` on first layout (must block)
