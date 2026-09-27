@@ -34,7 +34,12 @@ import {
   buildBlockEvent,
   buildCondition,
   buildStandardAction,
-  findEventBySid,
+  resolveEventBySid,
+  parseEventPath,
+  ambiguousSidMessage,
+  eventPathSchema,
+  collectEventSids,
+  eventSidsMatchingSeveral,
   countDescendants,
   summarizeEvents,
   loadBehaviorLookup,
@@ -44,7 +49,7 @@ import {
   checkLoadRulesBeforeSheetPairWrite,
   loadRuleErrorMessage,
 } from './event-helpers.js';
-import type { ObjectRef } from './event-helpers.js';
+import type { ObjectRef, SidMatch } from './event-helpers.js';
 import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/index-builder.js';
 import { scanLegacyBehaviorKeys } from '../construct3/analyzers/legacy-behavior-keys.js';
 import { checkBehaviorName } from '../construct3/analyzers/behavior-refs.js';
@@ -453,10 +458,11 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_from_sheet',
-    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Use get_eventsheet_details to find SIDs.',
+    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       sid: z.number().int().positive().optional().describe('SID of the event to delete (for block, group, variable, function events)'),
+      eventPath: eventPathSchema,
       includeSheet: z.string().max(200).optional().describe('For removing includes: the included sheet name'),
       dryRun: z.boolean().optional().default(false).describe('If true, report what would be deleted without actually deleting'),
       force: z.boolean().optional().default(false).describe('If true, delete function-blocks even if they have callers'),
@@ -466,6 +472,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Validate exactly one identifier
         if ((args.sid === undefined) === (args.includeSheet === undefined)) {
           return toolError('Specify exactly one of: sid (for blocks/groups/variables/functions) or includeSheet (for includes).');
+        }
+        if (args.eventPath !== undefined && args.sid === undefined) {
+          return toolError('eventPath picks one of several events that share a SID; pass it together with sid.');
         }
 
         // Read the event sheet
@@ -525,19 +534,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           });
         }
 
-        // ── SID deletion path ──
-        const found = findEventBySid(events, args.sid!);
+        // ── SID deletion path ── (a SID shared by several events is refused, dry run included)
+        const found = resolveEventBySid(events, args.sid!, {
+          sheetName: args.sheetName,
+          action: 'delete',
+          eventPath: args.eventPath,
+        });
+        if ('error' in found) return toolError(found.error);
 
-        if (!found) {
-          const summary = summarizeEvents(events);
-          return toolError(
-            `Event with SID ${args.sid} not found in sheet "${args.sheetName}".\n\n` +
-            `Sheet "${args.sheetName}" contains ${events.length} top-level events:\n${summary}\n\n` +
-            `Use get_eventsheet_details to see the full event tree with SIDs.`,
-          );
-        }
-
-        const { event, parentArray, index } = found;
+        const { event, parentArray, index, path } = found.match;
         const eventType = event.eventType as string;
         const childCount = countDescendants(event);
 
@@ -574,6 +579,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             action: 'would_delete',
             deletedType: eventType,
             deletedSid: args.sid,
+            eventPath: path,
             childrenCount: childCount,
             ...(eventType === 'group' ? { deletedTitle: event.title as string } : {}),
             ...(eventType === 'function-block' ? { deletedFunction: event.functionName as string } : {}),
@@ -598,6 +604,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           ...result,
           deletedType: eventType,
           deletedSid: args.sid,
+          eventPath: path,
           childrenRemoved: childCount,
         });
       } catch (error) {
@@ -668,10 +675,11 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'update_event_block_action',
-    'Replace parameters on a single action within an existing event block. Identify the block by SID and the action by its 0-based index. Use get_eventsheet_details to find SIDs and action indices. Parameters that would break a checked editor load-time rule (expression syntax, empty expressions) are refused.',
+    'Replace parameters on a single action within an existing event block. Identify the block by SID and the action by its 0-based index. Use get_eventsheet_details to find SIDs and action indices. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Parameters that would break a checked editor load-time rule (expression syntax, empty expressions) are refused.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       blockSid: z.number().int().positive().describe('SID of the block event containing the action'),
+      eventPath: eventPathSchema,
       actionIndex: z.number().int().min(0).describe('0-based index of the action to update'),
       parameters: boundedRecord().describe('New parameter values — replaces existing parameters entirely (max 100 keys, depth 6)'),
     },
@@ -685,18 +693,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         const events = sheet.events as Record<string, unknown>[];
-        const found = findEventBySid(events, args.blockSid);
+        const found = resolveEventBySid(events, args.blockSid, {
+          sheetName: args.sheetName,
+          action: 'update',
+          eventPath: args.eventPath,
+        });
+        if ('error' in found) return toolError(found.error);
 
-        if (!found) {
-          const summary = summarizeEvents(events);
-          return toolError(
-            `Event with SID ${args.blockSid} not found in sheet "${args.sheetName}".\n\n` +
-            `Sheet "${args.sheetName}" contains ${events.length} top-level events:\n${summary}\n\n` +
-            `Use get_eventsheet_details to see the full event tree with SIDs.`,
-          );
-        }
-
-        const { event } = found;
+        const { event, path } = found.match;
         const eventType = event.eventType as string;
 
         if (eventType !== 'block' && eventType !== 'function-block') {
@@ -735,6 +739,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           category: 'eventsheet',
           action: 'updated',
           updatedBlockSid: args.blockSid,
+          eventPath: path,
           updatedActionIndex: args.actionIndex,
           actionId: action.id,
           ...(warnings.length > 0 ? { warnings } : {}),
@@ -751,11 +756,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'move_events_between_sheets',
-    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet.',
+    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet.',
     {
       sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
       targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
-      sids: z.array(z.number().int().positive()).min(1).describe('SIDs of the top-level events to copy/move'),
+      sids: z.array(z.number().int().positive()).min(1).describe('SIDs of the top-level events to copy/move (each SID once)'),
+      eventPaths: z.array(z.string().max(500)).max(100).optional().describe(
+        'Only needed when a SID in sids matches more than one top-level event of the source sheet (the call is then refused with a list of candidates): ' +
+        'the paths of the events you mean, e.g. ["events[4]"], one per ambiguous SID. Each must point at a top-level event whose SID is in sids.',
+      ),
       deleteSource: z.boolean().optional().default(false).describe('If true, remove the events from the source sheet after copying (move semantics). A copy or move that would leave two event variables or function parameters whose names match ignoring case in one scope is refused, e.g. a copy of a global variable (its original keeps the name)'),
       targetGroupPath: z.string().max(500).optional().describe('Insert into a group in the target sheet by title path (e.g. "Movement > Collision")'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert events in the target sheet or group'),
@@ -785,16 +794,57 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const sourceEvents = sourceSheetData.events as Record<string, unknown>[];
         const targetEvents = targetSheetData.events as Record<string, unknown>[];
 
+        // A SID listed twice would copy its event twice
+        const repeated = [...new Set(args.sids.filter((sid, i) => args.sids.indexOf(sid) !== i))];
+        if (repeated.length > 0) {
+          return toolError(
+            `sids lists ${repeated.map(sid => `SID ${sid}`).join(', ')} more than once. List each SID once; ` +
+            'top-level events that share a SID are moved one per call, picked with eventPaths.',
+          );
+        }
+
+        // eventPaths pick one of several top-level events sharing a SID
+        const picked = new Map<number, number>(); // SID → index in the source's top-level events
+        for (const eventPath of args.eventPaths ?? []) {
+          const indices = parseEventPath(eventPath);
+          if (!indices || indices.length !== 1) {
+            return toolError(`eventPaths entry "${eventPath}" is not the path of a top-level event. Only top-level events can be moved; use the form events[3].`);
+          }
+          const event = sourceEvents[indices[0]] as Record<string, unknown> | undefined;
+          const sid = typeof event === 'object' && event !== null ? event.sid : undefined;
+          if (typeof sid !== 'number' || !args.sids.includes(sid)) {
+            const what = typeof event === 'object' && event !== null
+              ? `a ${String(event.eventType)}${typeof sid === 'number' ? ` with SID ${sid}` : ' without a SID'}`
+              : 'no event';
+            return toolError(`eventPaths entry "${eventPath}" points at ${what} in "${args.sourceSheet}", not at an event whose SID is listed in sids.`);
+          }
+          if (picked.has(sid) && picked.get(sid) !== indices[0]) {
+            return toolError(`eventPaths names two events with SID ${sid}. Pick one per SID and move the other in a separate call.`);
+          }
+          picked.set(sid, indices[0]);
+        }
+
         // Find each requested SID in the source top-level events only
         const eventsToMove: Record<string, unknown>[] = [];
         const notFoundSids: number[] = [];
+        const ambiguous: Array<{ sid: number; matches: SidMatch[] }> = [];
 
         for (const sid of args.sids) {
-          const idx = sourceEvents.findIndex(e => e.sid === sid);
-          if (idx === -1) {
+          const pickedIndex = picked.get(sid);
+          if (pickedIndex !== undefined) {
+            eventsToMove.push(sourceEvents[pickedIndex]);
+            continue;
+          }
+          const matches: SidMatch[] = [];
+          sourceEvents.forEach((event, index) => {
+            if (event.sid === sid) matches.push({ event, parentArray: sourceEvents, index, path: `events[${index}]`, depth: 0 });
+          });
+          if (matches.length === 0) {
             notFoundSids.push(sid);
+          } else if (matches.length > 1) {
+            ambiguous.push({ sid, matches });
           } else {
-            eventsToMove.push(sourceEvents[idx]);
+            eventsToMove.push(matches[0].event);
           }
         }
 
@@ -805,6 +855,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             `Only top-level events can be moved. Source sheet events:\n${summary}\n\n` +
             `Use get_eventsheet_details to see the full tree.`,
           );
+        }
+
+        if (ambiguous.length > 0) {
+          return toolError(ambiguous.map(({ sid, matches }) => ambiguousSidMessage(args.sourceSheet, sourceEvents, sid, matches, {
+            action: args.deleteSource ? 'move' : 'copy',
+            argument: 'eventPaths (one entry per ambiguous SID)',
+            scope: 'top-level',
+          })).join('\n\n'));
         }
 
         // Source events are only replaced (never mutated), the target is edited in place
@@ -838,10 +896,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           insertTarget.push(...copiedEvents);
         }
 
-        // If move semantics: remove from source
+        // If move semantics: remove exactly the copied events from source
         if (args.deleteSource) {
-          const sidSet = new Set(args.sids);
-          sourceSheetData.events = sourceEvents.filter(e => !sidSet.has(e.sid as number)) as unknown as C3Event[];
+          const moved = new Set(eventsToMove);
+          sourceSheetData.events = sourceEvents.filter(e => !moved.has(e)) as unknown as C3Event[];
         }
 
         // Event variable names: copies keep their names (the editor renames a
@@ -876,6 +934,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           return toolError(loadRuleErrorMessage(loadCheck.errors));
         }
 
+        // Copies keep their SIDs, so a copied event whose SID the target already
+        // has leaves several events with that SID there. The editor opens such
+        // sheets, so this is a warning, not a refusal.
+        const warnings = [...loadCheck.warnings];
+        const sharedSids = copiedSidsWarning(args.targetSheet, targetSheetData.events as unknown as Record<string, unknown>[], copiedEvents);
+        if (sharedSids) warnings.push(sharedSids);
+
         // Write target sheet first, then source (if modified)
         const targetSubfolder = writer.getSubfolderForEntity('eventSheets', args.targetSheet);
         const targetBackup = await writer.writeEntityFile('eventSheets', args.targetSheet, targetSheetData, targetSubfolder);
@@ -896,7 +961,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           movedCount: eventsToMove.length,
           deleteSource: args.deleteSource,
           backupFiles: [targetBackup, ...(sourceBackup ? [sourceBackup] : [])].filter(Boolean),
-          warnings: loadCheck.warnings.length > 0 ? loadCheck.warnings : undefined,
+          warnings: warnings.length > 0 ? warnings : undefined,
         });
       } catch (error) {
         console.error('[move_events_between_sheets] failed:', error);
@@ -909,10 +974,11 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'update_event_block',
-    'Update an existing block event in an event sheet — modify action parameters, add/remove actions or conditions, toggle disabled state. Identify the block by its SID (use get_eventsheet_details to find it).',
+    'Update an existing block event in an event sheet — modify action parameters, add/remove actions or conditions, toggle disabled state. Identify the block by its SID (use get_eventsheet_details to find it). A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       sid: z.number().int().positive().describe('SID of the block event to update'),
+      eventPath: eventPathSchema,
       disabled: z.boolean().optional().describe('Enable or disable the entire block'),
       updateActions: z.array(z.object({
         index: z.number().int().min(0).describe('Action index (0-based)'),
@@ -954,18 +1020,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const events = sheet.events as Record<string, unknown>[];
         const beforeEvents = snapshotEvents(sheet.events);
-        const found = findEventBySid(events, args.sid);
+        const found = resolveEventBySid(events, args.sid, {
+          sheetName: args.sheetName,
+          action: 'update',
+          eventPath: args.eventPath,
+        });
+        if ('error' in found) return toolError(found.error);
 
-        if (!found) {
-          const summary = summarizeEvents(events);
-          return toolError(
-            `Event with SID ${args.sid} not found in sheet "${args.sheetName}".\n\n` +
-            `Sheet "${args.sheetName}" contains ${events.length} top-level events:\n${summary}\n\n` +
-            `Use get_eventsheet_details to see the full event tree with SIDs.`,
-          );
-        }
-
-        const { event } = found;
+        const { event, path } = found.match;
         const eventType = event.eventType as string;
 
         // Must be a block or function-block (not a group, variable, include, etc.)
@@ -1132,7 +1194,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
         };
-        return toolResult(result);
+        return toolResult({ ...result, eventPath: path });
       } catch (error) {
         console.error('[update_event_block] failed:', error);
         return toolError(`Error updating event block: ${error instanceof Error ? error.message : String(error)}`);
@@ -1278,10 +1340,11 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'update_event_variable',
-    'Update an existing event variable declaration (rename, change type, change initial value)',
+    'Update an existing event variable declaration (rename, change type, change initial value). A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one.',
     {
       sheetName: z.string().max(200).describe('Event sheet containing the variable'),
       sid: z.number().int().describe('SID of the variable event to update'),
+      eventPath: eventPathSchema,
       newName: z.string().max(200).optional().describe('New variable name. Refused like in the editor: a name that matches, ignoring case, an event variable or function parameter in the variable\'s scope (for a global variable: anywhere in the project) or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
       newType: z.enum(['number', 'string', 'boolean']).optional().describe('New variable type'),
       newInitialValue: z.string().max(1000).optional().describe('New initial value (as string — use "0", "false", or "" for defaults)'),
@@ -1304,10 +1367,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         // Find the variable event by SID (search flat and nested)
-        const findResult = findEventBySid(sheet.events as Record<string, unknown>[], args.sid);
-        if (!findResult) {
-          return toolError(`No event with SID ${args.sid} found in sheet "${args.sheetName}".`);
-        }
+        const found = resolveEventBySid(sheet.events as Record<string, unknown>[], args.sid, {
+          sheetName: args.sheetName,
+          action: 'update',
+          eventPath: args.eventPath,
+        });
+        if ('error' in found) return toolError(found.error);
+        const findResult = found.match;
         if (findResult.event.eventType !== 'variable') {
           return toolError(`Event SID ${args.sid} is a "${findResult.event.eventType}" event, not a variable event.`);
         }
@@ -1341,12 +1407,46 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           action: 'updated',
           backupFile: backupPath,
         };
-        return toolResult(result);
+        return toolResult({ ...result, eventPath: findResult.path });
       } catch (error) {
         console.error('[update_event_variable] failed:', error);
         return toolError(`Error updating event variable: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+  );
+}
+
+/** SIDs listed in the copied-SIDs warning; the rest are counted. */
+const MAX_LISTED_SHARED_SIDS = 10;
+
+/**
+ * Warning for events copied into a sheet (already inserted there) whose SIDs,
+ * or those of their sub-events, now match more than one event of that sheet,
+ * or undefined when every copied SID is unique there. Such SIDs are refused by
+ * the SID-based tools in that sheet unless an eventPath picks one.
+ */
+function copiedSidsWarning(
+  sheetName: string,
+  sheetEvents: Record<string, unknown>[],
+  copiedEvents: Record<string, unknown>[],
+): string | undefined {
+  let shared: Map<number, string[]>;
+  try {
+    shared = eventSidsMatchingSeveral(sheetEvents, collectEventSids(copiedEvents));
+  } catch {
+    return undefined; // Past the traversal limits: skip the warning, it must not block the write
+  }
+  if (shared.size === 0) return undefined;
+
+  const entries = [...shared].map(([sid, paths]) => `SID ${sid} at ${paths.join(', ')}`);
+  const listed = entries.slice(0, MAX_LISTED_SHARED_SIDS).join('; ');
+  const more = entries.length > MAX_LISTED_SHARED_SIDS ? `; and ${entries.length - MAX_LISTED_SHARED_SIDS} more` : '';
+  const one = shared.size === 1;
+  return (
+    `${one ? 'A SID' : `${shared.size} SIDs`} of the copied events now ${one ? 'matches' : 'match'} more than one event in "${sheetName}", ` +
+    `because copied events keep their SIDs: ${listed}${more}. ` +
+    `update_event_block, update_event_block_action, update_event_variable and delete_event_from_sheet refuse ${one ? 'this SID' : 'these SIDs'} ` +
+    `in "${sheetName}" unless eventPath names one of the events.`
   );
 }
 

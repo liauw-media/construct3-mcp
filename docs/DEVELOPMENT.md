@@ -180,7 +180,7 @@ server.tool(
 
 Key things to know when working with Construct 3 project files:
 
-- **SIDs** are ~15-digit random integers. The editor refuses to open a project in which two object types or families share a SID, and its loader also checks function parameter SIDs; duplicates among events, conditions, actions and layout instances are common in editor-saved projects and open fine (see `classifySidDuplicate()` in `load-rules.ts`). New SIDs are still generated unique across the whole project
+- **SIDs** are ~15-digit random integers. The editor refuses to open a project in which two object types or families share a SID, and its loader also checks function parameter SIDs; duplicates among events, conditions, actions and layout instances are common in editor-saved projects and open fine (see `classifySidDuplicate()` in `load-rules.ts`). New SIDs from `IdGenerator` are still checked against every SID in the project, but events copied by `move_events_between_sheets` keep theirs. Look events up with `findEventsBySid` / `resolveEventBySid` in `src/tools/event-helpers.ts`, never with a first-match `find(e => e.sid === sid)`
 - **UIDs** are sequential integers, only on layout instances and singleglobal-inst objects
 - **Names**: the editor compares event sheet, layout, object type/family, layer, animation, event variable and project-bar folder names ignoring case (timeline names exactly); entity files are named after the entity, so names that differ only in case share one file on Windows and macOS. Compare with `findNameClash` / `findFolderPathClash` in `names.ts`
 - **Cross-references are by NAME** — event sheets reference objects as `"objectClass": "Name"`, layouts as `"type": "Name"`

@@ -223,7 +223,7 @@ Returns `{ valid, summary, errors, warnings, info }`; each issue has `check`, `e
 | `trigger-placement` | error / warning | Only one trigger per event, unless it is an OR block (`"isOrBlock": true` on the event), which may hold several. A branch holds one trigger: no trigger in a sub-event of a triggered event, of a function block or of a custom action block. Both fail with *cannot add another trigger to event branch*. Groups are transparent. A trigger that is not the first condition of its event is a warning: the editor moves it to the top when it opens the project. Triggers are conditions whose id starts with `on-`; the editor counts fake triggers (*On collision*, Timer *On timer*, Gamepad buttons) as triggers too. Problems involving third-party addon triggers are warnings, since those addons do not always follow the `on-` convention. |
 | `duplicate-object-name` | error | Object types and families share one name namespace that ignores case. A name listed twice in the `project.c3proj` objectTypes or families tree, two names that differ only in case, and a family named like an object type all fail with *object class name 'X' already used*. |
 | `family-plugin-mismatch` | error / warning | Every member of a family must use the same plugin; a mixed family fails with *wrong plugin* (error). Members that agree with each other but not with the family's `plugin-id` are a warning. |
-| `duplicate-sid` | error / warning | Two object types or families sharing a SID fail with *object class sid already in use* (error). A SID shared by behaviors or instance variables of object type or family files is a warning: SIDs should be unique, but no load failure is on record for this clash, and the editor's loader checks only object type and family SIDs. Animation and frame SIDs repeated across object types are warnings: a Scirra example project does this and opens. SIDs shared by events, conditions, actions or layout instances are warnings: editor-saved projects contain such duplicates and open, and the editor keeps them when it saves, so re-saving does not fix them. A clash involving a function or custom action parameter is a warning that may break loading, since the loader checks function parameter SIDs. Event sheet locations name the event path and the condition/action index (e.g. `eventSheets/Sheet1 > block (sid 12) > action 0 "wait" (System)`); a SID used more than five times lists the first five locations and a count per file. Layout `instanceFolderItem` SIDs legitimately repeat the instance SID and are not checked. |
+| `duplicate-sid` | error / warning | Two object types or families sharing a SID fail with *object class sid already in use* (error). A SID shared by behaviors or instance variables of object type or family files is a warning: SIDs should be unique, but no load failure is on record for this clash, and the editor's loader checks only object type and family SIDs. Animation and frame SIDs repeated across object types are warnings: a Scirra example project does this and opens. SIDs shared by events, conditions, actions or layout instances are warnings: editor-saved projects contain such duplicates and open, and the editor keeps them when it saves, so re-saving does not fix them. A clash involving a function or custom action parameter is a warning that may break loading, since the loader checks function parameter SIDs. Event sheet locations name the event path and the condition/action index (e.g. `eventSheets/Sheet1 > block (sid 12) > action 0 "wait" (System)`), and an event's own location ends with its JSON path (`eventSheets/Sheet1 > block (sid 12) at events[0].children[1]`), so events sharing a SID under the same parent can be told apart. When events in one sheet share a SID, whatever else also uses it, the suggestion adds that the SID-based event tools refuse it there unless `eventPath` names one of them (see [Events that share a SID](#mutation-tools)); a SID used more than five times lists the first five locations and a count per file, and the paths of the others come from the refused tool call or [`locate_event`](#locate_event). Layout `instanceFolderItem` SIDs legitimately repeat the instance SID and are not checked. |
 
 **Known false positives.** Projects that open fine in Construct 3 can still get these reports; the first one makes `valid` false:
 - Construct 3 itself writes a subfolder without a `name` into `timelines` (its Transitions folder, see [`list_timelines`](#list_timelines)), which is reported as a `subfolder-structure` error.
@@ -377,6 +377,8 @@ Mutation tools that write through the project writer (objects, families, event s
 **Names and file names.** Entity files are named after the entity (`<category>/<folders>/<name>.json`, folders mirroring the project bar), and on Windows and macOS names that differ only in case name the same file. Create and rename tools therefore compare names the way the Construct 3 editor does: event sheet and layout names project-wide ignoring case, object type and family names in one namespace ignoring case, layer names per layout ignoring case (sub-layers included; the editor cannot load a layout with two such layers), animation names per sprite ignoring case (in any animation folder), event variable names ignoring case within the variable's scope (see [Event variable names](#event-variable-names)), and sibling project-bar folders (`subfolder` segments) ignoring case — a case-only clash is refused with an error naming the existing entity or folder. Create tools also refuse to write an entity JSON file or a timeline file where one already exists, including one whose name differs only in case; nothing is backed up or replaced, and the error says to choose another name or, for a leftover of a deleted entity, to check and remove the file first. Placeholder PNGs are not covered: `create_object` and the animation tools write them over an image file of the same name in `images/`. Rewrites of an existing file keep its name on disk exactly, including case, and the `.bak` backup takes that name.
 
 **Editor reload note.** Every response that reports a completed write includes `editorNote`: *"If this project is open in Construct 3, close and reopen it there before saving, or the editor can overwrite these changes."* The editor keeps an open project in memory, so saving from a session opened before the edit can overwrite it; its Project Bar reload (F9) re-reads script files only. A `WriteResult` with `success: true` counts as a write unless it is a dry run. Tools whose success does not imply a write carry no note: the `already_registered` no-op of `register_addon`, `fix_legacy_behavior_keys` with `dryRun: false` when it found nothing to rename, `clone_project`, and `export_for_preview` / `pack_project` with `injectBridge: false`. Error responses never carry the note, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
+
+**Events that share a SID.** Event SIDs are not guaranteed to be unique: editor-saved sheets can contain two events with the same SID, and they open in the editor. The tools that find an event by SID (`delete_event_from_sheet`, `update_event_block`, `update_event_block_action`, `update_event_variable`, and `move_events_between_sheets` for top-level events) refuse a SID that matches more than one event in the sheet, dry runs included, and write nothing. The error lists the matches in document order (the first 20, then a count of the rest): each one's JSON path (e.g. `events[3].children[1]`, the format [`locate_event`](#locate_event) returns), editor event number, enclosing group and function or parent event, and a one-line summary. Pass the path of the event you mean as `eventPath` (`eventPaths` for `move_events_between_sheets`) to act on it; the path must point at an event with that SID, or the call is refused. A unique SID works without `eventPath`, as before. The results of the single-event tools include the `eventPath` of the event they acted on. [`validate_project`](#validate_project) reports such SIDs as `duplicate-sid` warnings that name the same paths.
 
 ### `create_object`
 
@@ -586,6 +588,7 @@ Delete an event from an event sheet by SID or include name.
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
 | `sid` | number | No* | SID of the event to delete (block, group, variable, function) |
+| `eventPath` | string | No | With `sid`: picks one of several events that share the SID, e.g. `"events[3].children[1]"` (see [Events that share a SID](#mutation-tools)) |
 | `includeSheet` | string | No* | For removing includes: the included sheet name |
 | `dryRun` | boolean | No | Preview what would be deleted without deleting (default: false) |
 | `force` | boolean | No | Delete function-blocks even if they have callers (default: false) |
@@ -593,7 +596,7 @@ Delete an event from an event sheet by SID or include name.
 *Exactly one of `sid` or `includeSheet` must be provided.
 
 **Behavior:**
-- **SID deletion**: Finds the event anywhere in the tree (including nested inside groups) using iterative traversal. Reports children count for groups, checks function callers for function-blocks.
+- **SID deletion**: Finds the event anywhere in the tree (including nested inside groups) using iterative traversal. Reports children count for groups, checks function callers for function-blocks. A SID shared by several events is refused, also with `dryRun`, unless `eventPath` picks one; the result names the deleted event's `eventPath`.
 - **Include deletion**: Finds and removes the include event by sheet name. Lists current includes in error messages.
 - **Dry run**: Returns a preview of what would be deleted without writing changes.
 - **Function safety**: Blocks deletion of function-blocks that have callers (unless `force=true`).
@@ -607,6 +610,7 @@ Update an existing block event — modify action parameters, add/remove actions 
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
 | `sid` | number | Yes | SID of the block event to update |
+| `eventPath` | string | No | Picks one of several events that share the SID (see [Events that share a SID](#mutation-tools)) |
 | `disabled` | boolean | No | Enable or disable the entire block |
 | `updateActions` | array | No | `[{ index, parameters?, disabled? }]` — update actions by index (merge semantics) |
 | `updateConditions` | array | No | `[{ index, parameters?, isInverted? }]` — update conditions by index |
@@ -640,6 +644,7 @@ Replace the parameters of a single action. The block is found by SID anywhere in
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Target event sheet |
 | `blockSid` | number | Yes | SID of the `block` or `function-block` holding the action |
+| `eventPath` | string | No | Picks one of several events that share the SID (see [Events that share a SID](#mutation-tools)) |
 | `actionIndex` | number | Yes | 0-based action index |
 | `parameters` | object | Yes | New parameter values; replaces the existing `parameters` entirely (max 100 keys, depth 6) |
 
@@ -653,6 +658,7 @@ Update an event variable declaration found by SID.
 |-----------|------|----------|-------------|
 | `sheetName` | string | Yes | Event sheet containing the variable |
 | `sid` | number | Yes | SID of the `variable` event |
+| `eventPath` | string | No | Picks one of several events that share the SID (see [Events that share a SID](#mutation-tools)) |
 | `newName` | string | No | New name (checked, see [Event variable names](#event-variable-names)) |
 | `newType` | `"number"` \| `"string"` \| `"boolean"` | No | New type |
 | `newInitialValue` | string | No | New initial value, as a string |
@@ -669,7 +675,8 @@ Copy top-level events from one sheet to another by SID; with `deleteSource` they
 |-----------|------|----------|-------------|
 | `sourceSheet` | string | Yes | Sheet to copy/move from |
 | `targetSheet` | string | Yes | Sheet to copy/move into (must differ from the source) |
-| `sids` | number[] | Yes | SIDs of top-level events in the source sheet (min 1) |
+| `sids` | number[] | Yes | SIDs of top-level events in the source sheet (min 1, each SID once) |
+| `eventPaths` | string[] | No | Paths of top-level events (`"events[4]"`) that pick one of several top-level events sharing a SID in `sids`, one per such SID (see [Events that share a SID](#mutation-tools)) |
 | `deleteSource` | boolean | No | Remove the events from the source after copying (default: false) |
 | `targetGroupPath` | string | No | Insert into a group by title path (e.g. `"Movement > Collision"`) |
 | `position` | `"start"` \| `"end"` | No | Insert position (default: end) |
@@ -678,7 +685,11 @@ Copied and moved events keep their event variable and function parameter names. 
 
 Runs the load-time gate (see [`add_event_block`](#add_event_block)) over the source and target sheets together, before anything is written. Moving an event that already breaks a load-time rule only relocates the problem and is allowed; copying it (`deleteSource: false`) adds the problem to a second sheet, so a copied error is refused and a copied warning is returned in `warnings`.
 
-Returns `movedSids`, `movedCount`, `backupFiles` (target first, then source when modified) and new load-time `warnings`, if any.
+Only top-level events count: a SID shared by two top-level events of the source is refused unless `eventPaths` picks one, while a nested event with the same SID does not make it ambiguous. `deleteSource` removes exactly the copied events. A SID listed twice in `sids` is refused; top-level events that share a SID are moved one per call.
+
+Copied events keep their SIDs. When a copied event, or one of its sub-events, has a SID that another event of the target sheet already has (for example, the same event copied twice), the copy is still written, since the editor opens such sheets, and `warnings` names each such SID with the paths of its events there: the SID-based event tools then refuse it in the target sheet unless `eventPath` picks one.
+
+Returns `movedSids`, `movedCount`, `backupFiles` (target first, then source when modified) and `warnings`, if any: new load-time warnings and the shared-SID warning.
 
 ### `remove_event_from_sheet`
 

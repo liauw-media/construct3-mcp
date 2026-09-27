@@ -2476,3 +2476,382 @@ describe('move_events_between_sheets load-time gate', () => {
     expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 });
+
+// ─── Duplicate event SIDs (issue #30) ─────────────────────
+
+describe('SID-addressed tools with duplicate event SIDs (issue #30)', () => {
+  const DUP = 400000000000099;
+  const cond = (sid: number, value: string) => ({
+    id: 'compare-instance-variable', objectClass: 'Player', sid,
+    parameters: { 'instance-variable': 'health', comparison: 0, value },
+  });
+  const act = (sid: number, x: string) => ({ id: 'set-x', objectClass: 'Player', sid, parameters: { x } });
+
+  /** Groups Movement and Combat each hold a block with SID DUP (1 and 2 conditions), plus a unique block. */
+  function dupSheet() {
+    return {
+      name: 'Sheet1', sid: 1,
+      events: [
+        {
+          eventType: 'group', sid: 10, title: 'Movement', children: [
+            { eventType: 'block', sid: DUP, conditions: [cond(101, '1')], actions: [act(102, '10')] },
+          ],
+        },
+        {
+          eventType: 'group', sid: 20, title: 'Combat', children: [
+            { eventType: 'block', sid: DUP, conditions: [cond(201, '2'), cond(202, '3')], actions: [act(203, '20')] },
+          ],
+        },
+        { eventType: 'block', sid: 300, conditions: [cond(301, '4')], actions: [act(302, '30')] },
+      ],
+    } as any;
+  }
+
+  function setupDup() {
+    const sheet = dupSheet();
+    const pristine = JSON.parse(JSON.stringify(sheet));
+    const ctx = setup({ eventSheets: new Map([['Sheet1', sheet]]) });
+    return { ...ctx, sheet, pristine };
+  }
+
+  function expectRefused(result: any, ctx: ReturnType<typeof setupDup>, action: string) {
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text as string;
+    expect(text).toContain(`SID ${DUP} matches 2 events in sheet "Sheet1"; refusing to guess which one to ${action}.`);
+    expect(text).toContain('eventPath "events[0].children[0]": event 2, in group "Movement"');
+    expect(text).toContain('eventPath "events[1].children[0]": event 4, in group "Combat"');
+    expect(ctx.writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(ctx.sheet).toEqual(ctx.pristine);
+  }
+
+  const written = (writer: MockWriter, sheetName = 'Sheet1') =>
+    writer.callsFor('writeEntityFile').find(c => c.args[1] === sheetName)!.args[2] as any;
+
+  it('update_event_block refuses an ambiguous SID and lists both candidates', async () => {
+    const ctx = setupDup();
+    const result = await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: DUP, disabled: true });
+    expectRefused(result, ctx, 'update');
+  });
+
+  it('update_event_block edits the event eventPath picks', async () => {
+    const { server, writer } = setupDup();
+    const result = await server.callTool('update_event_block', {
+      sheetName: 'Sheet1', sid: DUP, eventPath: 'events[1].children[0]', disabled: true,
+    });
+    const data = parseResult(result);
+    expect(data.success).toBe(true);
+    expect(data.eventPath).toBe('events[1].children[0]');
+    const events = written(writer).events;
+    expect(events[0].children[0].disabled).toBeUndefined();
+    expect(events[1].children[0].disabled).toBe(true);
+  });
+
+  it('update_event_block_action refuses an ambiguous SID and edits the event eventPath picks', async () => {
+    const ctx = setupDup();
+    const refused = await ctx.server.callTool('update_event_block_action', {
+      sheetName: 'Sheet1', blockSid: DUP, actionIndex: 0, parameters: { x: '99' },
+    });
+    expectRefused(refused, ctx, 'update');
+
+    const result = await ctx.server.callTool('update_event_block_action', {
+      sheetName: 'Sheet1', blockSid: DUP, eventPath: 'events[0].children[0]', actionIndex: 0, parameters: { x: '99' },
+    });
+    expect(parseResult(result).eventPath).toBe('events[0].children[0]');
+    const events = written(ctx.writer).events;
+    expect(events[0].children[0].actions[0].parameters).toEqual({ x: '99' });
+    expect(events[1].children[0].actions[0].parameters).toEqual({ x: '20' });
+  });
+
+  it('delete_event_from_sheet refuses an ambiguous SID, with and without dryRun', async () => {
+    for (const dryRun of [false, true]) {
+      const ctx = setupDup();
+      const result = await ctx.server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: DUP, dryRun });
+      expectRefused(result, ctx, 'delete');
+    }
+  });
+
+  it('delete_event_from_sheet deletes only the event eventPath picks', async () => {
+    const { server, writer } = setupDup();
+    const preview = parseResult(await server.callTool('delete_event_from_sheet', {
+      sheetName: 'Sheet1', sid: DUP, eventPath: 'events[1].children[0]', dryRun: true,
+    }));
+    expect(preview.action).toBe('would_delete');
+    expect(preview.eventPath).toBe('events[1].children[0]');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+
+    const data = parseResult(await server.callTool('delete_event_from_sheet', {
+      sheetName: 'Sheet1', sid: DUP, eventPath: 'events[1].children[0]',
+    }));
+    expect(data.success).toBe(true);
+    expect(data.eventPath).toBe('events[1].children[0]');
+    const events = written(writer).events;
+    expect(events[0].children).toHaveLength(1);
+    expect(events[0].children[0].conditions).toHaveLength(1);
+    expect(events[1].children).toHaveLength(0);
+  });
+
+  it('delete_event_from_sheet only takes eventPath together with sid', async () => {
+    const { server, writer } = setupDup();
+    const result = await server.callTool('delete_event_from_sheet', {
+      sheetName: 'Sheet1', includeSheet: 'Other', eventPath: 'events[0]',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('pass it together with sid');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('refuses an eventPath that does not point at an event with the SID', async () => {
+    const ctx = setupDup();
+    for (const [eventPath, expected] of [
+      ['events[0]', 'it points at a group with SID 10'],
+      ['events[2]', 'it points at a block with SID 300'],
+      ['events[5].children[0]', 'no event exists at that path'],
+      ['events[0].children[0].actions[0]', 'is not an event path'],
+    ]) {
+      const result = await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: DUP, eventPath, disabled: true });
+      expect(result.isError, eventPath).toBe(true);
+      expect(result.content[0].text).toContain(expected);
+    }
+    expect(ctx.writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(ctx.sheet).toEqual(ctx.pristine);
+  });
+
+  it('refuses a top-level duplicate followed by a nested one in a later group', async () => {
+    const sheet = {
+      name: 'Sheet1', sid: 1,
+      events: [
+        { eventType: 'block', sid: DUP, conditions: [cond(101, '1')], actions: [] },
+        { eventType: 'group', sid: 20, title: 'Combat', children: [
+          { eventType: 'block', sid: DUP, conditions: [cond(201, '2')], actions: [] },
+        ] },
+      ],
+    };
+    const { server, writer } = setup({ eventSheets: new Map([['Sheet1', sheet]]) });
+    const result = await server.callTool('update_event_block', { sheetName: 'Sheet1', sid: DUP, disabled: true });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('eventPath "events[0]": event 1, top level');
+    expect(result.content[0].text).toContain('eventPath "events[1].children[0]": event 3, in group "Combat"');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+  });
+
+  it('keeps working without eventPath for a unique SID in the same sheet', async () => {
+    const ctx = setupDup();
+    const updated = parseResult(await ctx.server.callTool('update_event_block', { sheetName: 'Sheet1', sid: 300, disabled: true }));
+    expect(updated.success).toBe(true);
+    expect(updated.eventPath).toBe('events[2]');
+    expect(written(ctx.writer).events[2].disabled).toBe(true);
+
+    const deleted = parseResult(await ctx.server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 300 }));
+    expect(deleted.success).toBe(true);
+    expect(deleted.deletedSid).toBe(300);
+    const after = ctx.writer.callsFor('writeEntityFile')[1].args[2] as any;
+    expect(after.events).toHaveLength(2);
+    expect(after.events[0].children).toHaveLength(1);
+    expect(after.events[1].children).toHaveLength(1);
+  });
+
+  it('update_event_variable refuses two variables sharing a SID and renames the one eventPath picks', async () => {
+    const sheet = {
+      name: 'Sheet1', sid: 1,
+      events: [
+        { eventType: 'variable', name: 'score', type: 'number', initialValue: '0', sid: DUP },
+        { eventType: 'group', sid: 20, title: 'Combat', children: [
+          { eventType: 'variable', name: 'lives', type: 'number', initialValue: '3', sid: DUP },
+        ] },
+      ],
+    };
+    const pristine = JSON.parse(JSON.stringify(sheet));
+    const { server, writer } = setup({ eventSheets: new Map([['Sheet1', sheet]]) });
+
+    const refused = await server.callTool('update_event_variable', { sheetName: 'Sheet1', sid: DUP, newName: 'total' });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('matches 2 events');
+    expect(refused.content[0].text).toContain('eventPath "events[0]": variable (no event number), top level: VAR score: number = 0');
+    expect(refused.content[0].text).toContain('eventPath "events[1].children[0]": variable (no event number), in group "Combat": VAR lives');
+    expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    expect(sheet).toEqual(pristine);
+
+    // The name check tells the two apart by identity, not by their shared SID
+    const clash = await server.callTool('update_event_variable', {
+      sheetName: 'Sheet1', sid: DUP, eventPath: 'events[1].children[0]', newName: 'score',
+    });
+    expect(clash.isError).toBe(true);
+    expect(clash.content[0].text).toContain('already exists');
+
+    const renamed = parseResult(await server.callTool('update_event_variable', {
+      sheetName: 'Sheet1', sid: DUP, eventPath: 'events[1].children[0]', newName: 'total',
+    }));
+    expect(renamed.success).toBe(true);
+    expect(renamed.eventPath).toBe('events[1].children[0]');
+    const events = written(writer).events;
+    expect(events[0].name).toBe('score');
+    expect(events[1].children[0].name).toBe('total');
+  });
+
+  describe('move_events_between_sheets', () => {
+    function setupMove() {
+      const source = {
+        name: 'SourceSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: DUP, conditions: [cond(101, '1')], actions: [] },
+          { eventType: 'block', sid: 200, conditions: [cond(201, '2')], actions: [] },
+          { eventType: 'block', sid: DUP, conditions: [cond(301, '3'), cond(302, '4')], actions: [] },
+        ],
+      };
+      const pristine = JSON.parse(JSON.stringify(source));
+      const ctx = setup({
+        eventSheets: new Map<string, any>([
+          ['SourceSheet', source],
+          ['TargetSheet', { name: 'TargetSheet', sid: 2, events: [] }],
+        ]),
+      });
+      return { ...ctx, source, pristine };
+    }
+
+    it('refuses a SID shared by two top-level events and writes nothing', async () => {
+      const { server, writer, source, pristine } = setupMove();
+      const result = await server.callTool('move_events_between_sheets', {
+        sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [DUP], deleteSource: true,
+      });
+      expect(result.isError).toBe(true);
+      const text = result.content[0].text;
+      expect(text).toContain(`SID ${DUP} matches 2 top-level events in sheet "SourceSheet"; refusing to guess which one to move.`);
+      expect(text).toContain('eventPath "events[0]": event 1, top level');
+      expect(text).toContain('eventPath "events[2]": event 3, top level');
+      expect(text).toContain('eventPaths');
+      expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+      expect(source).toEqual(pristine);
+      expect(source.events).toHaveLength(3);
+    });
+
+    it('moves only the event eventPaths picks', async () => {
+      const { server, writer } = setupMove();
+      const data = parseResult(await server.callTool('move_events_between_sheets', {
+        sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [DUP, 200], eventPaths: ['events[2]'], deleteSource: true,
+      }));
+      expect(data.success).toBe(true);
+      expect(data.movedCount).toBe(2);
+      const target = written(writer, 'TargetSheet').events;
+      expect(target.map((e: any) => e.sid)).toEqual([DUP, 200]);
+      expect(target[0].conditions).toHaveLength(2);
+      const source = written(writer, 'SourceSheet').events;
+      expect(source).toHaveLength(1);
+      expect(source[0].sid).toBe(DUP);
+      expect(source[0].conditions).toHaveLength(1);
+    });
+
+    it('refuses a SID listed twice', async () => {
+      const { server, writer } = setupMove();
+      const result = await server.callTool('move_events_between_sheets', {
+        sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [200, 200],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('sids lists SID 200 more than once');
+      expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    });
+
+    it('refuses eventPaths that are not top-level events with a listed SID', async () => {
+      const { server, writer } = setupMove();
+      for (const [eventPaths, expected] of [
+        [['events[0].children[0]'], 'is not the path of a top-level event'],
+        [['events[1]'], 'points at a block with SID 200'],
+        [['events[7]'], 'points at no event'],
+        [['events[0]', 'events[2]'], `names two events with SID ${DUP}`],
+      ] as Array<[string[], string]>) {
+        const result = await server.callTool('move_events_between_sheets', {
+          sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [DUP], eventPaths, deleteSource: true,
+        });
+        expect(result.isError, eventPaths.join()).toBe(true);
+        expect(result.content[0].text).toContain(expected);
+      }
+      expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
+    });
+
+    it('does not count a nested event with the same SID (only top-level events move)', async () => {
+      const source = {
+        name: 'SourceSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: DUP, conditions: [cond(101, '1')], actions: [] },
+          { eventType: 'group', sid: 20, title: 'Combat', children: [
+            { eventType: 'block', sid: DUP, conditions: [cond(201, '2')], actions: [] },
+          ] },
+        ],
+      };
+      const { server, writer } = setup({
+        eventSheets: new Map<string, any>([
+          ['SourceSheet', source],
+          ['TargetSheet', { name: 'TargetSheet', sid: 2, events: [] }],
+        ]),
+      });
+      const data = parseResult(await server.callTool('move_events_between_sheets', {
+        sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [DUP], deleteSource: true,
+      }));
+      expect(data.success).toBe(true);
+      const remaining = written(writer, 'SourceSheet').events;
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].children).toHaveLength(1);
+    });
+
+    it('warns when copied events keep SIDs the target sheet already has, and still writes the copy', async () => {
+      const source = {
+        name: 'SourceSheet', sid: 1,
+        events: [
+          { eventType: 'block', sid: 500, conditions: [cond(501, '1')], actions: [], children: [
+            { eventType: 'block', sid: 510, conditions: [cond(511, '2')], actions: [] },
+          ] },
+          { eventType: 'block', sid: 520, conditions: [cond(521, '3')], actions: [] },
+        ],
+      };
+      const target = {
+        name: 'TargetSheet', sid: 2,
+        events: [
+          { eventType: 'block', sid: 500, conditions: [cond(601, '4')], actions: [] },
+          { eventType: 'group', sid: 60, title: 'Combat', children: [
+            { eventType: 'block', sid: 510, conditions: [cond(611, '5')], actions: [] },
+          ] },
+        ],
+      };
+      const { server, writer } = setup({
+        eventSheets: new Map<string, any>([['SourceSheet', source], ['TargetSheet', target]]),
+      });
+      const data = parseResult(await server.callTool('move_events_between_sheets', {
+        sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [500, 520], deleteSource: true,
+      }));
+      expect(data.success).toBe(true);
+      expect(data.warnings).toHaveLength(1);
+      const warning = data.warnings[0] as string;
+      expect(warning).toContain('2 SIDs of the copied events now match more than one event in "TargetSheet", because copied events keep their SIDs');
+      expect(warning).toContain('SID 500 at events[0], events[2]; SID 510 at events[1].children[0], events[2].children[0].');
+      expect(warning).not.toContain('SID 520');
+      expect(warning).toContain('refuse these SIDs in "TargetSheet" unless eventPath names one of the events');
+      expect(written(writer, 'TargetSheet').events.map((e: any) => e.sid)).toEqual([500, 60, 500, 520]);
+
+      // As warned, the SID tools now need eventPath for that SID in the target
+      const refused = await server.callTool('update_event_block', { sheetName: 'TargetSheet', sid: 500, disabled: true });
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain('SID 500 matches 2 events in sheet "TargetSheet"');
+      const picked = parseResult(await server.callTool('update_event_block', {
+        sheetName: 'TargetSheet', sid: 500, eventPath: 'events[2]', disabled: true,
+      }));
+      expect(picked.eventPath).toBe('events[2]');
+    });
+
+    it('warns when the same event is copied into a sheet a second time', async () => {
+      const { server } = setupMove();
+      const copy = () => server.callTool('move_events_between_sheets', {
+        sourceSheet: 'SourceSheet', targetSheet: 'TargetSheet', sids: [200],
+      });
+      const first = parseResult(await copy());
+      expect(first.success).toBe(true);
+      expect(first.warnings).toBeUndefined();
+
+      const second = parseResult(await copy());
+      expect(second.success).toBe(true);
+      expect(second.warnings).toEqual([
+        'A SID of the copied events now matches more than one event in "TargetSheet", because copied events keep their SIDs: ' +
+        'SID 200 at events[0], events[1]. update_event_block, update_event_block_action, update_event_variable and delete_event_from_sheet ' +
+        'refuse this SID in "TargetSheet" unless eventPath names one of the events.',
+      ]);
+    });
+  });
+});

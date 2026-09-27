@@ -576,43 +576,64 @@ function checkDuplicateSids(
     const used = describeSidUse(sid, locations);
     const entity = locations[0].location;
     const impact = classifySidDuplicate(locations.map(l => l.kind));
+    // Whatever else shares the SID, several events with it in one sheet make the SID-based event tools refuse it there
+    const toolNote = eventToolNote(locations);
     if (impact === 'object-class') {
       errors.push({
         check: 'duplicate-sid',
         entity,
         message: `${used}. Object types and families need project-unique SIDs; Construct 3 fails to open the project with "object class sid already in use".`,
-        suggestion: 'Give each object type and family its own project-unique SID.',
+        suggestion: `Give each object type and family its own project-unique SID.${toolNote}`,
       });
     } else if (impact === 'parameter') {
       warnings.push({
         check: 'duplicate-sid',
         entity,
         message: `${used}. Parameter SIDs should be unique across the project: the editor's loader checks function parameter SIDs for uniqueness, so this clash may stop the project from opening.`,
-        suggestion: 'Give each function and custom action parameter its own project-unique SID.',
+        suggestion: `Give each function and custom action parameter its own project-unique SID.${toolNote}`,
       });
     } else if (impact === 'object-file') {
       warnings.push({
         check: 'duplicate-sid',
         entity,
         message: `${used}. SIDs in object type and family files should be unique across the project. No load failure is on record for this clash: the editor's loader checks only object type and family SIDs.`,
-        suggestion: 'Give each behavior and instance variable its own project-unique SID.',
+        suggestion: `Give each behavior and instance variable its own project-unique SID.${toolNote}`,
       });
     } else if (impact === 'event-or-instance') {
       warnings.push({
         check: 'duplicate-sid',
         entity,
         message: `${used}. No load failure is on record for duplicate event, condition, action or layout instance SIDs, and the editor keeps them when it saves the project.`,
-        suggestion: 'Give all but one of these nodes a new project-unique SID. Re-saving in Construct 3 does not change them.',
+        suggestion: `Give all but one of these nodes a new project-unique SID. Re-saving in Construct 3 does not change them.${toolNote}`,
       });
     } else {
       warnings.push({
         check: 'duplicate-sid',
         entity,
         message: `${used}. SIDs should be unique across the project. No load failure is on record for this clash: the editor's loader checks only object type, family and function parameter SIDs.`,
-        suggestion: 'Give all but one of these a new project-unique SID. Re-saving in Construct 3 does not change existing SIDs.',
+        suggestion: `Give all but one of these a new project-unique SID. Re-saving in Construct 3 does not change existing SIDs.${toolNote}`,
       });
     }
   }
+}
+
+/**
+ * The note for a duplicate-sid suggestion when several events in one sheet
+ * share the SID: the tools that find an event by SID refuse it there unless an
+ * eventPath picks one. Empty when each sheet has at most one event with it.
+ */
+function eventToolNote(locations: SidLocation[]): string {
+  const eventsPerSheet = new Map<string, number>();
+  for (const l of locations) {
+    if (l.kind === 'event') eventsPerSheet.set(l.container, (eventsPerSheet.get(l.container) ?? 0) + 1);
+  }
+  if (![...eventsPerSheet.values()].some(count => count > 1)) return '';
+  return (
+    ' Until then, update_event_block, update_event_block_action, update_event_variable and delete_event_from_sheet ' +
+    'refuse this SID in a sheet where several events have it, unless eventPath names one of them ' +
+    '(move_events_between_sheets: eventPaths, for top-level events). ' +
+    'Take the events[...] path from the event locations above, from the refused call, or from locate_event.'
+  );
 }
 
 /**
@@ -668,30 +689,34 @@ function scanAnimationSidsForDupes(
  * Track the SIDs of events, conditions, actions and parameters in one sheet.
  * Locations use the same path format as the load-rule checks, e.g.
  * `eventSheets/Sheet1 > group "UI" (sid 3) > block (sid 12) > action 0 "wait" (System)`.
+ * An event's own location also names its JSON path (`... > block (sid 12) at
+ * events[0].children[1]`), which tells apart events that share a SID under the
+ * same parent and is what the eventPath argument of the SID-based event tools takes.
  */
 function scanEventSidsForDupes(
   events: C3Event[],
   sheet: string,
   track: SidTracker
 ): void {
-  const stack: Array<{ event: Record<string, unknown>; location: string; depth: number }> = [];
-  const push = (list: unknown, parentLocation: string, depth: number) => {
+  const stack: Array<{ event: Record<string, unknown>; location: string; path: string; depth: number }> = [];
+  const push = (list: unknown, parentLocation: string, parentPath: string, depth: number) => {
     if (!Array.isArray(list)) return;
     for (let i = list.length - 1; i >= 0; i--) {
       const event = list[i];
       if (!isRecord(event)) continue;
-      stack.push({ event, location: `${parentLocation} > ${describeEvent(event)}`, depth });
+      const path = parentPath ? `${parentPath}.children[${i}]` : `events[${i}]`;
+      stack.push({ event, location: `${parentLocation} > ${describeEvent(event)}`, path, depth });
     }
   };
-  push(events, sheet, 0);
+  push(events, sheet, '', 0);
 
   let nodeCount = 0;
   while (stack.length > 0) {
     if (nodeCount++ > MAX_SID_NODES) break;
-    const { event, location, depth } = stack.pop()!;
+    const { event, location, path, depth } = stack.pop()!;
     if (depth > MAX_SID_DEPTH) continue;
 
-    track(event.sid, location, 'event', sheet);
+    track(event.sid, `${location} at ${path}`, 'event', sheet);
 
     // Conditions & actions
     const aces = (list: unknown, kind: 'condition' | 'action') => {
@@ -713,7 +738,7 @@ function scanEventSidsForDupes(
     params(event.functionParameters, 'function-parameter');
     params(event.parameters, 'parameter');
 
-    push(event.children, location, depth + 1);
+    push(event.children, location, path, depth + 1);
   }
 }
 

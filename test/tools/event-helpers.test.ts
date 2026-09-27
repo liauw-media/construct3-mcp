@@ -5,13 +5,18 @@ import {
   collectObjectRefs,
   buildBlockEvent,
   resolveBehaviorType,
-  findEventBySid,
+  findEventsBySid,
+  collectEventSids,
+  eventSidsMatchingSeveral,
+  parseEventPath,
+  resolveEventBySid,
   countDescendants,
   summarizeEvents,
   MAX_NESTING_DEPTH,
   MAX_TOTAL_EVENTS,
 } from '../../src/tools/event-helpers.js';
 import type { ObjectRef } from '../../src/tools/event-helpers.js';
+import { buildEventOutline } from '../../src/construct3/analyzers/event-outline.js';
 import { MockReader } from '../mocks/mock-reader.js';
 import { MockIdGenerator } from '../mocks/mock-id-generator.js';
 
@@ -601,18 +606,20 @@ describe('buildBlockEvent', () => {
   });
 });
 
-describe('findEventBySid', () => {
+describe('findEventsBySid', () => {
   it('finds a top-level block by SID', () => {
     const events = [
       { eventType: 'block', sid: 100, conditions: [], actions: [] },
       { eventType: 'block', sid: 200, conditions: [], actions: [] },
     ] as Record<string, unknown>[];
 
-    const result = findEventBySid(events, 200);
-    expect(result).not.toBeNull();
-    expect(result!.event.sid).toBe(200);
-    expect(result!.index).toBe(1);
-    expect(result!.parentArray).toBe(events);
+    const [result, ...rest] = findEventsBySid(events, 200);
+    expect(rest).toHaveLength(0);
+    expect(result.event.sid).toBe(200);
+    expect(result.index).toBe(1);
+    expect(result.parentArray).toBe(events);
+    expect(result.path).toBe('events[1]');
+    expect(result.depth).toBe(0);
   });
 
   it('finds a deeply nested block inside a group', () => {
@@ -629,18 +636,19 @@ describe('findEventBySid', () => {
       },
     ] as Record<string, unknown>[];
 
-    const result = findEventBySid(events, 999);
-    expect(result).not.toBeNull();
-    expect(result!.event).toBe(nestedBlock);
-    expect(result!.index).toBe(0);
+    const [result] = findEventsBySid(events, 999);
+    expect(result.event).toBe(nestedBlock);
+    expect(result.index).toBe(0);
+    expect(result.path).toBe('events[0].children[0].children[0]');
+    expect(result.depth).toBe(2);
   });
 
-  it('returns null for nonexistent SID', () => {
+  it('returns no match for a nonexistent SID', () => {
     const events = [
       { eventType: 'block', sid: 100, conditions: [], actions: [] },
     ] as Record<string, unknown>[];
 
-    expect(findEventBySid(events, 999)).toBeNull();
+    expect(findEventsBySid(events, 999)).toEqual([]);
   });
 
   it('returns parentArray and index for safe splicing', () => {
@@ -653,13 +661,12 @@ describe('findEventBySid', () => {
       { eventType: 'group', sid: 1, title: 'G', children: innerChildren },
     ] as Record<string, unknown>[];
 
-    const result = findEventBySid(events, 20);
-    expect(result).not.toBeNull();
-    expect(result!.parentArray).toBe(innerChildren);
-    expect(result!.index).toBe(1);
+    const [result] = findEventsBySid(events, 20);
+    expect(result.parentArray).toBe(innerChildren);
+    expect(result.index).toBe(1);
 
     // Test that splicing works correctly
-    result!.parentArray.splice(result!.index, 1);
+    result.parentArray.splice(result.index, 1);
     expect(innerChildren).toHaveLength(2);
     expect(innerChildren[0].sid).toBe(10);
     expect(innerChildren[1].sid).toBe(30);
@@ -670,9 +677,8 @@ describe('findEventBySid', () => {
       { eventType: 'variable', sid: 500, name: 'score', type: 'number' },
     ] as Record<string, unknown>[];
 
-    const result = findEventBySid(events, 500);
-    expect(result).not.toBeNull();
-    expect(result!.event.eventType).toBe('variable');
+    const [result] = findEventsBySid(events, 500);
+    expect(result.event.eventType).toBe('variable');
   });
 
   it('finds function-block events by SID', () => {
@@ -680,9 +686,180 @@ describe('findEventBySid', () => {
       { eventType: 'function-block', sid: 600, functionName: 'DoStuff', conditions: [], actions: [] },
     ] as Record<string, unknown>[];
 
-    const result = findEventBySid(events, 600);
-    expect(result).not.toBeNull();
-    expect(result!.event.functionName).toBe('DoStuff');
+    const [result] = findEventsBySid(events, 600);
+    expect(result.event.functionName).toBe('DoStuff');
+  });
+});
+
+// ─── Duplicate event SIDs (issue #30) ───────────────────────
+
+const DUP_SID = 400000000000099;
+
+const cond = (sid: number, value: string) => ({
+  id: 'compare-instance-variable', objectClass: 'Player', sid,
+  parameters: { 'instance-variable': 'health', comparison: 0, value },
+});
+const act = (sid: number, x: string) => ({
+  id: 'set-x', objectClass: 'Player', sid, parameters: { x },
+});
+
+/** Three events share DUP_SID: nested under a block in a group, top level, and in a later group. */
+function duplicateSidSheet(): Record<string, unknown>[] {
+  return [
+    {
+      eventType: 'group', sid: 10, title: 'Movement', children: [
+        {
+          eventType: 'block', sid: 11, conditions: [cond(111, '1')], actions: [], children: [
+            { eventType: 'block', sid: DUP_SID, conditions: [cond(112, '2')], actions: [act(113, '10')] },
+          ],
+        },
+      ],
+    },
+    { eventType: 'block', sid: DUP_SID, conditions: [cond(121, '3')], actions: [act(122, '20')], disabled: true },
+    {
+      eventType: 'group', sid: 20, title: 'Combat', children: [
+        { eventType: 'block', sid: DUP_SID, conditions: [cond(131, '4'), cond(132, '5')], actions: [act(133, '30')] },
+      ],
+    },
+  ];
+}
+
+describe('findEventsBySid with duplicate SIDs', () => {
+  it('returns every match in document order with its path and depth', () => {
+    const events = duplicateSidSheet();
+    const matches = findEventsBySid(events, DUP_SID);
+    expect(matches.map(m => m.path)).toEqual([
+      'events[0].children[0].children[0]',
+      'events[1]',
+      'events[2].children[0]',
+    ]);
+    expect(matches.map(m => m.depth)).toEqual([2, 0, 1]);
+    expect(matches[1].event).toBe(events[1]);
+    expect(matches[1].parentArray).toBe(events);
+  });
+
+  it('uses the same paths as the event outline (and so locate_event)', () => {
+    const events = duplicateSidSheet();
+    const outlinePaths = buildEventOutline('Sheet1', events).nodes.filter(n => n.sid === DUP_SID).map(n => n.path);
+    expect(findEventsBySid(events, DUP_SID).map(m => m.path)).toEqual(outlinePaths);
+  });
+});
+
+describe('collectEventSids', () => {
+  it('collects the SIDs of the events and all their sub-events, not of conditions or actions', () => {
+    const sids = collectEventSids(duplicateSidSheet());
+    expect([...sids].sort((a, b) => a - b)).toEqual([10, 11, 20, DUP_SID]);
+  });
+});
+
+describe('eventSidsMatchingSeveral', () => {
+  it('returns the paths of each listed SID that more than one event has, in document order', () => {
+    const events = duplicateSidSheet();
+    const shared = eventSidsMatchingSeveral(events, new Set([DUP_SID, 10, 999]));
+    expect([...shared.keys()]).toEqual([DUP_SID]);
+    expect(shared.get(DUP_SID)).toEqual(findEventsBySid(events, DUP_SID).map(m => m.path));
+  });
+
+  it('ignores SIDs that are not listed, even when several events have them', () => {
+    expect(eventSidsMatchingSeveral(duplicateSidSheet(), new Set([10, 20])).size).toBe(0);
+  });
+});
+
+describe('parseEventPath', () => {
+  it('parses top-level and nested event paths', () => {
+    expect(parseEventPath('events[3]')).toEqual([3]);
+    expect(parseEventPath('events[3].children[1].children[0]')).toEqual([3, 1, 0]);
+    expect(parseEventPath(' events[3] .children[1] ')).toEqual([3, 1]);
+  });
+
+  it('rejects anything that is not an event path', () => {
+    for (const path of ['', 'events', 'events[-1]', 'events[a]', 'children[1]', 'events[3]children[1]',
+      'events[3].actions[0]', 'events[3].children[1].conditions[0]', 'events[1][2]']) {
+      expect(parseEventPath(path), path).toBeNull();
+    }
+  });
+});
+
+describe('resolveEventBySid', () => {
+  const options = { sheetName: 'Sheet1', action: 'update' };
+
+  it('resolves a unique SID without eventPath', () => {
+    const events = duplicateSidSheet();
+    const result = resolveEventBySid(events, 11, options);
+    expect('match' in result && result.match.path).toBe('events[0].children[0]');
+  });
+
+  it('refuses a SID shared by several events and lists every candidate', () => {
+    const result = resolveEventBySid(duplicateSidSheet(), DUP_SID, options);
+    expect('error' in result).toBe(true);
+    const error = (result as { error: string }).error;
+    expect(error).toContain(`SID ${DUP_SID} matches 3 events in sheet "Sheet1"; refusing to guess which one to update.`);
+    const lines = error.split('\n');
+    // Path, editor event number, enclosing group / parent event, one-line summary
+    expect(lines[1]).toBe(
+      '  - eventPath "events[0].children[0].children[0]": event 3, in group "Movement", sub-event of event 2: ' +
+      'IF Player.compare-instance-variable(instance-variable=health, comparison=0, value=2) => DO Player.set-x(x=10)',
+    );
+    expect(lines[2]).toBe(
+      '  - eventPath "events[1]": event 4, top level: ' +
+      'IF Player.compare-instance-variable(instance-variable=health, comparison=0, value=3) [disabled] => DO Player.set-x(x=20)',
+    );
+    expect(lines[3]).toContain('  - eventPath "events[2].children[0]": event 6, in group "Combat": IF ');
+    expect(error).toContain('eventPath');
+    expect(error).toContain('locate_event');
+  });
+
+  it('picks one candidate with eventPath', () => {
+    const events = duplicateSidSheet();
+    const result = resolveEventBySid(events, DUP_SID, { ...options, eventPath: 'events[2].children[0]' });
+    expect('match' in result).toBe(true);
+    const { match } = result as { match: ReturnType<typeof findEventsBySid>[number] };
+    expect(match.event).toBe((events[2].children as unknown[])[0]);
+    expect(match.index).toBe(0);
+  });
+
+  it('refuses an eventPath that points at another event or nowhere', () => {
+    const wrong = resolveEventBySid(duplicateSidSheet(), DUP_SID, { ...options, eventPath: 'events[0]' });
+    expect((wrong as { error: string }).error).toContain('does not point at an event with SID');
+    expect((wrong as { error: string }).error).toContain('it points at a group with SID 10');
+    expect((wrong as { error: string }).error).toContain('events[2].children[0]');
+
+    const nowhere = resolveEventBySid(duplicateSidSheet(), DUP_SID, { ...options, eventPath: 'events[9].children[0]' });
+    expect((nowhere as { error: string }).error).toContain('no event exists at that path');
+  });
+
+  it('refuses a malformed eventPath', () => {
+    const result = resolveEventBySid(duplicateSidSheet(), DUP_SID, { ...options, eventPath: 'events[1].actions[0]' });
+    expect((result as { error: string }).error).toContain('is not an event path');
+  });
+
+  it('validates eventPath against a unique SID too', () => {
+    const events = duplicateSidSheet();
+    expect('match' in resolveEventBySid(events, 11, { ...options, eventPath: 'events[0].children[0]' })).toBe(true);
+    const wrong = resolveEventBySid(events, 11, { ...options, eventPath: 'events[1]' });
+    expect((wrong as { error: string }).error).toContain(`it points at a block with SID ${DUP_SID}`);
+    expect((wrong as { error: string }).error).toContain('The event with this SID is:');
+  });
+
+  it('reports a SID that matches nothing as not found', () => {
+    const result = resolveEventBySid(duplicateSidSheet(), 999, { ...options, eventPath: 'events[1]' });
+    expect((result as { error: string }).error).toContain('Event with SID 999 not found in sheet "Sheet1"');
+  });
+
+  it('names the enclosing function or custom action of a candidate', () => {
+    const events = [
+      {
+        eventType: 'function-block', sid: 30, functionName: 'Respawn', functionParameters: [], conditions: [], actions: [],
+        children: [{ eventType: 'block', sid: DUP_SID, conditions: [cond(141, '1')], actions: [] }],
+      },
+      {
+        eventType: 'custom-ace-block', sid: 40, aceType: 'action', objectClass: 'Enemy', aceName: 'Stun', conditions: [], actions: [],
+        children: [{ eventType: 'block', sid: DUP_SID, conditions: [cond(151, '1')], actions: [] }],
+      },
+    ];
+    const error = (resolveEventBySid(events, DUP_SID, options) as { error: string }).error;
+    expect(error).toContain('"events[0].children[0]": event 2, in function "Respawn": IF');
+    expect(error).toContain('"events[1].children[0]": event 4, in custom action Enemy.Stun: IF');
   });
 });
 

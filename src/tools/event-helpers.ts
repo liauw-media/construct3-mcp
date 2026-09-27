@@ -19,6 +19,7 @@ import {
   scanLegacyBehaviorKeysInAces,
 } from '../construct3/analyzers/legacy-behavior-keys.js';
 import { boundedRecord } from './shared.js';
+import { buildEventOutline, summarizeNode, type OutlineNode } from '../construct3/analyzers/event-outline.js';
 import {
   checkEventLoadRules,
   collectTriggerObjectClasses,
@@ -114,43 +115,274 @@ export interface FindResult {
   index: number;
 }
 
+/** An event found by SID, with its place in the sheet. */
+export interface SidMatch extends FindResult {
+  /** JSON path from the sheet root, in the format locate_event returns, e.g. events[3].children[1] */
+  path: string;
+  /** Nesting depth (0 = top level) */
+  depth: number;
+}
+
 /**
- * Find an event by SID anywhere in the event tree.
+ * Visit every event of the tree in document order (depth-first, each event's
+ * children right after it — the editor's display order) with its path.
  * Iterative stack-based traversal (no recursion) with safety guards.
- * Returns the event, its parent array, and index for safe splice operations.
  */
-export function findEventBySid(
+function walkEvents(
   events: Record<string, unknown>[],
-  targetSid: number,
-): FindResult | null {
-  const stack: Array<{ events: Record<string, unknown>[]; depth: number }> = [
-    { events, depth: 0 },
-  ];
+  visit: (node: SidMatch) => void,
+): void {
+  const stack: Array<{ parentArray: Record<string, unknown>[]; index: number; path: string; depth: number }> = [];
+  const pushChildren = (list: Record<string, unknown>[], parentPath: string, depth: number) => {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const path = parentPath ? `${parentPath}.children[${i}]` : `events[${i}]`;
+      stack.push({ parentArray: list, index: i, path, depth });
+    }
+  };
+  pushChildren(events, '', 0);
   let nodeCount = 0;
 
   while (stack.length > 0) {
     if (++nodeCount > MAX_SEARCH_NODES) {
       throw new Error(`SID search exceeded ${MAX_SEARCH_NODES} nodes`);
     }
-    const { events: currentEvents, depth } = stack.pop()!;
-    if (depth > MAX_SEARCH_DEPTH) continue;
-
-    for (let i = 0; i < currentEvents.length; i++) {
-      const event = currentEvents[i];
-      if (event.sid === targetSid) {
-        return { event, parentArray: currentEvents, index: i };
-      }
-      // Recurse into children (groups, blocks, function-blocks)
-      if (Array.isArray(event.children)) {
-        stack.push({
-          events: event.children as Record<string, unknown>[],
-          depth: depth + 1,
-        });
-      }
+    const { parentArray, index, path, depth } = stack.pop()!;
+    const event = parentArray[index];
+    if (typeof event !== 'object' || event === null) continue;
+    visit({ event, parentArray, index, path, depth });
+    // Recurse into children (groups, blocks, function-blocks)
+    if (Array.isArray(event.children) && depth < MAX_SEARCH_DEPTH) {
+      pushChildren(event.children as Record<string, unknown>[], path, depth + 1);
     }
   }
-  return null;
 }
+
+/**
+ * Find every event with the given SID anywhere in the event tree, in document
+ * order. Event SIDs are not guaranteed to be unique: editor-saved sheets can
+ * hold two events with the same SID, so callers that act on one event must use
+ * resolveEventBySid, which refuses an ambiguous SID.
+ * Each match carries its parent array and index for safe splice operations.
+ */
+export function findEventsBySid(
+  events: Record<string, unknown>[],
+  targetSid: number,
+): SidMatch[] {
+  const matches: SidMatch[] = [];
+  walkEvents(events, node => {
+    if (node.event.sid === targetSid) matches.push(node);
+  });
+  return matches;
+}
+
+/** The SIDs of the given events and all their sub-events. */
+export function collectEventSids(events: Record<string, unknown>[]): Set<number> {
+  const sids = new Set<number>();
+  walkEvents(events, ({ event }) => {
+    if (typeof event.sid === 'number') sids.add(event.sid);
+  });
+  return sids;
+}
+
+/**
+ * The SIDs from `sids` that more than one event of the sheet has, each with
+ * the paths of those events in document order. The SID-based tools refuse
+ * these SIDs in this sheet unless an eventPath picks one.
+ */
+export function eventSidsMatchingSeveral(
+  events: Record<string, unknown>[],
+  sids: ReadonlySet<number>,
+): Map<number, string[]> {
+  const paths = new Map<number, string[]>();
+  walkEvents(events, ({ event, path }) => {
+    if (typeof event.sid !== 'number' || !sids.has(event.sid)) return;
+    const list = paths.get(event.sid);
+    if (list) list.push(path);
+    else paths.set(event.sid, [path]);
+  });
+  for (const [sid, list] of paths) {
+    if (list.length < 2) paths.delete(sid);
+  }
+  return paths;
+}
+
+/**
+ * Parse an event path such as "events[3].children[1]" (the format locate_event
+ * returns) into its indices, e.g. [3, 1]. Returns null for anything else,
+ * including paths to a condition or action.
+ */
+export function parseEventPath(path: string): number[] | null {
+  const match = /^events\[(\d{1,9})\]((?:\.children\[\d{1,9}\])*)$/.exec(path.replace(/\s+/g, ''));
+  if (!match) return null;
+  const indices = [Number(match[1])];
+  for (const child of match[2].matchAll(/\[(\d+)\]/g)) indices.push(Number(child[1]));
+  return indices;
+}
+
+/** Format indices from parseEventPath back into an event path. */
+function formatEventPath(indices: number[]): string {
+  return indices.map((n, i) => (i === 0 ? `events[${n}]` : `.children[${n}]`)).join('');
+}
+
+/** The event at a parsed event path, or undefined when the path leads nowhere. */
+function eventAtPath(events: Record<string, unknown>[], indices: number[]): Record<string, unknown> | undefined {
+  let list: unknown = events;
+  let event: unknown;
+  for (const index of indices) {
+    if (!Array.isArray(list)) return undefined;
+    event = list[index];
+    if (typeof event !== 'object' || event === null) return undefined;
+    list = (event as Record<string, unknown>).children;
+  }
+  return event as Record<string, unknown>;
+}
+
+/** Candidates listed in an ambiguous-SID error; the rest are counted. */
+const MAX_LISTED_SID_MATCHES = 20;
+
+/** "events[3].children[1]" → "events[3]"; null for a top-level path. */
+function parentPathOf(path: string): string | null {
+  const cut = path.lastIndexOf('.children[');
+  return cut === -1 ? null : path.slice(0, cut);
+}
+
+/**
+ * One line per match for an ambiguous-SID error: its path, editor event
+ * number, enclosing group/function or parent event, and a one-line summary.
+ */
+function describeSidMatches(
+  sheetName: string,
+  events: Record<string, unknown>[],
+  matches: SidMatch[],
+): string[] {
+  // The outline supplies event numbers, enclosing groups/functions and summaries
+  const nodes = new Map<string, OutlineNode>();
+  try {
+    for (const node of buildEventOutline(sheetName, events).nodes) nodes.set(node.path, node);
+  } catch {
+    // Without an outline each match is described by its type and counts only
+  }
+
+  const lines = matches.slice(0, MAX_LISTED_SID_MATCHES).map(m => {
+    const node = nodes.get(m.path);
+    const eventType = String(m.event.eventType);
+    if (!node) {
+      const conds = Array.isArray(m.event.conditions) ? m.event.conditions.length : 0;
+      const acts = Array.isArray(m.event.actions) ? m.event.actions.length : 0;
+      const disabled = m.event.disabled === true ? ', disabled' : '';
+      return `  - eventPath "${m.path}": ${eventType}, ${conds} condition(s), ${acts} action(s)${disabled}`;
+    }
+
+    const where: string[] = [];
+    if (node.enclosingGroups.length > 0) {
+      where.push(`in group ${node.enclosingGroups.map(g => `"${g}"`).join(' > ')}`);
+    }
+    if (node.enclosingFunction !== undefined) {
+      // The nearest function-like ancestor says whether it is a function or a custom action
+      let ancestor = parentPathOf(m.path);
+      let kind: string | undefined;
+      while (ancestor !== null && kind === undefined) {
+        const k = nodes.get(ancestor)?.kind;
+        if (k === 'function' || k === 'custom-ace') kind = k;
+        ancestor = parentPathOf(ancestor);
+      }
+      where.push(kind === 'custom-ace'
+        ? `in custom action ${node.enclosingFunction}`
+        : `in function "${node.enclosingFunction}"`);
+    }
+    const parentPath = parentPathOf(m.path);
+    const parent = parentPath === null ? undefined : nodes.get(parentPath);
+    if (parent && parent.kind !== 'group' && parent.kind !== 'function' && parent.kind !== 'custom-ace') {
+      where.push(parent.number !== null ? `sub-event of event ${parent.number}` : `inside ${parent.eventType} ${parent.path}`);
+    }
+    if (where.length === 0) where.push('top level');
+
+    const number = node.number !== null ? `event ${node.number}` : `${eventType} (no event number)`;
+    return `  - eventPath "${m.path}": ${number}, ${where.join(', ')}: ${summarizeNode(node)}`;
+  });
+  if (matches.length > lines.length) {
+    lines.push(`  ... and ${matches.length - lines.length} more`);
+  }
+  return lines;
+}
+
+/** The error for a SID that matches no event in the sheet, with a summary of its top-level events. */
+function sidNotFoundMessage(events: Record<string, unknown>[], sid: number, sheetName: string): string {
+  return (
+    `Event with SID ${sid} not found in sheet "${sheetName}".\n\n` +
+    `Sheet "${sheetName}" contains ${events.length} top-level events:\n${summarizeEvents(events)}\n\n` +
+    `Use get_eventsheet_details to see the full event tree with SIDs.`
+  );
+}
+
+/** The error for a SID shared by several events: lists them and says how to pick one. */
+export function ambiguousSidMessage(
+  sheetName: string,
+  events: Record<string, unknown>[],
+  sid: number,
+  matches: SidMatch[],
+  options: { action: string; argument: string; scope?: string },
+): string {
+  const scope = options.scope ? `${options.scope} ` : '';
+  return (
+    `SID ${sid} matches ${matches.length} ${scope}events in sheet "${sheetName}"; refusing to guess which one to ${options.action}.\n` +
+    `${describeSidMatches(sheetName, events, matches).join('\n')}\n` +
+    `Call again with ${options.argument} set to the path of the event you mean (locate_event gives the path for an editor event number). ` +
+    'Editor-saved sheets can contain duplicate event SIDs; giving all but one of these events a new unique SID removes the ambiguity.'
+  );
+}
+
+/**
+ * Resolve the one event a SID-addressed tool acts on. A SID that matches no
+ * event, or several events without an eventPath to pick one, is an error, as
+ * is an eventPath that does not point at an event with this SID. Nothing is
+ * changed, so tools can return the error before any write.
+ */
+export function resolveEventBySid(
+  events: Record<string, unknown>[],
+  sid: number,
+  options: { sheetName: string; action: string; eventPath?: string },
+): { match: SidMatch } | { error: string } {
+  const { sheetName, eventPath } = options;
+  let wanted: string | undefined;
+  if (eventPath !== undefined) {
+    const indices = parseEventPath(eventPath);
+    if (!indices) {
+      return { error: `eventPath "${eventPath}" is not an event path. Use the form events[3] or events[3].children[1], as locate_event and SID errors list it.` };
+    }
+    wanted = formatEventPath(indices);
+  }
+
+  const matches = findEventsBySid(events, sid);
+  if (matches.length === 0) return { error: sidNotFoundMessage(events, sid, sheetName) };
+
+  if (wanted !== undefined) {
+    const match = matches.find(m => m.path === wanted);
+    if (match) return { match };
+    const other = eventAtPath(events, parseEventPath(wanted)!);
+    const target = other
+      ? `it points at a ${String(other.eventType)}${typeof other.sid === 'number' ? ` with SID ${other.sid}` : ' without a SID'}`
+      : 'no event exists at that path';
+    return {
+      error:
+        `eventPath "${eventPath}" does not point at an event with SID ${sid} in sheet "${sheetName}" (${target}). ` +
+        `${matches.length === 1 ? 'The event with this SID is' : `The ${matches.length} events with this SID are`}:\n` +
+        describeSidMatches(sheetName, events, matches).join('\n'),
+    };
+  }
+
+  if (matches.length > 1) {
+    return { error: ambiguousSidMessage(sheetName, events, sid, matches, { action: options.action, argument: 'eventPath' }) };
+  }
+  return { match: matches[0] };
+}
+
+/** Schema of the eventPath argument that picks one of several events sharing a SID. */
+export const eventPathSchema = z.string().max(500).optional().describe(
+  'Only needed when the SID matches more than one event in the sheet (the call is then refused with a list of candidates): ' +
+  'the JSON path of the event you mean, e.g. "events[3].children[1]", as listed in that error or returned by locate_event. ' +
+  'It must point at an event with this SID.',
+);
 
 /**
  * Count all descendant events inside an event (groups, blocks with children).

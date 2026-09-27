@@ -446,6 +446,74 @@ describe('validateProjectIntegrity', () => {
     expect(warn!.suggestion).not.toMatch(/regenerate|Re-save the project/);
   });
 
+  it('names the JSON path of events that share a SID and points to eventPath (issue #30)', async () => {
+    const block = (sid: number) => ({ eventType: 'block', sid, conditions: [], actions: [] });
+    const reader = createReader({
+      objects: new Map([['Sprite', { name: 'Sprite', 'plugin-id': 'Sprite', sid: 100 }]]),
+      eventSheets: new Map([
+        ['Sheet1', {
+          name: 'Sheet1', sid: 200,
+          events: [block(700), { eventType: 'group', sid: 710, title: 'Combat', children: [block(701)] }, block(700)],
+        }],
+        ['Sheet2', { name: 'Sheet2', sid: 201, events: [block(701)] }],
+      ]),
+      layouts: new Map([['Layout 1', { name: 'Layout 1', sid: 300, layers: [{ name: 'Main', sid: 301, instances: [] }] }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+
+    // Two top-level blocks in one sheet: same breadcrumb, told apart by their paths
+    const inSheet = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('SID 700 '));
+    expect(inSheet!.message).toContain('eventSheets/Sheet1 > block (sid 700) at events[0]; eventSheets/Sheet1 > block (sid 700) at events[2]');
+    expect(inSheet!.suggestion).toContain(
+      'update_event_block, update_event_block_action, update_event_variable and delete_event_from_sheet ' +
+      'refuse this SID in a sheet where several events have it, unless eventPath names one of them',
+    );
+    expect(inSheet!.suggestion).toContain('from the refused call, or from locate_event');
+
+    // One event per sheet: the tools resolve each sheet on its own, so no tool note
+    const acrossSheets = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('SID 701 '));
+    expect(acrossSheets!.message).toContain('eventSheets/Sheet1 > group "Combat" (sid 710) > block (sid 701) at events[1].children[0]');
+    expect(acrossSheets!.message).toContain('eventSheets/Sheet2 > block (sid 701) at events[0]');
+    expect(acrossSheets!.suggestion).not.toContain('eventPath');
+  });
+
+  it('adds the eventPath note when a non-event node also uses the SID that two events in one sheet share (issue #30)', async () => {
+    const block = (sid: number) => ({ eventType: 'block', sid, conditions: [], actions: [] });
+    const fn = (sid: number, paramSid: number) => ({
+      eventType: 'function-block', sid, functionName: `Func${sid}`, functionReturnType: 'none',
+      functionParameters: [{ name: 'a', type: 'number', initialValue: '0', sid: paramSid }],
+      conditions: [], actions: [],
+    });
+    const reader = createReader({
+      objects: new Map([['Sprite', { name: 'Sprite', 'plugin-id': 'Sprite', sid: 100 }]]),
+      eventSheets: new Map([
+        ['Sheet1', {
+          name: 'Sheet1', sid: 200,
+          // SID 800: two blocks and a layer; SID 810: two blocks and a function parameter; SID 820: one block and a layer
+          events: [block(800), block(800), block(810), fn(830, 810), block(810), block(820)],
+        }],
+      ]),
+      layouts: new Map([['Layout 1', {
+        name: 'Layout 1', sid: 300,
+        layers: [{ name: 'Main', sid: 800, instances: [] }, { name: 'Top', sid: 820, instances: [] }],
+      }]]),
+    });
+    const result = await validateProjectIntegrity(reader);
+    const note = 'refuse this SID in a sheet where several events have it, unless eventPath names one of them';
+
+    const withLayer = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('SID 800 '));
+    expect(withLayer!.message).toContain('SIDs should be unique across the project');
+    expect(withLayer!.suggestion).toContain(note);
+
+    const withParameter = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('SID 810 '));
+    expect(withParameter!.message).toContain('may stop the project from opening');
+    expect(withParameter!.suggestion).toContain(note);
+
+    // One event with the SID in the sheet: the tools are not affected
+    const oneEvent = result.warnings.find(w => w.check === 'duplicate-sid' && w.message.includes('SID 820 '));
+    expect(oneEvent!.suggestion).not.toContain('eventPath');
+  });
+
   it('keeps duplicate animation SIDs across object types as warnings (as in Scirra\'s persistent-layouts example)', async () => {
     const anim = (sid: number) => ({ items: [{ name: 'Default', sid, frames: [] }], subfolders: [] });
     const reader = createReader({

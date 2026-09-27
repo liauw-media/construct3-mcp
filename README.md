@@ -138,6 +138,8 @@ node dist/index.js /path/to/your/project.c3proj
 | `delete_event_sheet` | Delete an event sheet (with reference checking and optional force) |
 | `fix_legacy_behavior_keys` | Rename legacy `"behavior-type"` keys (written by older versions) to `"behaviorType"` in all event sheets, checking each name against the object's behaviors (dry-run by default) |
 
+Event SIDs are not always unique in editor-saved sheets. The tools that find an event by SID refuse a SID shared by several events in the sheet and list the candidates; pass `eventPath` (the JSON path that `locate_event` returns, e.g. `events[3].children[1]`) to pick one. `move_events_between_sheets` keeps SIDs and warns when a copy leaves such a shared SID in the target sheet. See [API.md](docs/API.md#mutation-tools).
+
 **Layouts, layers and instances**
 
 | Tool | Description |
