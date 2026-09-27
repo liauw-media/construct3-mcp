@@ -950,11 +950,13 @@ describe('delete_family', () => {
     expect(data.warnings).toHaveLength(2);
     expect(data.warnings[0]).toContain('Family deleted but still referenced: used 4 time(s) in events of "Sheet1"');
     expect(data.warnings[0]).toContain('its instance variables or behaviors used 3 time(s) through members');
+    // validate_project reports the member uses in the "instance-variable" parameter and
+    // behaviorType as missing-behavior-or-variable; "Sprite1.hp" reads like a Sprite expression
     expect(data.warnings[1]).toContain('validate_project will not report its 2 use(s) in expressions and scripts ' +
-      'and 3 use(s) of its instance variables and behaviors through members');
+      'and 1 use(s) of its instance variables and behaviors through members written as "Member.name" in expressions');
     expect(data.warnings[1]).toContain('"Sheet1" block > action:1');
     expect(data.warnings[1]).toContain('"Sheet1" block > action:2');
-    expect(data.warnings[1]).toContain('"Sheet1" block > condition:0');
+    expect(data.warnings[1]).not.toContain('condition:0');
     expect(writer.callsFor('deleteEntityFile')).toHaveLength(1);
     expect(writer.callsFor('removeFromProject')).toHaveLength(1);
   });

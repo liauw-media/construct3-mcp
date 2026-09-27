@@ -8,7 +8,7 @@ import { readdir } from 'fs/promises';
 import { join } from 'path';
 import { entityFolderPaths, entityFilePath, type Construct3ProjectReader } from '../project-reader.js';
 import type { C3Event, Construct3Project, Layout, ObjectType, EventSheet } from '../types.js';
-import { getProjectIndex, OBJECT_SID_PROPERTIES } from './index-builder.js';
+import { getProjectIndex, OBJECT_SID_PROPERTIES, type MemberReference, type MemberReferenceForm } from './index-builder.js';
 import { isNamelessFolder, transitionsFolderIndex } from '../timeline-folders.js';
 import { forEachLayoutInstance, layerEntries, layerPath, layerPathLabel, repeatedLayerNames, type LayerEntry } from '../layers.js';
 import { findOrphanedObjects } from './object-deps.js';
@@ -112,6 +112,7 @@ export async function validateProjectIntegrity(
   // Warning checks
   checkDuplicateUids(layouts, objects, warnings);
   await checkBrokenObjectReferences(reader, objects, families, layouts, warnings);
+  await checkMissingBehaviorsAndVariables(reader, families, warnings);
   checkDuplicateLayerNames(layouts, warnings);
   checkBrokenEventSheetReferences(layouts, eventSheets, warnings);
   checkBrokenIncludes(eventSheets, warnings);
@@ -126,8 +127,8 @@ export async function validateProjectIntegrity(
   // 13 original checks + legacy-behavior-key + legacy-event-shape +
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
-  // duplicate-layer-name, missing-behavior-entry
-  const checksRun = 24;
+  // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable
+  const checksRun = 25;
 
   return {
     valid: errors.length === 0,
@@ -917,8 +918,9 @@ function checkDuplicateUids(
  * family members that are no object type, and object properties (see
  * OBJECT_SID_PROPERTIES) holding a SID of no object type or family. Warnings:
  * what Construct 3 does with them on load is not verified. Not found: uses in
- * expressions and scripts, which the index records only for existing names,
- * and uses of a deleted family's instance variables and behaviors through members.
+ * expressions and scripts, which the index records only for existing names.
+ * Uses of a deleted family's instance variables and behaviors through members
+ * are checkMissingBehaviorsAndVariables'.
  */
 async function checkBrokenObjectReferences(
   reader: Construct3ProjectReader,
@@ -1006,6 +1008,58 @@ async function checkBrokenObjectReferences(
       message: `Family "${familyName}" lists ${gone.length} member(s) that are not object types in the project: ${listFew(gone.map(m => `"${m}"`))}`,
       suggestion: `Remove them with update_family (removeMembers), or restore the object type(s). ` +
         'delete_object with force=true leaves the deleted object in the member list of its families.',
+    });
+  }
+}
+
+// ─── Check 6a: Missing Behaviors and Instance Variables ─────
+
+const MEMBER_REFERENCE_FORM_LABELS: Partial<Record<MemberReferenceForm, string>> = {
+  'instance-variable': '"instance-variable" parameter',
+  behaviorType: 'behaviorType',
+  'behavior-expression': 'expression',
+};
+
+/**
+ * Conditions, actions and expressions that use a behavior or instance
+ * variable their object type does not have, neither itself nor through a
+ * family, or a family that does not have it (a family's conditions, actions
+ * and expressions only reach its own): what update_object_properties and
+ * update_family with force=true leave behind. Checked are the
+ * "instance-variable" parameter, behaviorType and "Name.Behavior.Expression"
+ * (see ProjectIndex.findUnresolvedMemberReferences); names are compared
+ * ignoring case. One warning per sheet, object and name. What Construct 3
+ * does with such a use when it opens the project is not verified, so these
+ * are warnings. None of the editor-saved projects checked has one.
+ */
+async function checkMissingBehaviorsAndVariables(
+  reader: Construct3ProjectReader,
+  families: Map<string, Record<string, unknown>>,
+  warnings: IntegrityIssue[]
+): Promise<void> {
+  const index = await getProjectIndex(reader);
+  const groups = new Map<string, { refs: MemberReference[] }>();
+  for (const ref of index.findUnresolvedMemberReferences()) {
+    const key = [ref.eventSheet, ref.objectClass, ref.kind, ref.name.toLowerCase()].join('\0');
+    const group = groups.get(key) ?? { refs: [] };
+    group.refs.push(ref);
+    groups.set(key, group);
+  }
+  for (const { refs } of groups.values()) {
+    const { eventSheet, objectClass, kind, name } = refs[0];
+    const isFamily = families.has(objectClass);
+    const available = index.memberNamesOf(objectClass, kind);
+    const where = refs.map(r => `${r.path} (${MEMBER_REFERENCE_FORM_LABELS[r.form] ?? r.form})`);
+    warnings.push({
+      check: 'missing-behavior-or-variable',
+      entity: `eventSheets/${eventSheet}`,
+      message: `${refs.length} use(s) of ${kind} "${name}" on ${isFamily ? 'family ' : ''}"${objectClass}", which ` +
+        (isFamily
+          ? `the family does not have (a family's conditions, actions and expressions only reach its own ${kind === 'behavior' ? 'behaviors' : 'instance variables'})`
+          : `neither "${objectClass}" nor any of its families has`) +
+        `: ${listFew(where)}. ${kind === 'behavior' ? 'Behaviors' : 'Instance variables'} it has: ${available.length > 0 ? listFew(available.map(n => `"${n}"`)) : 'none'}.`,
+      suggestion: `Add the ${kind} to "${objectClass}"${isFamily ? '' : ' or one of its families'} again, or change or delete these conditions and actions. ` +
+        'update_object_properties and update_family refuse to remove an instance variable or behavior that events use unless forced.',
     });
   }
 }

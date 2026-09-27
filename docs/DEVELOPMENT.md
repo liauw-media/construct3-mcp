@@ -254,6 +254,7 @@ Tests prove what the files look like, not that Construct 3 accepts them. Before 
 **Mutation tools:**
 - [ ] `create_object` with Sprite, Text, and global plugin
 - [ ] `update_object_properties` adding variables and behaviors
+- [ ] `update_object_properties` and `update_family` removing a variable, behavior or member that events use, with and without force
 - [ ] `create_event_sheet` with includes
 - [ ] `add_event_to_sheet` for each event type
 - [ ] `create_layout` with custom layers

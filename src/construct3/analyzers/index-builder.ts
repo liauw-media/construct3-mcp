@@ -33,14 +33,24 @@
  * or family (object properties such as the Particles "object" property, which
  * editor-saved projects store as the SID) is a reference to that object too.
  *
- * A family's instance variables and behaviors can also be used through its
- * member object types without naming the family (getFamilyMemberUses): the
- * "instance-variable" parameter or the behaviorType of a condition/action on a
- * member, "Member.name" / "Member(0).name" in a parameter expression, and
- * "Self.name" in a parameter expression of a condition/action on the member. Only
- * names the member gets from that family alone count (not ones the member
- * declares itself or also gets from another family), since only those break
- * when the family is deleted.
+ * Uses of instance variables and behaviors (memberReferences, see
+ * MemberReference) go through an object type or family: the "instance-variable"
+ * parameter and the behaviorType of a condition/action on it, and in any
+ * parameter expression "Name.var", "Name(0).var", "Name.Behavior.Expression"
+ * and, in a condition/action on it, "Self.var" and "Self.Behavior.Expression".
+ * An object type has its own instance variables and behaviors and those of its
+ * families; a family has only its own. Expressions are matched ignoring case
+ * (editor-saved projects spell object, instance variable and expression names
+ * in expressions in other case, and open), and a two-part "Name.member" counts
+ * only when the member names an instance variable or behavior of that object
+ * type or family, since otherwise it is one of the plugin's expressions
+ * ("Sprite.X"). These uses are what update_object_properties and update_family
+ * check before removing an instance variable, a behavior or a family member
+ * (findReferencesBrokenBy), what validate_project checks for names that no
+ * longer resolve, and, through members, what delete_family checks
+ * (getFamilyMemberUses): names a member gets from that family alone (not ones
+ * it declares itself or also gets from another family) break when the family
+ * is deleted.
  */
 
 import type { Construct3ProjectReader } from '../project-reader.js';
@@ -116,10 +126,60 @@ export interface FamilyMemberUse {
   context: 'condition' | 'action' | 'expression';
 }
 
-/** Per member object type: instance variable / behavior name → the one family it comes from. */
-interface FamilyOnlyNames {
-  variables: Map<string, string>;
-  behaviors: Map<string, string>;
+/**
+ * How an event names an instance variable or behavior:
+ * - "instance-variable": the "instance-variable" parameter of a condition/action;
+ * - "behaviorType": the behaviorType of a condition/action ("behavior-type",
+ *   the key older versions of this server wrote, is "legacy-behavior-type");
+ * - "behavior-expression": "Name.Behavior.Expression" or "Self.Behavior.Expression"
+ *   in a parameter expression, whose middle part can only be a behavior;
+ * - "member-expression": "Name.member" or "Self.member" whose member names an
+ *   instance variable or behavior of the object type or family (anything else
+ *   there is one of the plugin's expressions, so these are only recorded while
+ *   the name resolves).
+ */
+export type MemberReferenceForm =
+  | 'instance-variable'
+  | 'behaviorType'
+  | 'legacy-behavior-type'
+  | 'behavior-expression'
+  | 'member-expression';
+
+/** A use of an instance variable or behavior in a condition or action. */
+export interface MemberReference {
+  eventSheet: string;
+  /** Event path, as in ObjectReference.path */
+  path: string;
+  /**
+   * The object type or family it goes through (as spelled in the project): the
+   * condition's or action's object, or the object named in the expression
+   * ("Self" being the condition's or action's object)
+   */
+  objectClass: string;
+  kind: 'instance variable' | 'behavior';
+  /** Name as written in the event */
+  name: string;
+  /** Where: the condition's or action's own parameter or behavior, or a parameter expression */
+  context: 'condition' | 'action' | 'expression';
+  form: MemberReferenceForm;
+}
+
+/**
+ * What a change removes: instance variables and behaviors (object type or
+ * family → names, as spelled in its file) and family members (family →
+ * object type names).
+ */
+export interface MemberRemoval {
+  variables?: ReadonlyMap<string, readonly string[]>;
+  behaviors?: ReadonlyMap<string, readonly string[]>;
+  members?: ReadonlyMap<string, readonly string[]>;
+}
+
+/** Instance variable and behavior names of one object type or family. */
+interface ClassMembers {
+  isFamily: boolean;
+  variables: string[];
+  behaviors: string[];
 }
 
 const MAX_NODES = 100_000;
@@ -181,24 +241,36 @@ export function expressionObjectTokens(expression: string): string[] {
 
 /**
  * In a C3 expression of a condition or action, the object the condition or
- * action is on ("Self.X"). Editor-saved projects write it with this case.
+ * action is on ("Self.X"). Editor-saved projects write it with this case; it
+ * is matched ignoring case, like other names in expressions.
  */
-const SELF = 'Self';
+const SELF = 'self';
 
-/** Identifier that does not continue another name or a member access ("a.b" yields only "a"). */
-const EXPRESSION_IDENTIFIER = /(?<![\p{L}\p{N}_.$])[\p{L}_][\p{L}\p{N}_]*/gu;
+/**
+ * Identifier that does not continue another name or a member access ("a.b"
+ * and "a . b" yield only "a").
+ */
+const EXPRESSION_IDENTIFIER = /(?<![\p{L}\p{N}_.$])(?<!\.\s+)[\p{L}_][\p{L}\p{N}_]*/gu;
 /** ".name" right at lastIndex, whitespace allowed around the dot */
 const EXPRESSION_MEMBER_NAME = /\s*\.\s*([\p{L}_][\p{L}\p{N}_]*)/uy;
 
+/** "Name.member" or "Name(index).member" in a C3 expression, and the part after it in "Name.Behavior.Expression". */
+export interface ExpressionMemberChain {
+  object: string;
+  member: string;
+  /** "Expression" of "Name.Behavior.Expression" */
+  next?: string;
+}
+
 /**
- * Member accesses on names in a C3 expression, as [name, member] pairs:
- * "Sprite.hp" and "Sprite(Sprite.Count - 1).hp" yield ["Sprite", "hp"] (and
- * the inner ["Sprite", "Count"]); "Sprite.Fade.Time" yields ["Sprite", "Fade"].
- * String literals are skipped.
+ * Member accesses on names in a C3 expression: "Sprite.hp" and
+ * "Sprite(Sprite.Count - 1).hp" yield { object: "Sprite", member: "hp" } (and
+ * the inner Sprite.Count); "Sprite.Fade.Time" yields { object: "Sprite",
+ * member: "Fade", next: "Time" }. String literals are skipped.
  */
-export function expressionMemberAccesses(expression: string): Array<[string, string]> {
+export function expressionMemberChains(expression: string): ExpressionMemberChain[] {
   const code = expression.replace(EXPRESSION_STRING_LITERAL, '""');
-  const accesses: Array<[string, string]> = [];
+  const chains: ExpressionMemberChain[] = [];
   for (const match of code.matchAll(EXPRESSION_IDENTIFIER)) {
     let i = match.index + match[0].length;
     while (i < code.length && /\s/.test(code[i])) i++;
@@ -214,9 +286,21 @@ export function expressionMemberAccesses(expression: string): Array<[string, str
     }
     EXPRESSION_MEMBER_NAME.lastIndex = i;
     const member = EXPRESSION_MEMBER_NAME.exec(code);
-    if (member) accesses.push([match[0], member[1]]);
+    if (!member) continue;
+    const next = EXPRESSION_MEMBER_NAME.exec(code);
+    chains.push({ object: match[0], member: member[1], ...(next ? { next: next[1] } : {}) });
   }
-  return accesses;
+  return chains;
+}
+
+/**
+ * Member accesses on names in a C3 expression, as [name, member] pairs:
+ * "Sprite.hp" and "Sprite(Sprite.Count - 1).hp" yield ["Sprite", "hp"] (and
+ * the inner ["Sprite", "Count"]); "Sprite.Fade.Time" yields ["Sprite", "Fade"].
+ * String literals are skipped.
+ */
+export function expressionMemberAccesses(expression: string): Array<[string, string]> {
+  return expressionMemberChains(expression).map(chain => [chain.object, chain.member]);
 }
 
 /** Names of the named entries (instance variables, behaviors) of an object type or family. */
@@ -228,51 +312,11 @@ function entryNames(list: unknown): string[] {
 }
 
 /**
- * For every family member: the instance variables and behaviors it gets from
- * exactly one family and does not declare itself (deleting that family takes
- * them away from the member).
+ * Parameter keys that hold a name rather than an expression (object, instance
+ * variable, layout and sound names); not scanned for "Name.member". A layout
+ * name such as "Menu.Main" is no member access.
  */
-function familyOnlyMemberNames(
-  objectTypes: ReadonlyMap<string, unknown>,
-  families: ReadonlyMap<string, Record<string, unknown>>,
-): Map<string, FamilyOnlyNames> {
-  const providers = new Map<string, { variables: Map<string, Set<string>>; behaviors: Map<string, Set<string>> }>();
-  const add = (into: Map<string, Set<string>>, name: string, family: string) => {
-    if (!into.has(name)) into.set(name, new Set());
-    into.get(name)!.add(family);
-  };
-  for (const [familyName, family] of families) {
-    if (!Array.isArray(family?.members)) continue;
-    const variables = entryNames(family.instanceVariables);
-    const behaviors = entryNames(family.behaviorTypes);
-    if (variables.length === 0 && behaviors.length === 0) continue;
-    for (const member of family.members) {
-      if (typeof member !== 'string') continue;
-      if (!providers.has(member)) providers.set(member, { variables: new Map(), behaviors: new Map() });
-      const own = providers.get(member)!;
-      for (const name of variables) add(own.variables, name, familyName);
-      for (const name of behaviors) add(own.behaviors, name, familyName);
-    }
-  }
-
-  const result = new Map<string, FamilyOnlyNames>();
-  for (const [member, provided] of providers) {
-    const data = objectTypes.get(member) as { instanceVariables?: unknown; behaviorTypes?: unknown } | undefined;
-    const pick = (from: Map<string, Set<string>>, declared: Set<string>) => {
-      const names = new Map<string, string>();
-      for (const [name, fams] of from) {
-        if (fams.size === 1 && !declared.has(name)) names.set(name, [...fams][0]);
-      }
-      return names;
-    };
-    const names = {
-      variables: pick(provided.variables, new Set(entryNames(data?.instanceVariables))),
-      behaviors: pick(provided.behaviors, new Set(entryNames(data?.behaviorTypes))),
-    };
-    if (names.variables.size > 0 || names.behaviors.size > 0) result.set(member, names);
-  }
-  return result;
-}
+const NAME_PARAMETER_KEYS = new Set([...OBJECT_PARAMETER_KEYS, 'instance-variable', 'layout', 'audio-file']);
 
 /** Names accessed as runtime.objects.Name / runtime.objects["Name"] in script text */
 export function scriptObjectTokens(script: string): string[] {
@@ -340,8 +384,9 @@ export class ProjectIndex {
   /** Family membership */
   familyMembers: Map<string, string[]> = new Map();
   objectToFamilies: Map<string, string[]> = new Map();
-  /** Family → uses of its instance variables and behaviors through member object types */
-  familyMemberUses: Map<string, FamilyMemberUse[]> = new Map();
+
+  /** Uses of instance variables and behaviors in events, in sheet order (see MemberReference) */
+  memberReferences: MemberReference[] = [];
 
   /** All event sheet names */
   allEventSheets: string[] = [];
@@ -359,8 +404,14 @@ export class ProjectIndex {
   private variableNames: Set<string> = new Set();
   /** SID → name of every object type and family (for object properties that store a SID) */
   private namesBySid: Map<number, string> = new Map();
-  /** Member object type → instance variables and behaviors it gets from one family only */
-  private familyOnlyNames: Map<string, FamilyOnlyNames> = new Map();
+  /** Instance variable and behavior names of every object type and family that could be read */
+  private classMembers: Map<string, ClassMembers> = new Map();
+  /** Lower-cased name → name, for the object types and families in classMembers */
+  private classNamesLower: Map<string, string> = new Map();
+  /** Object type → the families that list it as a member (families that could be read) */
+  private familiesOfObject: Map<string, string[]> = new Map();
+  /** Some family file could not be read: an object type may get more names than classMembers shows */
+  private unreadableFamilies = false;
 
   private built = false;
   /** Name of the built-in Functions object (project.c3proj functionsName) */
@@ -378,10 +429,11 @@ export class ProjectIndex {
     this.allLayouts = await reader.listLayouts();
     this.referableNames = new Set([...this.allObjects, ...(await reader.listFamilies())]);
 
-    // Instance variables and behaviors members get from a family (for the member uses found in events)
+    // Instance variables and behaviors of object types and families (for the uses found in events)
     const objectTypes = await reader.readAllObjectTypes();
     const families = await reader.readAllFamilies();
-    this.familyOnlyNames = familyOnlyMemberNames(objectTypes, families);
+    this.indexClassMembers(objectTypes, families);
+    this.unreadableFamilies = (await reader.listFamilies()).some(name => !families.has(name));
     this.functionsName = functionsObjectName(reader);
 
     // Index event sheets (variable names first: parameters are checked against them)
@@ -558,7 +610,7 @@ export class ProjectIndex {
       this.addObjectReference(condition.objectClass, sheetName, path, 'condition');
     }
     this.indexParameters(sheetName, condition.parameters, path, condition.objectClass);
-    this.indexFamilyMemberUses(sheetName, condition as unknown as Record<string, unknown>, path, 'condition');
+    this.indexMemberReferences(sheetName, condition as unknown as Record<string, unknown>, path, 'condition');
   }
 
   private indexAction(sheetName: string, action: Action, path: string): void {
@@ -575,7 +627,7 @@ export class ProjectIndex {
       this.addObjectReference(stdAction.objectClass, sheetName, path, 'action');
     }
     this.indexParameters(sheetName, stdAction.parameters, path, stdAction.objectClass);
-    this.indexFamilyMemberUses(sheetName, action as unknown as Record<string, unknown>, path, 'action');
+    this.indexMemberReferences(sheetName, action as unknown as Record<string, unknown>, path, 'action');
 
     // Check for function calls
     if (typeof stdAction.callFunction === 'string' && stdAction.callFunction) {
@@ -644,58 +696,110 @@ export class ProjectIndex {
     return !this.variableNames.has(name);
   }
 
+  /** Instance variable and behavior names of the object types and families, and each object type's families. */
+  private indexClassMembers(
+    objectTypes: ReadonlyMap<string, unknown>,
+    families: ReadonlyMap<string, Record<string, unknown>>,
+  ): void {
+    const add = (name: string, data: unknown, isFamily: boolean) => {
+      const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+      this.classMembers.set(name, {
+        isFamily,
+        variables: entryNames(record.instanceVariables),
+        behaviors: entryNames(record.behaviorTypes),
+      });
+      if (!this.classNamesLower.has(name.toLowerCase())) this.classNamesLower.set(name.toLowerCase(), name);
+    };
+    for (const [name, data] of objectTypes) add(name, data, false);
+    for (const [name, data] of families) {
+      add(name, data, true);
+      if (!Array.isArray(data?.members)) continue;
+      for (const member of new Set(data.members)) {
+        if (typeof member !== 'string') continue;
+        if (!this.familiesOfObject.has(member)) this.familiesOfObject.set(member, []);
+        this.familiesOfObject.get(member)!.push(name);
+      }
+    }
+  }
+
   /**
-   * Uses of family instance variables and behaviors through a member in one
-   * condition/action: its "instance-variable" parameter and behaviorType when
-   * its objectClass is a member, and "Member.name" in any parameter expression,
-   * as well as "Self.name" when its objectClass is a member ("Self" is the
-   * condition's or action's own object).
+   * Whether an object type or family has an instance variable or behavior of
+   * this name (ignoring case) after `removal`: its own, or for an object type
+   * one of a family it stays a member of.
    */
-  private indexFamilyMemberUses(
+  private hasMember(
+    objectClass: string, kind: MemberReference['kind'], name: string, removal: MemberRemoval = {},
+  ): boolean {
+    const key = name.toLowerCase();
+    const has = (owner: string) => {
+      const members = this.classMembers.get(owner);
+      if (!members) return false;
+      const removed = (kind === 'instance variable' ? removal.variables : removal.behaviors)?.get(owner) ?? [];
+      const names = kind === 'instance variable' ? members.variables : members.behaviors;
+      return names.some(n => n.toLowerCase() === key && !removed.includes(n));
+    };
+    if (has(objectClass)) return true;
+    if (this.classMembers.get(objectClass)?.isFamily !== false) return false;
+    return (this.familiesOfObject.get(objectClass) ?? []).some(family =>
+      !(removal.members?.get(family) ?? []).includes(objectClass) && has(family));
+  }
+
+  /**
+   * Uses of instance variables and behaviors in one condition/action (see
+   * MemberReference): its "instance-variable" parameter and behaviorType when
+   * its objectClass is an object type or family, and "Name.member" /
+   * "Name.Behavior.Expression" in its parameter expressions, "Self" being its
+   * objectClass. One entry per object, kind, name and context.
+   */
+  private indexMemberReferences(
     sheetName: string, ace: Record<string, unknown>, path: string, context: 'condition' | 'action',
   ): void {
-    if (this.familyOnlyNames.size === 0) return;
-    const found = new Map<string, FamilyMemberUse & { family: string }>();
-    const record = (member: string, kind: FamilyMemberUse['kind'], name: string, useContext: FamilyMemberUse['context']) => {
-      const names = this.familyOnlyNames.get(member);
-      const family = (kind === 'instance variable' ? names?.variables : names?.behaviors)?.get(name);
-      if (family === undefined) return;
-      const key = [family, member, kind, name, useContext].join('\0');
-      if (!found.has(key)) found.set(key, { family, eventSheet: sheetName, path, member, kind, name, context: useContext });
+    if (this.classMembers.size === 0) return;
+    const found = new Map<string, MemberReference>();
+    const record = (
+      objectClass: string, kind: MemberReference['kind'], name: string,
+      useContext: MemberReference['context'], form: MemberReferenceForm,
+    ) => {
+      const key = [objectClass, kind, name.toLowerCase(), useContext].join('\0');
+      if (!found.has(key)) found.set(key, { eventSheet: sheetName, path, objectClass, kind, name, context: useContext, form });
     };
 
     const parameters = ace.parameters;
-    const ownMember = typeof ace.objectClass === 'string' && this.familyOnlyNames.has(ace.objectClass)
-      ? ace.objectClass
-      : undefined;
-    if (ownMember !== undefined) {
+    // The condition's or action's own object type or family, as spelled in the project
+    const own = typeof ace.objectClass === 'string' && this.classMembers.has(ace.objectClass) ? ace.objectClass : undefined;
+    if (own !== undefined) {
       const variable = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
         ? (parameters as Record<string, unknown>)['instance-variable']
         : undefined;
-      if (typeof variable === 'string') record(ownMember, 'instance variable', variable, context);
-      // "behavior-type": the key older versions of this server wrote
-      const behavior = ace.behaviorType ?? ace['behavior-type'];
-      if (typeof behavior === 'string') record(ownMember, 'behavior', behavior, context);
-    }
-
-    const values = Array.isArray(parameters)
-      ? parameters
-      : parameters && typeof parameters === 'object' ? Object.values(parameters) : [];
-    for (const value of values) {
-      if (typeof value !== 'string' || !value.includes('.')) continue;
-      for (const [object, name] of expressionMemberAccesses(value)) {
-        // "Self" (as editor-saved projects write it) is the member the condition/action is on
-        const member = object === SELF ? ownMember : object;
-        if (member === undefined || !this.familyOnlyNames.has(member)) continue;
-        record(member, 'instance variable', name, 'expression');
-        record(member, 'behavior', name, 'expression');
+      if (typeof variable === 'string' && variable !== '') record(own, 'instance variable', variable, context, 'instance-variable');
+      if (typeof ace.behaviorType === 'string' && ace.behaviorType !== '') {
+        record(own, 'behavior', ace.behaviorType, context, 'behaviorType');
+      } else if (typeof ace['behavior-type'] === 'string' && ace['behavior-type'] !== '') {
+        // The key older versions of this server wrote
+        record(own, 'behavior', ace['behavior-type'], context, 'legacy-behavior-type');
       }
     }
 
-    for (const { family, ...use } of found.values()) {
-      if (!this.familyMemberUses.has(family)) this.familyMemberUses.set(family, []);
-      this.familyMemberUses.get(family)!.push(use);
+    const entries: Array<[string | undefined, unknown]> = Array.isArray(parameters)
+      ? parameters.map(value => [undefined, value])
+      : parameters && typeof parameters === 'object' ? Object.entries(parameters) : [];
+    for (const [key, value] of entries) {
+      if (typeof value !== 'string' || !value.includes('.') || (key !== undefined && NAME_PARAMETER_KEYS.has(key))) continue;
+      for (const { object, member, next } of expressionMemberChains(value)) {
+        const objectClass = object.toLowerCase() === SELF ? own : this.classNamesLower.get(object.toLowerCase());
+        if (objectClass === undefined) continue;
+        if (next !== undefined) {
+          // "Name.Behavior.Expression": the middle part can only be a behavior
+          record(objectClass, 'behavior', member, 'expression', 'behavior-expression');
+        } else if (this.hasMember(objectClass, 'instance variable', member)) {
+          record(objectClass, 'instance variable', member, 'expression', 'member-expression');
+        } else if (this.hasMember(objectClass, 'behavior', member)) {
+          record(objectClass, 'behavior', member, 'expression', 'member-expression');
+        }
+      }
     }
+
+    this.memberReferences.push(...found.values());
   }
 
   /** Objects a script action or script event accesses through runtime.objects. */
@@ -823,7 +927,62 @@ export class ProjectIndex {
    * object types (see FamilyMemberUse); these break when the family is deleted.
    */
   getFamilyMemberUses(familyName: string): FamilyMemberUse[] {
-    return this.familyMemberUses.get(familyName) ?? [];
+    return this.getFamilyMemberReferences(familyName)
+      .map(({ eventSheet, path, objectClass, kind, name, context }) => ({ eventSheet, path, member: objectClass, kind, name, context }));
+  }
+
+  /** The uses behind getFamilyMemberUses, as MemberReference (objectClass being the member). */
+  getFamilyMemberReferences(familyName: string): MemberReference[] {
+    const members = this.familyMembers.get(familyName) ?? [];
+    if (members.length === 0) return [];
+    const objectTypes = new Set(members.filter(m => this.classMembers.get(m)?.isFamily === false));
+    return this.findReferencesBrokenBy({ members: new Map([[familyName, members]]) })
+      .filter(ref => objectTypes.has(ref.objectClass));
+  }
+
+  /**
+   * Uses of instance variables and behaviors in events that resolve now and
+   * would no longer resolve after `removal` (instance variables, behaviors or
+   * family members removed), in sheet order. A use still resolves when the
+   * object type or family keeps a variable or behavior of that name, ignoring
+   * case (for an object type: its own or one of a family it stays in).
+   */
+  findReferencesBrokenBy(removal: MemberRemoval): MemberReference[] {
+    return this.memberReferences.filter(ref =>
+      this.hasMember(ref.objectClass, ref.kind, ref.name) && !this.hasMember(ref.objectClass, ref.kind, ref.name, removal));
+  }
+
+  /**
+   * The instance variables or behaviors an object type or family has: its own
+   * and, for an object type, those of its families (in project order, each
+   * name once).
+   */
+  memberNamesOf(objectClass: string, kind: MemberReference['kind']): string[] {
+    const owners = this.classMembers.get(objectClass)?.isFamily === false
+      ? [objectClass, ...(this.familiesOfObject.get(objectClass) ?? [])]
+      : [objectClass];
+    const names = owners.flatMap(owner => {
+      const members = this.classMembers.get(owner);
+      return members ? (kind === 'instance variable' ? members.variables : members.behaviors) : [];
+    });
+    return [...new Set(names)];
+  }
+
+  /**
+   * Uses of instance variables and behaviors in events that name one the
+   * object type or family does not have (for an object type: neither itself
+   * nor any of its families; for a family: the family itself), ignoring case.
+   * Only the forms that must name one are checked: the "instance-variable"
+   * parameter, behaviorType and "Name.Behavior.Expression"; a "Name.member"
+   * that names none is one of the plugin's expressions, and the legacy
+   * "behavior-type" key is validate_project's legacy-behavior-key check. Uses
+   * through an object type are left out while a family file could not be read.
+   */
+  findUnresolvedMemberReferences(): MemberReference[] {
+    return this.memberReferences.filter(ref =>
+      ref.form !== 'member-expression' && ref.form !== 'legacy-behavior-type' &&
+      !(this.unreadableFamilies && this.classMembers.get(ref.objectClass)?.isFamily === false) &&
+      !this.hasMember(ref.objectClass, ref.kind, ref.name));
   }
 
   /** The object type or family with this SID, if any (for object properties that store a SID). */
