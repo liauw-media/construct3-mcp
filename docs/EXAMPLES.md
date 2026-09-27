@@ -23,11 +23,11 @@ Real-world examples of using the Construct3 MCP Server with Claude.
 > "Are you connected to my Construct 3 project?"
 
 **Response:**
-> Yes! I'm connected to your project "Bonny's Fortune" (version 0.2.6). The project has:
-> - 442 object types
-> - 17 event sheets
-> - 7 layouts
-> - 14 families
+> Yes! I'm connected to your project "My Game" (version 1.0.0). The project has:
+> - 48 object types
+> - 6 event sheets
+> - 4 layouts
+> - 3 families
 >
 > Would you like me to analyze any specific aspect?
 
@@ -307,9 +307,9 @@ Returns success with a warning that references were NOT cleaned up.
 ### Update Project Metadata
 
 **Query:**
-> "Set the project version to 1.1.0 and author to My Studio"
+> "Set the project version to 1.1.0 and author to Example Games"
 
-**Claude uses**: `update_project_metadata` with `version: "1.1.0"`, `author: "My Studio"`
+**Claude uses**: `update_project_metadata` with `version: "1.1.0"`, `author: "Example Games"`
 
 ---
 
@@ -607,7 +607,7 @@ and the same call with `"key": 38` for the up arrow. When the shared actions gro
 ### Find Object Usage
 
 **Query:**
-> "Where is the spin_btn object used?"
+> "Where is the pause_btn object used?"
 
 **Claude uses**: `find_object_usage` prompt + `get_object_dependencies`
 
@@ -625,7 +625,7 @@ and the same call with `"key": 38` for the up arrow. When the shared actions gro
 ### Explain Event Sheet
 
 **Query:**
-> "Explain how the SpinMachine event sheet works"
+> "Explain how the PlayerControls event sheet works"
 
 **Claude uses**: `explain_eventsheet` prompt + `get_eventsheet_details`
 

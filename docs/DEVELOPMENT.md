@@ -4,7 +4,7 @@ Guide for contributing to and developing the Construct3 MCP Server.
 
 ## Prerequisites
 
-- **Node.js** >= 18.0.0
+- **Node.js** >= 18.0.0 to run the server; the test suite (Vitest 4) needs Node.js 20.19+ (20.x), 22.12+ (22.x) or 24+
 - **npm** >= 9.0.0
 - **TypeScript** 5.7+
 - A Construct 3 project in **folder format** (.c3proj) for testing
@@ -27,6 +27,15 @@ npm run build
 # Watch mode (auto-rebuild on file changes)
 npm run dev
 
+# Run the test suite once (vitest run)
+npm test
+
+# Re-run tests on file changes
+npm run test:watch
+
+# Test coverage report (src/, without the entry point)
+npm run test:coverage
+
 # Start the server with a test project
 node dist/index.js /path/to/your/project.c3proj
 
@@ -43,30 +52,64 @@ construct3-mcp/
 │   ├── construct3/                 # Core project logic
 │   │   ├── project-reader.ts       # Read-only file access with caching
 │   │   ├── project-writer.ts       # Safe writes (backup/validate/write/verify)
-│   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
+│   │   ├── id-generator.ts         # SID/UID/imageSpriteId generation with collision avoidance
 │   │   ├── templates.ts            # Entity templates and known addon maps
+│   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
+│   │   ├── path-utils.ts           # Path resolution inside the project folder
+│   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/              # Analysis modules
 │   │       ├── index-builder.ts    # Cross-reference index (cached)
-│   │       ├── eventsheet-flow.ts  # Include hierarchy visualization
-│   │       ├── function-map.ts     # Function definition/call mapping
-│   │       ├── object-deps.ts      # Object dependency tracking
-│   │       ├── orphan-finder.ts    # Unused object detection
+│   │       ├── event-flow.ts       # Include hierarchy visualization, function map
+│   │       ├── object-deps.ts      # Object dependency tracking, orphaned objects
 │   │       ├── asset-usage.ts      # Asset tracking
-│   │       └── performance.ts      # Performance heuristics
+│   │       ├── performance.ts      # Performance heuristics
+│   │       ├── integrity.ts        # Project integrity checks (validate_project)
+│   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
+│   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
+│   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
+│   │       ├── group-settings.ts   # Event group settings
+│   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
+│   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
+│   │       └── script-scan.ts      # Lightweight JS/TS scanner for script actions
 │   ├── resources/                  # MCP resource handlers
 │   │   ├── project.ts              # Project data resources (6)
-│   │   └── docs.ts                 # C3 documentation resource (1)
+│   │   ├── docs.ts                 # Documentation resources (3)
+│   │   └── pitfalls.ts             # Curated pitfalls text (construct3://docs/pitfalls)
+│   ├── runtime/
+│   │   ├── bridge.ts               # Injectable runtime bridge script generator
+│   │   └── zip-writer.ts           # Zero-dep ZIP writer for .c3p packing
 │   ├── tools/                      # MCP tool handlers
 │   │   ├── query.ts                # Query tools (9)
-│   │   ├── analysis.ts             # Analysis tools (6)
-│   │   └── mutations.ts            # Mutation tools (14)
+│   │   ├── analysis.ts             # Analysis tools (11)
+│   │   ├── mutations.ts            # Registers the domain tool modules below
+│   │   ├── shared.ts               # Validation, result/error helpers, editor reload note
+│   │   ├── object-tools.ts         # Object and family tools (6)
+│   │   ├── event-tools.ts          # Event sheet tools (11)
+│   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators, load-time gate
+│   │   ├── layout-tools.ts         # Layout, layer and instance tools (9)
+│   │   ├── animation-tools.ts      # Sprite animation and frame tools (8)
+│   │   ├── timeline-tools.ts       # Timeline tools (5)
+│   │   ├── project-tools.ts        # Project metadata and addon tools (4)
+│   │   └── runtime-tools.ts        # Runtime control tools (7)
 │   └── prompts/                    # MCP prompt handlers
-│       └── workflows.ts            # Workflow prompts (6)
+│       └── workflows.ts            # Workflow prompts (7)
+├── test/                           # Vitest suites
+│   ├── construct3/                 # Reader, writer, templates and analyzer tests
+│   ├── tools/                      # Tool handler tests (through the mock server)
+│   ├── resources/                  # Resource and prompt tests
+│   ├── runtime/                    # Runtime bridge tests
+│   ├── acceptance/                 # End-to-end round trip through the tool handlers
+│   ├── mocks/                      # Mock MCP server, reader, writer, ID generator
+│   └── fixtures/                   # Small Construct 3 projects used by the tests
+├── scripts/
+│   └── derive-minimal-fixture.ts   # Maintainer script: derives the loadable minimal fixture
 ├── docs/                           # Documentation
 ├── dist/                           # Compiled output (gitignored)
 ├── package.json
-├── tsconfig.json
+├── tsconfig.json                   # Build config (src/ → dist/)
+├── tsconfig.test.json              # Type-check config that includes test/
+├── vitest.config.ts
 ├── CHANGELOG.md
 └── README.md
 ```
@@ -105,39 +148,44 @@ server.tool(
 
 1. Create an analyzer in `src/construct3/analyzers/my-analyzer.ts`
 2. Export an async function that takes `reader` and options
-3. Register the tool in `src/tools/analysis.ts`
+3. Register the tool in `src/tools/analysis.ts`, returning `toolResult()` / `toolError()` from `shared.ts`
 4. The analyzer can use `getProjectIndex(reader)` for cross-reference data
 
 ### Adding a New Mutation Tool
 
-1. Add the tool in `src/tools/mutations.ts` inside `registerMutationTools()`
+1. Add the tool to the domain module it belongs to (`object-tools.ts`, `event-tools.ts`, `layout-tools.ts`, `animation-tools.ts`, `timeline-tools.ts` or `project-tools.ts`), inside its `register*Tools(deps)` function. A new domain gets its own module, registered in `src/tools/mutations.ts`.
 2. Follow the safety pattern:
    - Validate inputs (use `validateName()`, `validateSubfolder()`)
+   - For new object type or family names, check `findObjectClassNameClash()` (names clash ignoring case)
    - Check addon registration with `writer.ensureAddonRegistered()`
    - Generate IDs with `idGen.generateSid()` / `idGen.generateUid()`
    - Build data from templates in `templates.ts`
+   - For event sheet changes, call `checkLoadRulesBeforeWrite()` and refuse the write when it reports errors
    - Write with `writer.writeEntityFile()` (handles backup/validate/verify)
    - Update c3proj with `writer.addToProject()` if needed
-   - Return a `WriteResult`
+   - Return a `WriteResult` through `toolResult()`, which adds the `editorNote` to completed writes
+3. Add tests in `test/tools/` that call the handler through `test/mocks/mock-server.ts`
 
 ### Adding a New Template
 
 1. Open `src/construct3/templates.ts`
 2. Add a builder function that returns `Record<string, unknown>`
 3. Validate all field names against a real C3 project file — C3 uses a mix of camelCase (`isGlobal`) and kebab-case (`plugin-id`)
-4. Export and use in `mutations.ts`
+4. Export and use it in the tool module that needs it
 
 ## C3 File Format Notes
 
 Key things to know when working with Construct 3 project files:
 
-- **SIDs** are ~15-digit random integers, globally unique across ALL entities in the project
+- **SIDs** are ~15-digit random integers. The editor refuses to open a project in which two object types or families share a SID, and its loader also checks function parameter SIDs; duplicates among events, conditions, actions and layout instances are common in editor-saved projects and open fine (see `classifySidDuplicate()` in `load-rules.ts`). New SIDs are still generated unique across the whole project
 - **UIDs** are sequential integers, only on layout instances and singleglobal-inst objects
 - **Cross-references are by NAME** — event sheets reference objects as `"objectClass": "Name"`, layouts as `"type": "Name"`
 - **c3proj containers** use `{ items: string[], subfolders: Subfolder[] }` recursive structure
 - **usedAddons** in c3proj must list every plugin, behavior, and effect used
 - **Global plugins** (Audio, AJAX, Mouse, etc.) use `singleglobal-inst` instead of layout placement
-- **JSON formatting**: C3 uses tab indentation (`\t`)
+- **Behavior conditions/actions** name their behavior under `behaviorType`; a condition or action that names its behavior only under the legacy `behavior-type` key makes the editor refuse to open the project (a leftover `behavior-type` next to a valid `behaviorType` is ignored)
+- **Timelines** are stored under `timelines/`, in folders that mirror their project-bar folders; the container's unnamed subfolder holds transitions
+- **JSON formatting**: C3 uses tab indentation (`\t`), LF line endings, no trailing newline and no BOM. Existing files keep whatever style they have on disk (e.g. CRLF from a git `core.autocrlf` checkout)
 - **Field naming**: Mostly camelCase for object properties (`isGlobal`, `behaviorTypes`), kebab-case for some identifiers (`plugin-id`, `initially-visible`)
 
 ## Cache Invalidation
@@ -152,12 +200,24 @@ The `ProjectWriter.invalidateAll()` method handles all three. The `addToProject(
 
 ## Testing
 
-Currently tested manually against real C3 projects. To test:
+The Vitest suite (`test/**/*.test.ts`) runs without Construct 3 and without network access:
+
+```bash
+npm test                              # all suites
+npx vitest run test/tools             # one folder
+npx vitest run --maxWorkers=2         # fewer workers on low-memory machines
+```
+
+- Tool tests register the real handlers on the mock server in `test/mocks/mock-server.ts` and call them with `callTool()`.
+- Tests that write copy a fixture from `test/fixtures/` to a temporary folder first; the committed fixtures are never changed.
+- Fixtures contain no proprietary content: `minimal-project` is hand-written, `c3-loadable-minimal` was derived with `scripts/derive-minimal-fixture.ts` and opened in the editor (its uniqueId, SIDs, version, layer names and a layer color were replaced with generated or default values afterwards, as the script now does; that version has not been reopened in the editor yet), and `runtime-traps-real` holds event sheets from public MIT-licensed projects (sources in its README).
+
+Tests prove what the files look like, not that Construct 3 accepts them. Before a release, also run the server against a real C3 project:
 
 1. Build: `npm run build`
 2. Start with a test project: `node dist/index.js /path/to/test-project`
 3. Connect via Claude Code or Claude Desktop
-4. Run through the verification steps in the CHANGELOG
+4. Run through the checklist below, then close and reopen the project in the Construct 3 editor and check that it opens
 
 ### Manual Test Checklist
 
@@ -170,6 +230,9 @@ Currently tested manually against real C3 projects. To test:
 - [ ] `get_eventsheet_flow` in mermaid and JSON format
 - [ ] `find_orphaned_objects`
 - [ ] `analyze_performance`
+- [ ] `validate_project`
+- [ ] `locate_event` and `get_eventsheet_outline` for a sheet open in the editor
+- [ ] `find_runtime_traps`
 
 **Mutation tools:**
 - [ ] `create_object` with Sprite, Text, and global plugin
@@ -187,7 +250,9 @@ Currently tested manually against real C3 projects. To test:
 - [ ] `add_event_block` with conditions, actions, and group path
 - [ ] `add_animation_to_sprite` on an existing Sprite
 - [ ] `update_animation_properties` (speed, looping, ping-pong)
+- [ ] `create_timeline` in a subfolder, then `update_timeline` and `delete_timeline`
 - [ ] Verify `.bak` backup files are created
+- [ ] Verify written files keep their line endings (no whole-file diffs in git)
 - [ ] Verify all read tools still work after writes
 
 **Safety tests:**
@@ -196,12 +261,14 @@ Currently tested manually against real C3 projects. To test:
 - [ ] Global on layout: `add_instance_to_layout` with Audio object — must reject
 - [ ] Unknown plugin: `create_object({ pluginId: "NonExistent" })` — must reject
 - [ ] Duplicate name: `create_object` with existing name — must reject
+- [ ] Case-only clash: `create_object` with an existing family's name in other case — must reject
+- [ ] Load-time gate: `add_event_block` with an unterminated string in an expression — must reject
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Make changes and build: `npm run build`
+3. Make changes, build and test: `npm run build && npm test`
 4. Test against a real C3 project
 5. Commit with clear message
 6. Push and open a Pull Request
@@ -213,7 +280,8 @@ Currently tested manually against real C3 projects. To test:
 - All tool handlers must catch errors and return structured responses
 - Mutation tools must follow the backup/validate/write/verify pattern
 - Use existing helper functions (`validateName`, `toolResult`, `toolError`)
+- Keep test data synthetic: no content from private projects in code, tests or fixtures
 
 ---
 
-**Last Updated**: 2026-02-21
+**Last Updated**: 2026-09-26

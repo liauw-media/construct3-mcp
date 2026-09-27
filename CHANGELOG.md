@@ -24,6 +24,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `create_object`, `create_family` and `update_family` refuse names that clash with another object type or family, and family members that mix plugins (#18).
 - Duplicate-SID reports locate event sheet entries by event path and index and no longer advise re-saving the project; behavior and instance variable SID clashes are warnings (#18).
 - The `review_game_logic` and `explain_eventsheet` prompts point to `find_runtime_traps` and the pitfalls resource (#20).
+- `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md` refreshed to match the code: source tree, write flow (backups, atomic writes, project lock), analyzers and the load-time gate.
 
 ### Fixed
 
@@ -40,7 +41,7 @@ Post-release: VAL-02's original "builds a minimal playable project" claim was st
 #### Added
 
 - **`scripts/derive-minimal-fixture.ts`** — Reproducer that prunes a known-good C3 project into a minimal, shippable fixture. Two-stage prune (drop third-party addons → aggressive minimize to one empty layout + one empty event sheet). Iterated via live Construct 3 editor feedback.
-- **`test/fixtures/c3-loadable-minimal/`** — 11 files, ~18 KB packed. IP-free. **Validated 2026-04-16** by loading into Construct 3 editor via EditorBridge automation — opens cleanly, no "Failed to open project" dialog.
+- **`test/fixtures/c3-loadable-minimal/`** — 11 files, ~18 KB packed. IP-free. **Validated 2026-04-16** by loading into Construct 3 editor via editor automation — opens cleanly, no "Failed to open project" dialog.
 - **Third VAL-02 test** — Packs the C3-loadable fixture and verifies structural invariants. Protects the committed fixture from drift.
 
 #### Changed
@@ -65,16 +66,16 @@ Milestone 1 closure: full primitive surface, community-ready codebase, end-to-en
 
 #### GOV-01 — Internal reference scrub
 
-- Removed all EditorBridge, MyStudio, and RGS-specific references from `src/` and `test/`
+- Removed all references to internal tooling, company names and internal platforms from `src/` and `test/`
 - `src/runtime/bridge.ts` — doc comment rewritten to generic automation language (Playwright, curl, CDP)
-- `src/tools/runtime-tools.ts` — all five EditorBridge references replaced with generic equivalents; `MyStudioPlatformConnect` example replaced with `MyPlugin`
-- `src/index.ts` — Phase 4 comment updated to remove EditorBridge reference
+- `src/tools/runtime-tools.ts` — all five internal tool references replaced with generic equivalents; a company-specific plugin example replaced with `MyPlugin`
+- `src/index.ts` — Phase 4 comment updated to remove an internal tool reference
 
 #### GOV-02 — Public docs scrub
 
-- `README.md` — removed MyStudio Construct MCP cross-link and slot machine reference; updated Authors section; reworded EditorBridge references to Playwright/CDP; updated roadmap and Known Limitations
-- `docs/EXAMPLES.md` — replaced `MyStudio` author example with `My Studio`
-- `package.json` — `author` field changed from `MyStudio` to `construct3-mcp contributors`
+- `README.md` — removed a cross-link to an internal project and a genre-specific reference; updated Authors section; reworded internal tool references to Playwright/CDP; updated roadmap and Known Limitations
+- `docs/EXAMPLES.md` — replaced a company-name author example with a generic one
+- `package.json` — `author` field changed from a company name to `construct3-mcp contributors`
 
 #### GOV-03 — Version bump
 
@@ -105,7 +106,7 @@ Milestone 1 closure: full primitive surface, community-ready codebase, end-to-en
 
 #### Infrastructure
 
-- `pack_project` tool description updated (removed EditorBridge upload reference)
+- `pack_project` tool description updated (removed an internal upload tool reference)
 - `generate_bridge_eval_script` description updated (generic CDP language)
 
 ## [1.6.0] - 2026-03-02

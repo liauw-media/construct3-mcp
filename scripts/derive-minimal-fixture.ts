@@ -2,15 +2,20 @@
 // Derive a C3-loadable minimal fixture by pruning a known-good seed project.
 //
 // Two-stage:
-//   Stage 1: drop three third-party addons + their object types + all manifest
-//            refs. Proves C3 accepts the pruned output. (~92 MB, slot-IP inside.)
+//   Stage 1: drop third-party addons + their object types + all manifest
+//            refs. Proves C3 accepts the pruned output. (~92 MB, still contains
+//            proprietary seed assets.)
 //   Stage 2: drop all object types, all non-Start layouts, all non-MainSheet
-//            sheets, clear all image/sound refs, sanitize metadata. Empty-layout
-//            fixture suitable for OSS repo.
+//            sheets, clear all image/sound refs, keep only Scirra addons,
+//            sanitize metadata, give the kept files fresh SIDs and the layers
+//            neutral names and colors. Empty-layout fixture suitable for OSS
+//            repo.
 //
-// Usage:
-//   npx tsx scripts/derive-minimal-fixture.ts            # Stage 2 (default)
-//   npx tsx scripts/derive-minimal-fixture.ts --stage1   # Stage 1 only
+// Usage (the source folder is required; third-party addon ids to drop go in
+// C3_DROP_ADDON_IDS, comma-separated):
+//   npx tsx scripts/derive-minimal-fixture.ts <source-dir>            # Stage 2 (default)
+//   npx tsx scripts/derive-minimal-fixture.ts <source-dir> --stage1   # Stage 1 only
+//   C3_DROP_ADDON_IDS=VendorA_Addon,VendorB_Addon npx tsx scripts/derive-minimal-fixture.ts <source-dir>
 
 import { join } from 'path';
 import {
@@ -26,10 +31,10 @@ import { registerRuntimeTools } from '../src/tools/runtime-tools.js';
 import { generatePlaceholderPng } from '../src/construct3/png-generator.js';
 
 // Third-party / proprietary addons stripped when deriving an IP-free fixture.
-// Extend this for whatever addons your own source project uses.
+// List the ones your own source project uses, comma-separated, in
+// C3_DROP_ADDON_IDS.
 const DROPPED_ADDON_IDS = new Set([
   'Gritsenko_Spine',
-  'TegaGame_gates_of_olympus',
   ...(process.env.C3_DROP_ADDON_IDS ?? '')
     .split(',')
     .map((id) => id.trim())
@@ -39,6 +44,40 @@ const DROPPED_ADDON_IDS = new Set([
 interface FolderSlice {
   items: string[];
   subfolders: Array<{ name: string; items: string[]; subfolders: unknown[] }>;
+}
+
+/** Random 15-digit SID, unique among the ones this run hands out. */
+function makeSidSource(): () => number {
+  const used = new Set<number>();
+  return () => {
+    let sid: number;
+    do {
+      sid = Math.floor(Math.random() * 900_000_000_000_000) + 100_000_000_000_000;
+    } while (used.has(sid));
+    used.add(sid);
+    return sid;
+  };
+}
+
+/** Replace every numeric "sid" in a JSON tree with a fresh one. */
+function refreshSids(node: unknown, nextSid: () => number): void {
+  if (Array.isArray(node)) {
+    for (const item of node) refreshSids(item, nextSid);
+  } else if (node && typeof node === 'object') {
+    const obj = node as Record<string, unknown>;
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === 'sid' && typeof value === 'number') obj[key] = nextSid();
+      else refreshSids(value, nextSid);
+    }
+  }
+}
+
+/** Random project uniqueId in Construct 3's shape (11 characters, a-z0-9). */
+function randomUniqueId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = chars[Math.floor(Math.random() * 26)];
+  while (id.length < 11) id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
 }
 
 function pruneFolder(folder: FolderSlice | undefined, dropped: Set<string>): void {
@@ -56,7 +95,7 @@ function pruneFolder(folder: FolderSlice | undefined, dropped: Set<string>): voi
 async function main() {
   // Source project to derive the fixture from. Pass a path; there is no
   // default, so this script never embeds a project name.
-  const src = process.argv[2];
+  const src = process.argv.slice(2).find(arg => !arg.startsWith('--'));
   if (!src) {
     console.error(
       'ERROR: pass the source Construct 3 project directory, e.g. ' +
@@ -106,7 +145,7 @@ async function main() {
     }
   }
 
-  // Drop matching image folders (e.g. images/spine_a-default/)
+  // Drop matching image folders (e.g. images/<objectType>-default/)
   const imgDir = join(work, 'images');
   if (existsSync(imgDir)) {
     for (const sub of readdirSync(imgDir)) {
@@ -142,7 +181,7 @@ async function main() {
   pruneFolder(c3proj.objectTypes, dropped);
 
   // Prune rootFileFolders.general for the Spine subfolder (we deleted files/Spine/).
-  // C3's loader walks this manifest and errors "missing file path 'files\Spine\ls_a.json'"
+  // C3's loader walks this manifest and errors "missing file path 'files\Spine\<file>.json'"
   // if we keep the manifest entries without the files.
   const general = c3proj.rootFileFolders?.general;
   if (general?.subfolders) {
@@ -250,8 +289,10 @@ async function main() {
 
   // Rename project + sanitize identifying properties
   c3proj.name = 'C3 Minimal Base';
+  c3proj.uniqueId = randomUniqueId();
   if (c3proj.properties) {
     c3proj.properties.name = 'C3 Minimal Base';
+    c3proj.properties.version = '1.0.0.0';
     c3proj.properties.description = 'Minimal C3 test fixture for construct3-mcp.';
     c3proj.properties.author = 'construct3-mcp';
     c3proj.properties.authorEmail = '';
@@ -267,6 +308,15 @@ async function main() {
 
     const keepLayout = 'Start';
     const keepSheet = 'MainSheet';
+    const nextSid = makeSidSource();
+
+    // Keep only Scirra's own addons, whatever C3_DROP_ADDON_IDS listed: no
+    // object type is left, and a third-party addon id would name its vendor.
+    if (Array.isArray(c3proj.usedAddons)) {
+      const before = c3proj.usedAddons.length;
+      c3proj.usedAddons = c3proj.usedAddons.filter((a: any) => a?.author === 'Scirra');
+      console.log(`usedAddons (Scirra only): ${before} → ${c3proj.usedAddons.length}`);
+    }
 
     // Drop all objectTypes (recursively — subfolders like objectTypes/Array/
     // hold plugin-type-grouped JSONs in real projects)
@@ -329,15 +379,23 @@ async function main() {
     };
     filterFolder(c3proj.layouts);
 
-    // Empty Start layout instances + set viewport to something neutral
+    // Empty Start layout instances; neutral layer names and colors, fresh SIDs
     const startPath = join(layDir, `${keepLayout}.json`);
     if (existsSync(startPath)) {
       const start: any = JSON.parse(readFileSync(startPath, 'utf-8'));
       if (Array.isArray(start?.layers)) {
-        for (const layer of start.layers) {
-          layer.instances = [];
-        }
+        let layerNo = 0;
+        const neutralLayers = (layers: any[]): void => {
+          for (const layer of layers) {
+            layer.name = `Layer ${layerNo++}`;
+            layer.instances = [];
+            layer.backgroundColor = [1, 1, 1, 1];
+            if (Array.isArray(layer.subLayers)) neutralLayers(layer.subLayers);
+          }
+        };
+        neutralLayers(start.layers);
       }
+      refreshSids(start, nextSid);
       writeFileSync(startPath, JSON.stringify(start, null, '\t'), 'utf-8');
     }
 
@@ -364,6 +422,7 @@ async function main() {
     if (existsSync(mainPath)) {
       const main: any = JSON.parse(readFileSync(mainPath, 'utf-8'));
       main.events = [];
+      refreshSids(main, nextSid);
       writeFileSync(mainPath, JSON.stringify(main, null, '\t'), 'utf-8');
     }
 
@@ -395,6 +454,7 @@ async function main() {
         }
       }
       // Keep script folder intact — it may have the runtime bridge reference
+      refreshSids(rff, nextSid);
     }
 
     // Set firstLayout, drop firstLayout if pointing elsewhere
@@ -404,7 +464,7 @@ async function main() {
     }
 
     // Replace icon PNGs with placeholder 1×1 transparent PNGs (icons from the
-    // seed project carry slot branding; C3 only needs their presence).
+    // seed project carry proprietary branding; C3 only needs their presence).
     const icoDir = join(work, 'icons');
     if (existsSync(icoDir)) {
       const placeholder = generatePlaceholderPng(1, 1);

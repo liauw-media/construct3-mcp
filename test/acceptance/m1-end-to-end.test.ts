@@ -16,9 +16,11 @@
  * the output in the actual Construct 3 editor.
  *
  * FIXTURE DERIVATION (2026-04-16): scripts/derive-minimal-fixture.ts prunes
- * a known-good seed into a minimal, slot-IP-free fixture committed at
- * test/fixtures/c3-loadable-minimal/. That fixture was validated to open
- * cleanly in the Construct 3 editor. The third test below
+ * a known-good seed into a minimal fixture free of proprietary content,
+ * committed at test/fixtures/c3-loadable-minimal/. That fixture was validated
+ * to open cleanly in the Construct 3 editor. Its uniqueId, SIDs, version,
+ * layer names and a layer color were later replaced with generated or default
+ * values; reopen it in the editor when you can. The third test below
  * ("packs the C3-loadable minimal fixture cleanly") protects it from drift.
  *
  * Flow:
@@ -286,8 +288,8 @@ describe('M1 Structural Round-Trip Acceptance (VAL-02)', () => {
   // fixtures. This test protects against drift: if someone edits the fixture
   // in a way that breaks structural consistency, packing will fail here.
   //
-  // Full editor-load acceptance remains a manual step (or driven by an
-  // not in CI) until browser automation is wired into the test runner.
+  // Full editor-load acceptance remains a manual step (or a browser-automation
+  // run outside CI) until such automation is wired into the test runner.
   it('packs the C3-loadable minimal fixture cleanly', async () => {
     const loadableDir = join(__dirname, '..', 'fixtures', 'c3-loadable-minimal');
     const tmp = await mkdtemp(join(tmpdir(), 'c3-loadable-'));
@@ -317,6 +319,42 @@ describe('M1 Structural Round-Trip Acceptance (VAL-02)', () => {
       expect(localReader.projectData?.objectTypes.items).toEqual([]);
     } finally {
       await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // The loadable fixture ships in the npm package, so it holds only values
+  // generated for it, as Stage 2 of scripts/derive-minimal-fixture.ts writes
+  // them: Scirra addons, a fresh uniqueId and SIDs, and default layer names.
+  it('keeps the C3-loadable minimal fixture to generated, neutral values', async () => {
+    const loadableDir = join(__dirname, '..', 'fixtures', 'c3-loadable-minimal');
+    const readJson = async (rel: string) =>
+      JSON.parse((await readFile(join(loadableDir, rel), 'utf-8')).replace(/^\uFEFF/, ''));
+    const c3proj = await readJson('project.c3proj');
+    const layout = await readJson('layouts/Start.json');
+    const sheet = await readJson('eventSheets/MainSheet.json');
+
+    expect(c3proj.usedAddons.length).toBeGreaterThan(0);
+    for (const addon of c3proj.usedAddons) expect(addon.author).toBe('Scirra');
+    expect(c3proj.uniqueId).toMatch(/^[a-z][a-z0-9]{10}$/);
+    const layerNames = layout.layers.map((layer: { name: string }) => layer.name);
+    expect(layerNames).toEqual(layerNames.map((_: string, i: number) => `Layer ${i}`));
+
+    const sids: number[] = [];
+    const collectSids = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(collectSids);
+      else if (node && typeof node === 'object') {
+        for (const [key, value] of Object.entries(node)) {
+          if (key === 'sid' && typeof value === 'number') sids.push(value);
+          else collectSids(value);
+        }
+      }
+    };
+    collectSids([c3proj, layout, sheet]);
+    expect(sids).toHaveLength(13);
+    expect(new Set(sids).size).toBe(sids.length);
+    for (const sid of sids) {
+      expect(sid).toBeGreaterThanOrEqual(100_000_000_000_000);
+      expect(sid).toBeLessThan(1_000_000_000_000_000);
     }
   });
 

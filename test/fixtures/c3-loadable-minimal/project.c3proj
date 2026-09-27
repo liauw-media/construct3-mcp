@@ -168,7 +168,7 @@
 			"bundled": false
 		}
 	],
-	"uniqueId": "p6uomlgvyeu",
+	"uniqueId": "kj8m701hoaz",
 	"objectTypes": {
 		"items": [],
 		"subfolders": []
@@ -198,7 +198,7 @@
 				{
 					"name": "c3-runtime-bridge.js",
 					"type": "application/javascript",
-					"sid": 793707465361667,
+					"sid": 524900122481657,
 					"file-info": {
 						"purpose": "none"
 					}
@@ -227,7 +227,7 @@
 				{
 					"name": "icon-512.png",
 					"type": "image/png",
-					"sid": 534619364430929,
+					"sid": 208560364582292,
 					"icon-info": {
 						"purpose": "app-icon"
 					}
@@ -235,7 +235,7 @@
 				{
 					"name": "icon-128.png",
 					"type": "image/png",
-					"sid": 856810029862793,
+					"sid": 545151410994892,
 					"icon-info": {
 						"purpose": "app-icon"
 					}
@@ -243,7 +243,7 @@
 				{
 					"name": "icon-256.png",
 					"type": "image/png",
-					"sid": 916131200908877,
+					"sid": 610329293560655,
 					"icon-info": {
 						"purpose": "app-icon"
 					}
@@ -251,7 +251,7 @@
 				{
 					"name": "icon-32.png",
 					"type": "image/png",
-					"sid": 718845456592549,
+					"sid": 119431639064373,
 					"icon-info": {
 						"purpose": "app-icon"
 					}
@@ -259,7 +259,7 @@
 				{
 					"name": "icon-16.png",
 					"type": "image/png",
-					"sid": 479517750751724,
+					"sid": 937960536922804,
 					"icon-info": {
 						"purpose": "app-icon"
 					}
@@ -267,7 +267,7 @@
 				{
 					"name": "icon-64.png",
 					"type": "image/png",
-					"sid": 538325229247215,
+					"sid": 219862170233276,
 					"icon-info": {
 						"purpose": "app-icon"
 					}
@@ -275,7 +275,7 @@
 				{
 					"name": "loading-logo.png",
 					"type": "image/png",
-					"sid": 362087131287796,
+					"sid": 591705440492553,
 					"icon-info": {
 						"purpose": "loading-logo"
 					}
@@ -298,7 +298,7 @@
 	},
 	"properties": {
 		"description": "Minimal C3 test fixture for construct3-mcp.",
-		"version": "1.0.5",
+		"version": "1.0.0.0",
 		"autoIncrementVersion": false,
 		"author": "construct3-mcp",
 		"authorEmail": "",

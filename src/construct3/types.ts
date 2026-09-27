@@ -468,7 +468,7 @@ export interface Instance {
 export interface ObjectReference {
   objectName: string;
   eventSheet: string;
-  path: string; // e.g., "group:CheckBigWin > block:3 > action:2"
+  path: string; // e.g., "group:PlayerMovement > block:3 > action:2"
   context: 'condition' | 'action';
 }
 
