@@ -12,6 +12,8 @@
  * yet modelled here.
  */
 
+import type { UnscannedFileReport } from './analyzers/unscanned-uses.js';
+
 // ─── Project Root ───────────────────────────────────────────
 
 export interface Construct3Project {
@@ -574,6 +576,11 @@ export interface WriteResult {
   generatedUid?: number;
   warnings?: string[];
   backupFile?: string;
+  /**
+   * Registered files the bulk reads skipped that the tool's reference check
+   * searched as text (see analyzers/unscanned-uses.ts)
+   */
+  unscannedFiles?: UnscannedFileReport[];
 }
 
 /** Result of checking references before deletion */

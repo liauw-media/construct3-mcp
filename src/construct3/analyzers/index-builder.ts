@@ -83,6 +83,7 @@ import {
   parameterValues,
 } from '../event-shapes.js';
 import { forEachLayoutInstance, layerPathLabel } from '../layers.js';
+import { unscannedFilesOf, type UnscannedFile } from './unscanned-uses.js';
 
 /** Instances of an object type in one layout, on one layer (or among the non-world instances). */
 export interface InstancePlacement {
@@ -503,12 +504,22 @@ export class ProjectIndex {
   /** Warnings collected during indexing */
   warnings: string[] = [];
 
+  /**
+   * Registered event sheets, layouts, object types and families the bulk
+   * reads skipped (over the size cap, not valid JSON, unreadable; not files
+   * that do not exist). Nothing in them is indexed: the reference checks
+   * search them as text (unscanned-uses.ts).
+   */
+  unscannedFiles: UnscannedFile[] = [];
+
   /** Object type and family names that parameters, expressions and scripts can refer to */
   private referableNames: Set<string> = new Set();
   /** Event variable and function parameter names declared in any event sheet */
   private variableNames: Set<string> = new Set();
   /** SID → name of every object type and family (for object properties that store a SID) */
   private namesBySid: Map<number, string> = new Map();
+  /** Name → SID of every object type and family that could be read */
+  private sidsByName: Map<string, number> = new Map();
   /** Instance variable and behavior names of every object type and family that could be read */
   private classMembers: Map<string, ClassMembers> = new Map();
   /** Lower-cased name → name, for the object types and families in classMembers */
@@ -538,15 +549,20 @@ export class ProjectIndex {
     this.allLayouts = await reader.listLayouts();
     this.referableNames = new Set([...this.allObjects, ...(await reader.listFamilies())]);
 
-    // Instance variables and behaviors of object types and families (for the uses found in events)
+    // Instance variables and behaviors of object types and families (for the uses found in events).
+    // Each bulk read's failures are taken right away: a reload by a concurrent call clears them.
     const objectTypes = await reader.readAllObjectTypes();
+    const objectTypeFailures = reader.getReadFailures('objectTypes');
     const families = await reader.readAllFamilies();
+    const familyFailures = reader.getReadFailures('families');
+    const familyNames = await reader.listFamilies();
     this.indexClassMembers(objectTypes, families);
-    this.unreadableFamilies = (await reader.listFamilies()).some(name => !families.has(name));
+    this.unreadableFamilies = familyNames.some(name => !families.has(name));
     this.functionsName = functionsObjectName(reader);
 
     // Index event sheets (variable names first: parameters are checked against them)
     const eventSheets = await reader.readAllEventSheets();
+    const eventSheetFailures = reader.getReadFailures('eventSheets');
     for (const [, sheet] of eventSheets) {
       if (Array.isArray(sheet.events)) collectVariableNames(sheet.events, this.variableNames);
     }
@@ -571,13 +587,22 @@ export class ProjectIndex {
     for (const [name, data] of [...objectTypes, ...families]) {
       const sid = (data as { sid?: unknown } | null)?.sid;
       if (typeof sid === 'number' && !this.namesBySid.has(sid)) this.namesBySid.set(sid, name);
+      if (typeof sid === 'number') this.sidsByName.set(name, sid);
     }
 
     // Index layouts
     const layouts = await reader.readAllLayouts();
+    const layoutFailures = reader.getReadFailures('layouts');
     for (const [layoutName, layout] of layouts) {
       this.indexLayout(layoutName, layout);
     }
+
+    this.unscannedFiles = [
+      ...unscannedFilesOf('eventSheets', this.allEventSheets, eventSheets, eventSheetFailures),
+      ...unscannedFilesOf('layouts', this.allLayouts, layouts, layoutFailures),
+      ...unscannedFilesOf('objectTypes', this.allObjects, objectTypes, objectTypeFailures),
+      ...unscannedFilesOf('families', familyNames, families, familyFailures),
+    ];
 
     // Index families
     for (const [familyName, familyData] of families) {
@@ -1038,6 +1063,11 @@ export class ProjectIndex {
   /**
    * Get unique event sheets that reference a given object
    */
+  /** SID of an object type or family whose file could be read. */
+  sidOf(name: string): number | undefined {
+    return this.sidsByName.get(name);
+  }
+
   getEventSheetsForObject(objectName: string): string[] {
     const refs = this.objectToEventSheets.get(objectName) || [];
     return [...new Set(refs.map(r => r.eventSheet))];
