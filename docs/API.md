@@ -166,7 +166,7 @@ Event sheet include hierarchy and layout bindings.
 
 ### `get_function_map`
 
-Function definitions and call sites across event sheets. Call sites are *Call function* actions (`via: "callFunction"`), `Functions.Name(...)` calls in the expressions of conditions and actions, function call arguments included (`via: "expression"`), and *Map function* / *Map function default* actions of the Functions object (`via: "function-map"`). A function map registration does not call the function itself; it makes it callable by *Call mapped function*. All three count in `callCount` and `totalCallSites`, and a function that has any of them is not listed in `uncalledFunctions`. Function names are matched ignoring case, as the editor does. Scripts are not scanned.
+Function definitions and call sites across event sheets. Call sites are *Call function* actions (`via: "callFunction"`), `Functions.Name(...)` calls in the expressions of conditions and actions, function call arguments included (`via: "expression"`), and *Map function* / *Map function default* actions of the Functions object (`via: "function-map"`). A function map registration does not call the function itself; it makes it callable by *Call mapped function*. All three count in `callCount` and `totalCallSites`, and a function that has any of them is not listed in `uncalledFunctions`. Function names are matched ignoring case, as the editor does. Scripts are not scanned. Each function has `params`, the names of its parameters as the editor saves them (`functionParameters`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

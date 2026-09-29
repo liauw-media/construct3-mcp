@@ -2,6 +2,12 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- `get_function_map` lists each function's parameters (`params`). It read them from `parameters`, a key neither the editor nor `add_event_to_sheet` writes, instead of `functionParameters`, so every function came out with `params: []`; a function block that has only `parameters` is still read (#38).
+
 ## [1.9.2] - 2026-09-29
 
 ### Highlights

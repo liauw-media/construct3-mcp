@@ -447,6 +447,18 @@ function scriptText(script: unknown): string {
 }
 
 /**
+ * Parameter names of a function block: its `functionParameters`, the key the
+ * editor saves them under, or `parameters` on a block without that key.
+ */
+function functionParameterNames(func: FunctionBlockEvent): string[] {
+  const list = Array.isArray(func.functionParameters) ? func.functionParameters
+    : Array.isArray(func.parameters) ? func.parameters : [];
+  return list
+    .map(p => (p && typeof p === 'object' ? (p as { name?: unknown }).name : undefined))
+    .filter((name): name is string => typeof name === 'string');
+}
+
+/**
  * Names of the event variables (global and local) and function parameters
  * declared in a sheet's events, added to `into`.
  */
@@ -676,9 +688,9 @@ export class ProjectIndex {
         const funcName = func.functionName || 'unknown';
         const funcPath = path ? `${path} > function:${funcName}` : `function:${funcName}`;
 
-        // Record function definition
-        const paramNames = func.parameters?.map(p => p.name) || [];
-        this.functionDefinitions.set(funcName, { sheet: sheetName, params: paramNames });
+        // Record function definition. The editor (and add_event_to_sheet) saves the
+        // parameters under functionParameters; "parameters" is only read when that is absent
+        this.functionDefinitions.set(funcName, { sheet: sheetName, params: functionParameterNames(func) });
 
         // Index conditions & actions
         if (func.conditions) {
