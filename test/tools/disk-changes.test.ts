@@ -1,5 +1,5 @@
 /**
- * The server and the files on disk (#51). Runs the real reader,
+ * The server and the files on disk (#51, #38 item 13). Runs the real reader,
  * writer and ID generator on a copy of the minimal fixture (event sheet
  * MainSheet, layout "Layout 1" with one Sprite instance, UID 0).
  *
@@ -8,6 +8,8 @@
  * - Changes made outside the server between two calls (git restore, a save
  *   in the Construct 3 editor) are seen by the next call.
  * - A write never replaces a change made on disk after the call read the file.
+ * - The ID generator keeps its scan across the server's own writes and scans
+ *   again after an external change, without handing out an ID twice.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -266,5 +268,44 @@ describe('a write never replaces a change made on disk after the call read the f
       await writer.writeEntityFile('eventSheets', 'MainSheet', sheet);
     });
     expect((await readJson('eventSheets/MainSheet.json')).events).toHaveLength(1);
+  });
+});
+
+// ─── The ID generator across writes (#38 item 13) ───────────
+
+describe('the ID generator keeps its scan across the server\'s own writes (#38)', () => {
+  it('a write does not make the next ID scan the project again, and its IDs are known', async () => {
+    expect(await idGen.generateUid(reader)).toBe(1);
+    const scans = vi.spyOn(reader, 'readAllLayouts');
+
+    const layout = await reader.readLayout('Layout 1');
+    layout.layers[0].instances.push({ ...layout.layers[0].instances[0], uid: 5000, sid: 500000000000200 });
+    await writer.writeEntityFile('layouts', 'Layout 1', layout);
+
+    expect(await idGen.generateUid(reader)).toBe(5001);
+    expect(scans).not.toHaveBeenCalled();
+  });
+
+  it('add_event_block after add_event_block does not rescan the project', async () => {
+    const add = () => expectSuccess('add_event_block', {
+      sheetName: 'MainSheet', conditions: [{ id: 'every-tick', objectClass: 'System' }], actions: [],
+    });
+    await add();
+    const scans = vi.spyOn(reader, 'readAllLayouts');
+    await add();
+    await add();
+    expect(scans).not.toHaveBeenCalled();
+  });
+
+  it('a rescan after an external change never hands out an ID twice', async () => {
+    await runInToolCall(async () => {
+      expect(await idGen.generateUid(reader)).toBe(1); // handed out, not written anywhere
+    });
+    // A change on disk: the next call scans again
+    await editJson('eventSheets/MainSheet.json', sheet => { sheet.events = []; });
+    await runInToolCall(async () => {
+      await reader.checkProjectFile();
+      expect(await idGen.generateUid(reader)).toBe(2);
+    });
   });
 });

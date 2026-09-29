@@ -243,13 +243,15 @@ export class Construct3ProjectWriter {
 
   /**
    * After a write of the server's own: record the file's new state, drop the
-   * reader caches and the project index, and reset the ID generator.
+   * reader caches and the project index, and add the IDs in the written text
+   * to the ID generator (it keeps its scan instead of scanning the whole
+   * project again, #38).
    */
-  private afterOwnWrite(filePath: string, state: FileState, _text?: string): void {
+  private afterOwnWrite(filePath: string, state: FileState, text?: string): void {
     this.reader.noteOwnWrite(filePath, state);
     this.reader.invalidateCaches();
     resetProjectIndex(this.reader);
-    this.idGen.reset();
+    if (text !== undefined) this.idGen.noteWrittenText(text);
   }
 
   /**
