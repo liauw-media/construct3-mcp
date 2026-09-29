@@ -124,7 +124,7 @@ class Construct3ProjectReader {
 - **Fuzzy matching**: `findNearestName()` provides "Did you mean?" suggestions
 - **Bounded reads**: Entity and script files over 10MB are refused; a leading BOM is stripped before parsing
 - **Typed read failures**: The per-entity readers throw a `ProjectReadError` with a code (`E_FILE_TOO_LARGE`, `E_FILE_NOT_FOUND`, `E_INVALID_JSON`, `E_READ_ERROR`); the bulk `readAll*()` reads skip such files and record the code per name (`getReadFailures()`), so the ID generator and `validate_project` branch on the code, never on message text. A bulk read stores its failures together with its cached map when it finishes, and callers take them right after the read: a project reload by a concurrent tool call (`invalidateCaches()`) can then drop both, but never leave a cached map without the failures that go with it
-- **Disk state** (`disk-state.ts`, #51): every file read records its state (modification time, size, file id; `null` for a missing file). The reader keeps the states its cached data (bulk caches, and what the project index and the ID generator built from them) came from. `checkProjectFile()` runs at the start of each tool call, resource read and prompt; `ensureCachesFresh()` compares the other files the first time the call uses a bulk cache, the index or the ID generator, and a write checks them before it falls back to the last state the reader saw. A change the server did not make drops the caches and the recorded states, reloads `project.c3proj` and moves the disk epoch, on which the index and the ID generator rebuild. A `project.c3proj` that changed and cannot be parsed is reported to the call and retried on the next one, never served from the old state. A bulk read caches its result only when no invalidation ran while it read
+- **Disk state** (`disk-state.ts`, #51): every file read records its state (modification time, size, file id; `null` for a missing file). The reader keeps the states its cached data (bulk caches, and what the project index and the ID generator built from them) came from. `checkProjectFile()` runs at the start of each tool call, resource read and prompt; `ensureCachesFresh()` compares the other files the first time the call uses a bulk cache, the index or the ID generator, and a write checks them before it falls back to the last state the reader saw. A change the server did not make drops the caches and the recorded states, reloads `project.c3proj` and moves the disk epoch, on which the index and the ID generator rebuild. A `project.c3proj` that changed and cannot be parsed is reported to the call and retried on the next one, never served from the old state. A bulk read caches its result only when no invalidation ran while it read. The check is one file status per file, run in parallel: measured about 20 to 35 µs per file on Windows, so a call that uses cached data pays about 7 to 25 ms on a project of 355 files and about 60 to 110 ms on one of 3,000 files (a call that uses no cached data pays one status, for `project.c3proj`)
 - **Raw ID scan**: `scanEntityIdsRaw()` reads a skipped layout or object type whole, without the size limit and without parsing, and collects its `"uid"` and `"sid"` values with a linear regex; the path goes through the same path map and `resolveProjectPath()` check as the parsed readers
 - **Raw text search**: `searchEntityTextRaw()` searches a skipped file for names (whole words, ignoring case), numbers and bounded patterns (`raw-text-search.ts`), through the same path check. It streams the file in 1MB chunks with an overlap, so memory does not grow with the file, and stops once every term was found; fs errors propagate unwrapped (ENOENT: no file, so no uses). The reference checks use it for the files the index could not parse (`unscanned-uses.ts`)
 
@@ -150,7 +150,8 @@ class Construct3ProjectWriter {
   ensureAddonRegistered(type, id): Promise<string | undefined>
   checkAddonRegistrable(type, id): void                         // throws like ensureAddonRegistered, writes nothing
 
-  // project.c3proj changed on disk since the reader loaded it: StaleFileError
+  // project.c3proj changed on disk during the tool call: StaleFileError (for the tools that
+  // update project.c3proj themselves, before their first write)
   assertProjectFileCurrent(): Promise<void>
 
   // Placeholder images and frame image files in images/
@@ -172,7 +173,9 @@ class Construct3ProjectWriter {
 - **Path traversal protection**: All paths resolved through `resolveProjectPath()` (`path-utils.ts`) and checked against the project directory
 - **Pre-write validation**: JSON round-trip test, null/type checks, 5MB size limit
 - **Backup**: `.bak` file created before every overwrite or delete, once per tool call: inside a tool call scope (`runInToolCall`, opened by `withProjectSync` for every handler) a file the call already backed up, or found missing before its first write, is not backed up again, so the `.bak` holds the state from before the call
-- **No write over changes it did not read**: before replacing or deleting an entity file the writer compares its state on disk with the state the tool call read it in (`stateAsRead`); a difference throws a `StaleFileError` and nothing is written. The check and the write run under a lock per file, so of two parallel calls writing one file the second sees the first one's write. `project.c3proj` updates (the writer's and those of the timeline, addon and runtime tools) compare with the version the reader loaded last (`assertProjectFileCurrent`)
+- **No write over changes it did not read**: before replacing or deleting an entity file the writer compares its state on disk with the state the tool call read it in (`stateAsRead`); a difference throws a `StaleFileError` and nothing is written. The check and the write run under a lock per file, so of two parallel calls writing one file the second sees the first one's write; a create (`createOnly`) checks again under that lock that no file exists, so of two parallel creates of one entity the second is refused
+- **`project.c3proj` changes are merged**: the writer's own updates (`addToProject`, `removeFromProject`, `updateProjectProperties`, addon auto-registration, all through `updateProjectFile`) run after the tool call wrote other files, so they do not refuse: under the project lock they take a change made on disk since the file was loaded in (`reader.checkProjectFile()`: reload, caches dropped, disk epoch moved), read the file right before the write and change only their entry, and read it again when its state changed between that read and the write (refused only after three such rounds). The timeline, addon and runtime tools, which decide on the loaded project and then update `project.c3proj` themselves, refuse a `project.c3proj` changed during the call (`assertProjectFileCurrent`) before their first write
+- **Undo on refusal**: the tool call scope records each file the call changed through the writer (entity files and `project.c3proj`) with its backup. When a later write of the call is refused as stale, the writer puts those files back from their backups, last change first, and removes a file the call created, before it reports the refusal, so the call changes nothing (a `move_events_between_sheets` whose source changed after the target was written leaves no copy behind). A file that changed on disk again since the call wrote it, or whose backup another call replaced meanwhile, is left as it is and named in the message. Image files and files written outside the writer are not part of this; the animation tools roll their image renames back themselves
 - **Atomic write**: Content goes to a `.tmp` file that is then renamed into place; an existing file keeps its name on disk, including its case (`atomic-write.ts`)
 - **No overwrite on create**: Create tools pass `createOnly`, so a new entity is never written over a file that already exists, also one whose name differs only in case
 - **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write. A failure once the backup exists (while or after replacing the file) throws an `EntityWriteError` carrying the backup path, so a change that spans several files can restore this one too (`restoreEntityFile`); its `changedByOtherWrite` tells a concurrent write (a `ConcurrentWriteError` cause) from other failures, so the caller does not restore an old backup over another write's content
@@ -203,7 +206,7 @@ class IdGenerator {
 
 **SID strategy**: Random 15-digit integer (100,000,000,000,000 – 999,999,999,999,999), checked against a set of all existing SIDs scanned from the entire project. Retry up to 100 times on collision.
 
-**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment. Registered layouts and object types that are missing from the bulk reads (over the 10MB cap, invalid JSON) are scanned as text (`scanEntityIdsRaw`) for their UIDs and SIDs; the generator goes by the registered names, so a skipped file is scanned even when its failure record is gone. A registered file that does not exist holds no IDs and is ignored; when a file exists but even the text scan fails, `generateUid()` throws with the file names instead of risking a duplicate UID (SIDs, being random, are still generated).
+**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment. Registered layouts and object types that are missing from the bulk reads (over the 10MB cap, invalid JSON) are scanned as text (`scanEntityIdsRaw`) for their UIDs and SIDs; the generator goes by the registered names, so a skipped file is scanned even when its failure record is gone. A registered file that does not exist holds no IDs and is ignored; when a file exists but even the text scan fails, `generateUid()` throws with the file names instead of risking a duplicate UID (SIDs, being random, are still generated). Each later `generateUid()` first scans those files again: a lock (virus scanner, sync client) may be gone or the file fixed, which does not always change its state on disk, and a file that was deleted or unregistered meanwhile holds no UIDs any more.
 
 **When it scans** (#38, #51): on first use, and again when the reader's disk epoch moved (a change on disk the server did not make). The server's own writes do not trigger a scan: the writer passes each written text to `noteWrittenText()`, which adds every `"sid"`, `"uid"` and `"imageSpriteId"` value in it. A scan adds what it finds to what the generator already knows (nothing is removed, the highest UID never goes down), so an ID handed out earlier, also one whose file was reset on disk since, is never handed out again. Parallel first callers share one scan.
 
@@ -227,7 +230,7 @@ Supporting modules next to the templates:
 | Module | Purpose |
 |--------|---------|
 | `construct3/event-shapes.ts` | The event shapes the editor saves: System else condition, OR blocks, positional function calls, script lines |
-| `construct3/disk-state.ts` | File states (modification time, size, file id), the tool call scope (`AsyncLocalStorage`: states the call read, files it backed up, readers it checked), `StaleFileError` |
+| `construct3/disk-state.ts` | File states (modification time, size, file id), the tool call scope (`AsyncLocalStorage`: states the call read, files it backed up and changed, readers it checked), `StaleFileError` |
 | `construct3/atomic-write.ts` | Temp-file-and-rename writes that keep an existing file's name on disk; case-insensitive file lookup |
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
 | `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
@@ -310,6 +313,7 @@ Claude → create_object({ name: "Enemy", pluginId: "Sprite" })
       → validateJsonData(data)      ← pre-write check
       → resolveJsonTextStyle(...)   ← keep the file's line endings and BOM
       → under the file's lock:
+        → entityFileRefusal         ← createOnly: still no file there (a parallel create is refused)
         → assertUnchangedSinceRead  ← refuse a file changed on disk since the call read it
         → createBackup(filePath)    ← .bak copy, once per tool call
         → atomicWrite(filePath, text) ← temp file, then rename
@@ -317,9 +321,10 @@ Claude → create_object({ name: "Enemy", pluginId: "Sprite" })
         → afterOwnWrite()           ← record the state, clear reader caches and index, IDs to the ID generator
   → writer.addToProject("objectTypes", "Enemy")
       → take the project lock
-      → assertProjectFileCurrent()  ← refuse a project.c3proj changed since it was loaded
+      → reader.checkProjectFile()  ← take in a change made on disk since it was loaded
+      → read c3proj, add "Enemy" to objectTypes.items
       → createBackup(c3proj)        ← once per tool call: skipped when a new plugin's registration backed it up already
-      → add "Enemy" to objectTypes.items
+      → compare its state with the one read ← changed meanwhile: read and add again
       → validate + atomic write + verify, then reader.reloadProject()
   → toolResult(WriteResult)         ← adds the editorNote
 ```
