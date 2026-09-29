@@ -454,12 +454,14 @@ export async function searchFileText(path: string, terms: readonly RawTextTerm[]
 
 // ─── UID and SID scan ────────────────────────────────────────
 
-/** `"uid": <digits>` or `"sid": <digits>`, whitespace allowed around the colon; group 1 is "u" or "s", group 2 the digits */
-const ID_ENTRY = /"([us])id"\s*:\s*(\d+)/g;
-/** "uid" or "sid" with its quotes, at the end of a text */
-const ID_KEY_AT_END = /"[us]id"$/;
-/** The start of such a key at the end of a text: `"`, `"u`, `"ui` or `"uid` (or with "s") */
-const ID_KEY_START_AT_END = /"(?:[us](?:id?)?)?$/;
+/**
+ * `"uid": <digits>`, `"parent-uid": <digits>` (the parent a hierarchy link
+ * names) or `"sid": <digits>`, whitespace allowed around the colon; group 1
+ * is the key, group 2 the digits
+ */
+const ID_ENTRY = /"(uid|parent-uid|sid)"\s*:\s*(\d+)/g;
+/** The keys of ID_ENTRY with their quotes */
+const ID_KEYS = ['"uid"', '"parent-uid"', '"sid"'];
 /**
  * Digits of a number that a piece boundary cuts off that are kept, leading
  * zeros dropped: more than any finite double has, so Number() of the kept
@@ -472,29 +474,50 @@ function keptDigits(digits: string): string {
   return digits.replace(/^0+(?=\d)/, '').slice(0, MAX_KEPT_DIGITS);
 }
 
+/** The key of ID_KEYS (with its quotes) that `text` ends with, if one. */
+function idKeyAtEnd(text: string): string | undefined {
+  return ID_KEYS.find(key => text.endsWith(key));
+}
+
+/** The longest start of a key of ID_KEYS (`"`, `"u`, ..., `"parent-uid`, without the closing quote) that `text` ends with, or ''. */
+function idKeyStartAtEnd(text: string): string {
+  let longest = '';
+  for (const key of ID_KEYS) {
+    for (let length = key.length - 1; length > longest.length; length--) {
+      if (text.endsWith(key.slice(0, length))) {
+        longest = key.slice(0, length);
+        break;
+      }
+    }
+  }
+  return longest;
+}
+
 /**
  * The start of an ID entry at the end of `text` that the next piece may
  * complete, in the shortest form that matches the same way: the key or part
- * of it (`"`, `"u`, `"ui`, `"uid`, `"uid"`), `"uid"` followed by whitespace
- * (kept as one space), or `"uid"` and the colon (whitespace around it
- * dropped). '' when the text does not end with one.
+ * of it (`"`, `"u`, `"ui`, `"uid`, `"uid"`, or of `"parent-uid"`), the key
+ * followed by whitespace (kept as one space), or the key and the colon
+ * (whitespace around it dropped). '' when the text does not end with one.
  */
 function cutOffIdEntry(text: string): string {
   const trimmed = text.trimEnd();
   if (trimmed.endsWith(':')) {
-    const key = trimmed.slice(0, -1).trimEnd().slice(-5);
-    return ID_KEY_AT_END.test(key) ? `${key}:` : '';
+    const key = idKeyAtEnd(trimmed.slice(0, -1).trimEnd());
+    return key ? `${key}:` : '';
   }
-  const key = trimmed.slice(-5);
-  if (ID_KEY_AT_END.test(key)) return trimmed.length < text.length ? `${key} ` : key;
+  const key = idKeyAtEnd(trimmed);
+  if (key) return trimmed.length < text.length ? `${key} ` : key;
   if (trimmed.length < text.length) return '';
-  return ID_KEY_START_AT_END.exec(text.slice(-4))?.[0] ?? '';
+  return idKeyStartAtEnd(text);
 }
 
 /**
  * Incremental scan for the UIDs and SIDs in the text of a layout or object
  * type file the reader skipped (issue #49): every `"uid": <n>` and
- * `"sid": <n>`, wherever it is, without parsing the JSON. push() each piece
+ * `"sid": <n>`, wherever it is, without parsing the JSON, and the UIDs that
+ * hierarchy links name as `"parent-uid": <n>` (a link to a deleted instance
+ * keeps its UID taken; a children entry's is a `"uid"`). push() each piece
  * in order, then finish(): the highest UID and every SID, in text order.
  * Between pieces only the start of an entry that the boundary cut off is
  * kept (a few characters, and the digits of a number cut in two), so the
@@ -528,13 +551,13 @@ export class RawIdScan {
   private scan(text: string, last: boolean): string {
     for (const match of text.matchAll(ID_ENTRY)) {
       if (!last && match.index + match[0].length === text.length) {
-        return `"${match[1]}id":${keptDigits(match[2])}`;
+        return `"${match[1]}":${keptDigits(match[2])}`;
       }
       const value = Number(match[2]);
-      if (match[1] === 'u') {
-        if (value > this.highestUid) this.highestUid = value;
-      } else {
+      if (match[1] === 'sid') {
         this.sids.push(value);
+      } else if (value > this.highestUid) {
+        this.highestUid = value;
       }
     }
     return last ? '' : cutOffIdEntry(text);

@@ -16,7 +16,7 @@ import { parseJsonText, stripBom } from './json-format.js';
 import { scanFileIds, searchFileText, type RawTextTerm } from './raw-text-search.js';
 
 /**
- * Scan raw JSON text for "uid"/"sid" values without parsing it (the scan
+ * Scan raw JSON text for "uid"/"parent-uid"/"sid" values without parsing it (the scan
  * scanEntityIdsRaw streams a file through). Over-approximation (a value
  * inside a string literal) is harmless for high-water and collision
  * purposes. Exported so the test mock shares this exact implementation.

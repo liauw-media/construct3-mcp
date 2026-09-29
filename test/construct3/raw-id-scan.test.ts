@@ -21,7 +21,7 @@ import { mkdtemp, cp, rm, readFile, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { RawIdScan } from '../../src/construct3/raw-text-search.js';
-import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
+import { Construct3ProjectReader, scanIdsInText } from '../../src/construct3/project-reader.js';
 import { Construct3ProjectWriter } from '../../src/construct3/project-writer.js';
 import { IdGenerator } from '../../src/construct3/id-generator.js';
 import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
@@ -53,10 +53,13 @@ const LOWERED_STRING_LIMIT = READER_SIZE_CAP + 64 * 1024;
 
 let tmpDir: string;
 
-/** The scan of #49: two regular expressions over the whole text. */
+/**
+ * The scan of #49, two regular expressions over the whole text, with the
+ * UIDs hierarchy links name ("parent-uid") counted too.
+ */
 function wholeTextScan(content: string): { highestUid: number; sids: number[] } {
   let highestUid = 0;
-  for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) highestUid = Math.max(highestUid, Number(match[1]));
+  for (const match of content.matchAll(/"(?:parent-)?uid"\s*:\s*(\d+)/g)) highestUid = Math.max(highestUid, Number(match[1]));
   const sids = [...content.matchAll(/"sid"\s*:\s*(\d+)/g)].map(match => Number(match[1]));
   return { highestUid, sids };
 }
@@ -81,6 +84,7 @@ function random(seed: number): () => number {
 /** Text made of entry fragments and characters that can start, continue or break an entry. */
 function randomText(next: () => number): string {
   const parts = ['"uid"', '"sid"', '"uid": ', '"sid":', ' : ', ':', '"', 'u', 's', 'id', 'd"', ' ', '\n\t\t', '\u00a0', ',', 'x',
+    '"parent-uid"', '"parent-uid": ', '"parent', 'parent-', '-uid"', '-', 'p', 'ent', '"parent-uid":\n 88',
     '0', '7', '42', '000', '123456789012345', '999999999999999', '"uid":\t\n 31', '"sid" \n:\n 510000000000001'];
   let text = '';
   const length = Math.floor(next() * 40);
@@ -152,8 +156,20 @@ describe('RawIdScan', () => {
       ['"ui', 'd"', ':', '1'],
       ['"uid":', ...Array.from({ length: 50 }, () => '9'.repeat(20)), '}'],
       ['"sid":', '0'.repeat(1000), '42'],
+      ['"parent-', 'uid"', ' : ', '4', '2'],
+      ['{"parent-uid"', ':', '9'],
+      ['"parent-uid"', ' ', '\n', ': 7'],
     ];
     for (const pieces of cases) expect(streamedScan(pieces), JSON.stringify(pieces)).toEqual(wholeTextScan(pieces.join('')));
+  });
+
+  it('counts the UIDs hierarchy links name ("parent-uid"), wherever a piece boundary cuts the entry', () => {
+    const text = '{"uid": 3, "sceneGraphData": {"parent-uid": 42, "uid": 3}}';
+    for (let at = 0; at <= text.length; at++) {
+      expect(streamedScan([text.slice(0, at), text.slice(at)]).highestUid, text.slice(0, at)).toBe(42);
+    }
+    // What project-reader exports (the ID generator's test mock scans with it)
+    expect(scanIdsInText(text).highestUid).toBe(42);
   });
 
   it('holds only the cut-off start of an entry between pieces, however much whitespace follows the key', () => {
