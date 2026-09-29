@@ -2,6 +2,18 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- `get_object_dependencies` and `find_orphaned_objects` no longer report an object as unused while a registered event sheet, layout or family file they could not parse (over the 10MB read limit, not valid JSON) names it or holds its SID, or cannot be read at all: `find_orphaned_objects` lists it in `possiblyUsed` instead of `orphanedObjects` (`count` counts the orphans only), and `get_object_dependencies` gives it `possiblyReferencedIn` (not counted in `referenceCount`) and, project-wide, lists it in `possiblyUsedObjects` instead of `orphanedObjects`. Both return `unscannedFiles`. The new fields appear only while there are such files (#55).
+- The delete and removal tools listed under Fixed, and `rename_animation`, return `unscannedFiles` (each skipped file with its reason and the outcome of the text search: `possible-use` with the `names` found, `no-match` or `unreadable`) whenever they searched such a file (#55).
+
+### Fixed
+
+- The reference checks see uses inside registered files the bulk reads skip (over the 10MB read limit, not valid JSON, unreadable). Before, `delete_object` without `force` deleted an object whose only instances were in a layout over 10MB, without a warning, and the other checks missed such uses the same way. Such files are now searched as text (streamed, without a size limit, about 0.1 s for a 50MB file) for the names each check looks for: `delete_object` (the name in event sheets, layouts and families, the SID in layouts), `delete_family` (name and SID; its instance variables and behaviors together with a member's name), `delete_layout` (instances and an event sheet binding in the layout's own file), `delete_event_sheet` (the sheet name in event sheets and layouts), `delete_event_from_sheet` (the deleted functions and global variables in other event sheets), and the removals of `update_object_properties` and `update_family` (the removed names together with the object, family or leaving member). A match is a possible use: the text search cannot tell a use from the same name in another string, and the message says so. A match, or a file that cannot be read even as text, refuses without `force` and names the files; with `force` the tool goes ahead and names them in a warning; without a match it goes ahead and warns that the file was only searched as text. A registered name without a file does not block. Only these files are searched, and only when there are any (#55).
+- `rename_animation` warns about layouts it could not parse whose instances possibly still start with the old animation name (they are not updated) and about such event sheets that possibly name it, instead of leaving them out silently (#55).
+
 ## [1.9.1] - 2026-09-29
 
 ### Highlights

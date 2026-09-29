@@ -118,8 +118,8 @@ Claude Desktop, Cursor, VS Code and others use a JSON config instead, see [Usage
 |------|-------------|
 | `get_eventsheet_flow` | Event sheet include hierarchy and layout bindings (Mermaid or JSON) |
 | `get_function_map` | Function definitions and call sites across event sheets (Call function actions, `Functions.Name(...)` expression calls, function map registrations) |
-| `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families) |
-| `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances) |
+| `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families); objects that files it could not parse possibly use are marked (`possiblyReferencedIn`, `unscannedFiles`) |
+| `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances); objects that files it could not parse possibly use are listed as `possiblyUsed` instead |
 | `get_asset_usage` | Track sound, image, font, video and project file usage (used, unused or not analysed) |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
 | `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, behaviors and instance variables that events use but their object lacks, missing addons, legacy `"behavior-type"` keys, layout instances without behavior entries, event shapes older versions wrote that the editor never writes, scripts in the one-string shape of older Construct 3 releases, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger and else placement, expression syntax limited to unterminated string literals and backslashes outside them, empty expressions, duplicate names/SIDs, family plugins). Rules verified only in part are reported as warnings (details in [API.md](docs/API.md#validate_project)). `valid` means no errors and every registered file was checked; `complete` (and so `valid`) is false when a registered file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable; listed in `unscannedFiles`) |
@@ -259,7 +259,7 @@ Steps 2, 4 and 5 apply in full to writes that go through the project writer: obj
 **Close and reopen the project in Construct 3 before saving there.** The editor keeps an open project in memory, so saving from a session that was opened before these edits can overwrite them. Its Project Bar reload (F9) re-reads script files only, not event sheets, layouts or `project.c3proj`. Every response that reports a completed write carries this reminder as `editorNote`. Error responses do not, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
 Additional safeguards:
-- **Reference checking** — `delete_object`, `delete_family`, `delete_event_sheet`, and `delete_layout` scan for references before deleting; `update_object_properties` and `update_family` check the events before removing an instance variable, a behavior or a family member.
+- **Reference checking** — `delete_object`, `delete_family`, `delete_event_sheet`, and `delete_layout` scan for references before deleting; `delete_event_from_sheet` checks for calls and uses of the functions and event variables it removes; `update_object_properties` and `update_family` check the events before removing an instance variable, a behavior or a family member. Registered files these checks cannot parse (over the 10MB read limit, not valid JSON) are searched as text for the names they look for: a match is a *possible* use (the name may be in another string), and it refuses without `force` just like a use, as does such a file that cannot be read at all. The response lists these files in `unscannedFiles`; without a match the tool goes ahead and warns that the file was only searched as text.
 - **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error unless `register_addon` added them to `usedAddons` first (it does not check the ID or install anything).
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
@@ -471,6 +471,7 @@ construct3-mcp/
 │   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
+│   │   ├── raw-text-search.ts      # Streamed whole-word text search in files the reader skips
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/
@@ -486,6 +487,7 @@ construct3-mcp/
 │   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
 │   │       ├── legacy-event-shapes.ts # Legacy isElse/isOr/function call/script shape scan and repair
 │   │       ├── delete-references.ts # Function and variable names an event delete would leave dangling
+│   │       ├── unscanned-uses.ts   # Possible uses in registered files the bulk reads skipped
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
 │   │       ├── group-settings.ts   # Event group settings (get_group_settings)
 │   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
