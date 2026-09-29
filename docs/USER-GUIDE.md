@@ -2,7 +2,7 @@
 
 How to install construct3-mcp, connect it to your AI tool and use it on a Construct 3 project without losing work.
 
-This guide is for Construct 3 developers who want to use the server with Claude Code, Claude Desktop, Cursor or VS Code. You do not need to know how MCP works. It was written for version 1.9.0. Unless a section says otherwise, the commands and outputs below come from real runs on Windows 11 with Node.js 22 and Claude Code 2.1.284. Sections that only repeat another vendor's documentation say so.
+This guide is for Construct 3 developers who want to use the server with Claude Code, Claude Desktop, Cursor or VS Code. You do not need to know how MCP works. It was written for version 1.9.1. Unless a section says otherwise, the commands and outputs below come from real runs on Windows 11 with Node.js 22 and Claude Code 2.1.284. Sections that only repeat another vendor's documentation say so.
 
 ## Contents
 
@@ -29,7 +29,7 @@ This guide is for Construct 3 developers who want to use the server with Claude 
 construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 71 tools, 9 resources (5 fixed ones and 4 templates that take the name of an object, event sheet, layout or manual topic) and 7 prompts for one Construct 3 project:
 
 - **Read and explain**: list objects, layouts, event sheets, families, timelines and addons, show an event sheet as a readable outline with the editor's event numbers, find where an object is used, map functions, find unused objects and assets.
-- **Check**: `validate_project` runs 25 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
+- **Check**: `validate_project` runs 26 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
 - **Edit**: create, change and delete objects, families, event sheets and events, layouts, layers, instances, animations and timelines, and change the project metadata (name, version, author, description). Names and references are checked before anything is written, and most rewritten files get a `.bak` copy (exceptions under [.bak files](#bak-files)).
 - **Prepare runtime testing**: add a "bridge" script to your project so you (or a browser-automation tool) can read variables and call functions in a running preview.
 
@@ -74,11 +74,11 @@ npm ci
 `npm ci` installs the dependencies **and** compiles the server into `dist/` (the `prepare` script runs the build). It took 30 to 45 seconds in our tests. The output looks like this:
 
 ```
-> construct3-mcp-server@1.9.0 prepare
+> construct3-mcp-server@1.9.1 prepare
 > npm run build
 
 
-> construct3-mcp-server@1.9.0 build
+> construct3-mcp-server@1.9.1 build
 > tsc
 
 
@@ -402,7 +402,7 @@ You don't need tool names. Ask in plain language and the AI picks the tools. The
 "Is the project OK?" calls `validate_project`:
 
 ```json
-{ "valid": true, "summary": { "errors": 0, "warnings": 0, "info": 0, "checksRun": 25, "entitiesScanned": 3 }, "errors": [], "warnings": [], "info": [] }
+{ "valid": true, "complete": true, "summary": { "errors": 0, "warnings": 0, "info": 0, "checksRun": 26, "entitiesScanned": 3, "unscanned": 0 }, "errors": [], "warnings": [], "info": [], "unscannedFiles": [] }
 ```
 
 ### Make changes
@@ -543,7 +543,7 @@ Work in this order:
    If git answers `Author identity unknown` and `Please tell me who you are`, run the two `git config` commands it prints, with your name and e-mail, and commit again.
 3. **Reconnect the server** if you changed the project in the editor or with git since the server started (Claude Code: `/mcp` > `construct3` > **Reconnect**).
 4. **Ask for the changes.** Read what each write tool is about to do before you approve it, and read the answers: `"success": false` means nothing was changed.
-5. **Run `validate_project`.** `errors` are problems that can stop the editor from opening the project. `warnings` mean "check this": a project can be `"valid": true` and still have warnings such as `missing-behavior-or-variable`. Info entries are hints: `backup-file` lists a `.bak` copy, `orphaned-object` an object that nothing uses yet (every newly created object, until an event uses it).
+5. **Run `validate_project`.** `errors` are problems that can stop the editor from opening the project. `warnings` mean "check this": a project can be `"valid": true` and still have warnings such as `missing-behavior-or-variable`. `"valid": true` also requires `"complete": true`: every registered object type, family, event sheet and layout file was checked. If one exists but could not be checked (over the 10 MB read limit, invalid JSON, unreadable), `complete` is `false`, `unscannedFiles` names it and `valid` is `false`, even with `summary.errors` at 0. Nothing inside such a file was checked (see [Limits](#limits)). Info entries are hints: `backup-file` lists a `.bak` copy, `orphaned-object` an object that nothing uses yet (every newly created object, until an event uses it).
 6. **Review the diff** with `git diff` and `git status`. A typical session changes `project.c3proj`, event sheet and layout JSON files, and adds `objectTypes/<Name>.json` and images for new sprites. For files saved by Construct 3, line endings and tab indentation are kept, so the diff shows only the lines that changed. The test project in this repository was written by hand, so its first change also spreads a few one-line number arrays (such as `"backgroundColor": [0, 0, 0, 0]`) over several lines; projects saved by Construct 3 already store them that way.
 7. **Reopen the project in Construct 3** and look at the new events and objects. Preview the game.
 8. **Commit** and delete the `.bak` files you no longer need.
@@ -554,11 +554,12 @@ If you forgot to close the project: close it in Construct 3 **without saving**, 
 
 ### .bak files
 
-Before the server rewrites or deletes a file, it copies it to `<file>.bak` next to it, for example `eventSheets/MainSheet.json.bak` or `project.c3proj.bak`.
+Before the server rewrites or deletes a JSON file or `project.c3proj`, it copies it to `<file>.bak` next to it, for example `eventSheets/MainSheet.json.bak` or `project.c3proj.bak`.
 
-- There is only **one** `.bak` per file. The next write to the same file overwrites it, so it holds the state before the **last write** to that file, not the state before your session. One request can write the same file twice: after "Add keyboard input", `project.c3proj.bak` already contains the new `Keyboard` addon entry.
-- Nothing deletes them. They are not listed in `project.c3proj`, and `pack_project` leaves them out of the `.c3p`. Whether the Construct 3 editor shows or keeps them was not tested for this guide.
-- Some writes make no `.bak` at all: `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they add the bridge) and PNG images.
+- There is only **one** such `.bak` per file. The next write to the same file overwrites it, so it holds the state before the **last write** to that file, not the state before your session. One request can write the same file twice: after "Add keyboard input", `project.c3proj.bak` already contains the new `Keyboard` addon entry.
+- Sprite frame images work differently. The editor names a frame's image after the frame's index, so `add_frame_to_animation` with an `index` and `delete_frame_from_animation` rename the images of the later frames one index up or down, and every frame keeps its image. The image of a deleted frame, and an image file that no frame uses but sits where a moved image or the new placeholder has to go, are renamed to `<file>.bak` in `images/`, for example `images/player-animation 1-001.png.bak`. If that name is taken, the next one is `<file>.1.bak`, then `<file>.2.bak`, so older copies are kept. The tool's `warnings` name each file.
+- Nothing deletes them. They are not listed in `project.c3proj`, and `pack_project` leaves them out of the `.c3p`. `validate_project` lists them as `backup-file` info, including those in `images/`. Whether the Construct 3 editor shows or keeps them was not tested for this guide.
+- Some writes make no `.bak` at all: `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they add the bridge) and the other image writes. `replace_sprite_image` writes the new PNG over the frame's image, and `create_object` and `add_animation_to_sprite` write their placeholder PNGs over an image file of the same name, for example one left behind by a deleted object or animation.
 
 To list or delete them:
 
@@ -719,6 +720,9 @@ The server still has the lists from before the undo. Reconnect it, see [Undoing 
 **`validate_project` says valid, but the event is wrong or Construct 3 complains.**
 `valid: true` is not a guarantee. Action and condition ids, parameter keys and most expression syntax are not checked. Open the project and look at the new events. Read the `warnings` too.
 
+**`validate_project` says `valid: false`, but `summary.errors` is 0.**
+A registered file over the 10 MB read limit, usually a large layout, was not checked (`unscanned-file` warning). `complete` is `false` and `unscannedFiles` names the file. See [Limits](#limits).
+
 **npm reports vulnerabilities after installing.**
 See [Install](#install). Most come from test tools and from HTTP parts of the MCP SDK that this stdio server never loads; `npm audit fix` is not needed.
 
@@ -735,10 +739,9 @@ Install it and add one object that uses the addon in the Construct 3 editor, sav
 - Construct 3 does not see changes while the project is open. Close it before, or close without saving and reopen after.
 - No check of condition and action ids, parameter names or full expression syntax. Only the editor load-time rules listed under [`validate_project`](API.md#validate_project) are checked.
 - Renames do not update event sheets. A layer renamed with `update_layer` (issue #38) or an event variable renamed with `update_event_variable` is still named by its old name wherever events use it. `rename_animation` does rename the frame image files and the layout instances' start animation, like the editor, but not text in events that names the animation. Objects, families, event sheets, layouts and timelines cannot be renamed by the server.
-- Functions cannot be made async or given a return type yet; change that in the editor (issue #49).
 - Files whose new JSON would be larger than 5 MB (very large layouts or event sheets) cannot be written; the write is refused with `Generated JSON for "..." is too large`.
-- Layout files larger than 10 MB are skipped when the server scans the whole project: `validate_project` then reports them as missing or invalid, and `add_instance_to_layout` can hand out a UID that already exists in them (issue #49). Do not let the server place instances in such projects.
-- Do not insert or delete sprite frames by index on frames with real artwork; use the editor for that (issue #36).
+- Layout, object type, event sheet and family files larger than 10 MB are not read. `validate_project` reports each one as an `unscanned-file` warning and returns `"complete": false` and `"valid": false`: duplicate UIDs and SIDs, broken references and load-time errors inside such a file are not reported. New UIDs still go above the UIDs in a large layout or object type, because the server scans that file as text, but the scan reads the whole file again for the first new UID or SID after each write (one to two seconds per call for a 150 MB layout). Tools that edit the large file itself, such as `add_instance_to_layout` on that layout, report it as not found. Details are under "File too large" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#file-too-large--exceeds-10mb-limit).
+- Sprite frames inserted or deleted by index with version 1.9.0 or older can show their neighbour's image or have none, because those versions did not move the frame images. `validate_project` reports such frames as `frame-image`; [TROUBLESHOOTING.md](TROUBLESHOOTING.md#sprite-frames-show-the-wrong-image-or-validate_project-reports-frame-image) explains the repair. From 1.9.1 on, the frame tools move the images with their frames (see [.bak files](#bak-files)).
 - New instances get sequential UIDs. The server ignores the project setting *UID numbering: Random*, which Scirra recommends for teams, so avoid placing instances with the server on two branches at the same time.
 - Third-party addons must be installed and added in the editor; `register_addon` only edits the addon list.
 - The documentation resources only return links to the Construct 3 manual.
