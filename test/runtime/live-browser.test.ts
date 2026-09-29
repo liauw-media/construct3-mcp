@@ -94,8 +94,9 @@ async function reloadPage(endpoint: string): Promise<void> {
   socket.close();
 }
 
+/** This process's browser profiles: another test run on the machine (in parallel, too) has profiles of its own. */
 async function profileDirs(): Promise<string[]> {
-  return (await readdir(tmpdir())).filter((name) => name.startsWith('c3mcp-chrome-')).sort();
+  return (await readdir(tmpdir())).filter((name) => name.startsWith(`c3mcp-chrome-${process.pid}-`)).sort();
 }
 
 describe.skipIf(!browser)('runtime tools against a real headless browser', () => {
