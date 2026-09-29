@@ -17,6 +17,7 @@ import {
   unscannedFilesOf,
   unscannedWarnings,
   type UnscannedFileReport,
+  type UseRule,
 } from '../construct3/analyzers/unscanned-uses.js';
 import { nameTerm, patternTerm } from '../construct3/raw-text-search.js';
 import {
@@ -151,6 +152,74 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         warning: `The object type "${name}" could not be parsed, so the instance variable names were not checked against its variables.`,
       };
     }
+  }
+
+  /**
+   * Registered family files the reader could not parse (over the 10MB read
+   * limit, not valid JSON) whose text names the object type `objectName`, or
+   * that cannot be read at all: the object is possibly a member of such a
+   * family, whose instance variables and behaviors are unknown. Their text is
+   * also searched for `variableNames`; a report lists those it found next to
+   * the object's name in `names`.
+   */
+  async function unparsedFamiliesNaming(objectName: string, variableNames: readonly string[]): Promise<UnscannedFileReport[]> {
+    const families = await readFamiliesForInstances(reader);
+    const files = unscannedFilesOf('families', await reader.listFamilies(), families, reader.getReadFailures('families'));
+    if (files.length === 0) return [];
+    const object = [nameTerm(objectName)];
+    const rules: UseRule[] = [{ categories: ['families'], allOf: [object] }];
+    if (variableNames.length > 0) rules.push({ categories: ['families'], allOf: [object, variableNames.map(n => nameTerm(n))] });
+    return (await checkUnscannedFiles(reader, files, rules)).filter(r => r.textSearch !== 'no-match');
+  }
+
+  /**
+   * Check the instance variable values `given` for an instance of
+   * `objectName` against the variables it has (`expected`: those of its
+   * object type and the families that could be parsed). A name it has no
+   * variable of is refused (`error`), unless a family file that could not be
+   * parsed possibly declares it (its text names the object and the variable,
+   * or it cannot be read at all): such a name is in `unlisted`, to be written
+   * as given, with a warning. For a `newInstance`, the warning also says that
+   * such a family's other variables and its behaviors got nothing.
+   * `unscanned` lists the family files the warnings are about.
+   */
+  async function checkGivenInstanceVariables(
+    objectName: string,
+    expected: InstanceVariableDef[],
+    given: Record<string, unknown>,
+    newInstance: boolean,
+  ): Promise<{ error: string } | { error?: undefined; unlisted: string[]; warnings: string[]; unscanned: UnscannedFileReport[] }> {
+    const check = checkInstanceVariableValues(expected, given);
+    let families: UnscannedFileReport[] = [];
+    let unlisted: string[] = [];
+    if (check.unknown.length > 0 || newInstance) {
+      families = await unparsedFamiliesNaming(objectName, check.unknown);
+      const unreadable = families.some(r => r.textSearch === 'unreadable');
+      const found = new Set(families.flatMap(r => r.names ?? []));
+      unlisted = check.unknown.filter(name => unreadable || found.has(name));
+    }
+    const refused = check.unknown.filter(name => !unlisted.includes(name));
+    if (refused.length > 0) {
+      return { error: undeclaredVariablesError(objectName, { ...check, unknown: refused }, expected, families) };
+    }
+
+    const warnings: string[] = [];
+    if (check.mistyped.length > 0) {
+      warnings.push(`Instance variable values of another type than the variable: ${check.mistyped.join('; ')}. Written as given.`);
+    }
+    const concerned = newInstance || unlisted.length > 0 ? families : [];
+    if (concerned.length > 0) {
+      const files = concerned.map(r => r.textSearch === 'unreadable'
+        ? describeUnscannedFile(r)
+        : `${describeUnscannedFile(r)}, whose text names "${objectName}"`);
+      warnings.push(`Family file(s) that could not be parsed possibly list "${objectName}" as a member: ${files.join('; ')}. ` +
+        (unlisted.length > 0
+          ? `Their instance variables are unknown, so ${unlisted.map(n => `"${n}"`).join(', ')} ${unlisted.length === 1 ? 'was' : 'were'} written as given, without a check. `
+          : '') +
+        (newInstance ? 'The new instance got no values for their other instance variables and no entries for their behaviors. ' : '') +
+        'Check the instance in the Construct 3 editor once the file is repaired.');
+    }
+    return { unlisted, warnings, unscanned: concerned };
   }
 
   /**
@@ -372,15 +441,16 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
         // A value for every instance variable of the object and its families, like the
         // editor writes them; values given for a variable it does not have are refused
+        // (unless a family file that could not be parsed possibly declares it)
         const expectedVariables = expectedInstanceVariables(args.objectType, objData, families);
-        const variableCheck = checkInstanceVariableValues(expectedVariables, args.instanceVariables ?? {});
-        if (variableCheck.unknown.length > 0) {
-          return toolError(undeclaredVariablesError(args.objectType, variableCheck, expectedVariables));
-        }
-        if (variableCheck.mistyped.length > 0) {
-          warnings.push(`Instance variable values of another type than the variable: ${variableCheck.mistyped.join('; ')}. Written as given.`);
-        }
-        const instanceVariables = buildInstanceVariableValues(expectedVariables, args.instanceVariables);
+        const variableCheck = await checkGivenInstanceVariables(args.objectType, expectedVariables, args.instanceVariables ?? {}, true);
+        if (variableCheck.error !== undefined) return toolError(variableCheck.error);
+        warnings.push(...variableCheck.warnings);
+        const instanceVariables = {
+          // Possibly variables of a family that could not be parsed, which come first
+          ...Object.fromEntries(variableCheck.unlisted.map(name => [name, args.instanceVariables![name]])),
+          ...buildInstanceVariableValues(expectedVariables, args.instanceVariables),
+        };
 
         const uid = await idGen.generateUid(reader);
         const sid = await idGen.generateSid(reader);
@@ -453,6 +523,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           generatedSid: sid,
           generatedUid: uid,
           warnings: warnings.length > 0 ? warnings : undefined,
+          ...unscannedFields(variableCheck.unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -966,21 +1037,20 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         }
         const inst = found.instance;
 
-        // Only the instance variables its object type and families have
+        // Only the instance variables its object type and families have (or a family
+        // file that could not be parsed possibly declares)
         const warnings: string[] = [];
+        let unscanned: UnscannedFileReport[] = [];
         if (args.instanceVariables !== undefined) {
           const declared = await declaredInstanceVariables(inst.type);
           if ('error' in declared) {
             return toolError(declared.error);
           }
           if (declared.variables) {
-            const check = checkInstanceVariableValues(declared.variables, args.instanceVariables);
-            if (check.unknown.length > 0) {
-              return toolError(undeclaredVariablesError(String(inst.type), check, declared.variables));
-            }
-            if (check.mistyped.length > 0) {
-              warnings.push(`Instance variable values of another type than the variable: ${check.mistyped.join('; ')}. Written as given.`);
-            }
+            const check = await checkGivenInstanceVariables(String(inst.type), declared.variables, args.instanceVariables, false);
+            if (check.error !== undefined) return toolError(check.error);
+            warnings.push(...check.warnings);
+            unscanned = check.unscanned;
           } else {
             warnings.push(declared.warning);
           }
@@ -1013,6 +1083,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           action: 'updated',
           backupFile: backupPath,
           warnings: warnings.length > 0 ? warnings : undefined,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -1025,19 +1096,26 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
 /**
  * Error for instance variable values given for names the object type and its
- * families have no instance variable of.
+ * families have no instance variable of. `unparsedFamilies`: family files
+ * that could not be parsed whose text names the object type, but not these
+ * names.
  */
 function undeclaredVariablesError(
   objectType: string,
   check: { unknown: string[]; suggestions: Map<string, string> },
   expected: InstanceVariableDef[],
+  unparsedFamilies: readonly UnscannedFileReport[] = [],
 ): string {
   const names = check.unknown.map(name => {
     const suggestion = check.suggestions.get(name);
     return suggestion ? `"${name}" (names are matched with their letter case: "${suggestion}"?)` : `"${name}"`;
   });
   const defined = expected.map(v => `${v.name} (${v.type})`).join(', ') || '(none)';
-  return `"${objectType}" and its families have no instance variable ${names.join(', ')}. Its instance variables: ${defined}. ` +
+  const unparsed = unparsedFamilies.length > 0
+    ? `Family file(s) ${unparsedFamilies.map(describeUnscannedFile).join('; ')} could not be parsed; their text names "${objectType}" but not ` +
+      `${check.unknown.length === 1 ? 'this name' : 'these names'}. `
+    : '';
+  return `"${objectType}" and its families have no instance variable ${names.join(', ')}. Its instance variables: ${defined}. ${unparsed}` +
     'Add the variable to the object type (update_object_properties) or its family (update_family) first. Nothing was changed.';
 }
 

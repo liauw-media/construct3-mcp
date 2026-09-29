@@ -192,3 +192,60 @@ describe('update_instance', () => {
     expect(data.warnings[0]).toContain('"hp" is a number variable, got "lots"');
   });
 });
+
+describe('a family file that could not be parsed', () => {
+  beforeEach(async () => {
+    await call('update_object_properties', { name: 'Sprite', addVariables: [{ name: 'hp', type: 'number' }] });
+    await call('create_family', { name: 'Foes', pluginId: 'Sprite', members: ['Sprite'] });
+    await call('update_family', { name: 'Foes', addVariables: [{ name: 'armor', type: 'number' }] });
+    // A merge conflict marker: not valid JSON, but the text still names the member and the variable
+    await writeFile(familyPath('Foes'), `<<<<<<< HEAD\n${await readFile(familyPath('Foes'), 'utf8')}`);
+    await reader.loadProject();
+    resetProjectIndex();
+  });
+
+  it('update_instance writes a variable the family\'s text names, with a warning', async () => {
+    const data = await call('update_instance', { layoutName: 'Layout 1', uid: 0, instanceVariables: { armor: 5 } });
+    expect(data.success).toBe(true);
+    expect((await valuesOf()).armor).toBe(5);
+    expect(data.warnings.join(' ')).toContain('possibly list "Sprite" as a member: families/Foes (not valid JSON), whose text names "Sprite"');
+    expect(data.warnings.join(' ')).toContain('"armor" was written as given, without a check');
+    expect(data.unscannedFiles).toEqual([expect.objectContaining({ file: 'families/Foes', textSearch: 'possible-use' })]);
+  });
+
+  it('still refuses a name the family\'s text does not name, and says so', async () => {
+    const data = await call('update_instance', { layoutName: 'Layout 1', uid: 0, instanceVariables: { nosuchvar: 1 } });
+    expect(data.isError).toBe(true);
+    expect(data.text).toContain('no instance variable "nosuchvar"');
+    expect(data.text).toContain('families/Foes (not valid JSON) could not be parsed; their text names "Sprite" but not this name');
+  });
+
+  it('add_instance_to_layout writes a given value of such a family\'s variable and warns that its other values are missing', async () => {
+    const data = await call('add_instance_to_layout', {
+      layoutName: 'Layout 1', layerName: 'Main', objectType: 'Sprite', x: 0, y: 0, instanceVariables: { armor: 2 },
+    });
+    expect(data.success).toBe(true);
+    const values = await valuesOf(data.generatedUid);
+    expect(Object.entries(values)).toEqual([['armor', 2], ['hp', 0]]);
+    expect(data.warnings.join(' ')).toContain('The new instance got no values for their other instance variables');
+    expect(data.unscannedFiles).toEqual([expect.objectContaining({ file: 'families/Foes', textSearch: 'possible-use' })]);
+  });
+
+  it('add_instance_to_layout without values warns that the family\'s values are missing', async () => {
+    const data = await call('add_instance_to_layout', { layoutName: 'Layout 1', layerName: 'Main', objectType: 'Sprite', x: 0, y: 0 });
+    expect(data.success).toBe(true);
+    expect(await valuesOf(data.generatedUid)).toEqual({ hp: 0 });
+    expect(data.warnings.join(' ')).toContain('possibly list "Sprite" as a member: families/Foes (not valid JSON)');
+  });
+
+  it('says nothing about a family file whose text does not name the object', async () => {
+    await writeFile(familyPath('Foes'), '<<<<<<< HEAD\n{"name": "Foes", "members": ["Other"]}');
+    await reader.loadProject();
+    const data = await call('add_instance_to_layout', { layoutName: 'Layout 1', layerName: 'Main', objectType: 'Sprite', x: 0, y: 0 });
+    expect(data.success).toBe(true);
+    expect(data.warnings).toBeUndefined();
+    expect(data.unscannedFiles).toBeUndefined();
+    const refused = await call('update_instance', { layoutName: 'Layout 1', uid: 0, instanceVariables: { armor: 1 } });
+    expect(refused.isError).toBe(true);
+  });
+});
