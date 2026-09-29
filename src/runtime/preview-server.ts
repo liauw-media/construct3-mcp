@@ -16,6 +16,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -311,11 +312,10 @@ async function serve(root: string, request: IncomingMessage, response: ServerRes
       return;
     }
     streaming = true;
-    const stream = handle.createReadStream();
-    await new Promise<void>((done) => {
-      stream.on('error', () => { response.destroy(); done(); });
-      stream.on('end', done);
-      stream.pipe(response);
+    // pipeline() destroys the read stream, and with it closes the file, when
+    // the client goes away mid-download; pipe() left both open.
+    await pipeline(handle.createReadStream(), response).catch(() => {
+      response.destroy();
     });
   } finally {
     // The read stream closes the handle it was given; otherwise close it here.
