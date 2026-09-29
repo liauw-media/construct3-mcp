@@ -969,11 +969,20 @@ export class RuntimeConnectionManager {
         });
         break;
       case "touch":
+        // Touch emulation only for the gesture: left on, the page would keep
+        // reporting a touch screen (navigator.maxTouchPoints) and a game
+        // could switch its input mode.
         await connection.command("Emulation.setTouchEmulationEnabled", {
           enabled: true,
           maxTouchPoints: 5,
         });
-        await this.dispatchTouch(connection, action);
+        try {
+          await this.dispatchTouch(connection, action);
+        } finally {
+          if (connection.isOpen()) {
+            await connection.command("Emulation.setTouchEmulationEnabled", { enabled: false });
+          }
+        }
         break;
       case "key":
         await pressKey(connection, keyDescriptor(action.key), modifierMask(action.modifiers));

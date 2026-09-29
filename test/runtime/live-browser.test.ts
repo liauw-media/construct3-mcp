@@ -139,4 +139,19 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     const clicks = (await inputLog()).filter((e) => e.type === 'click').map((e) => [e.x, e.y]);
     expect(clicks).toEqual([[110, 70]]);
   }, LIVE_TIMEOUT_MS);
+
+  it('taps through touch emulation and leaves the page without touch support afterwards', async () => {
+    const folder = await fakeExport('dom');
+    const { server } = register();
+    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+    const { connectionId } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+    const bridge = async (name: string) => parse(await server.callTool('call_bridge', { connectionId, command: 'callFunction', args: { name } })).result;
+    expect(await bridge('MaxTouchPoints')).toBe(0);
+    await bridge('InputLog');
+
+    parse(await server.callTool('simulate_input', { connectionId, action: { type: 'touch', x: 10, y: 20, gesture: 'tap' }, coordinateSpace: 'canvas' }));
+    const touches = (await bridge('InputLog') as Array<Record<string, unknown>>).filter((e) => e.type === 'touchstart' || e.type === 'touchend');
+    expect(touches.map((e) => e.type)).toEqual(['touchstart', 'touchend']);
+    expect(await bridge('MaxTouchPoints')).toBe(0);
+  }, LIVE_TIMEOUT_MS);
 });

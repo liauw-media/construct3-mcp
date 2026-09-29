@@ -1130,12 +1130,16 @@ describe("simulate_input", () => {
       "Emulation.setTouchEmulationEnabled",
       "Input.dispatchTouchEvent",
       "Input.dispatchTouchEvent",
+      "Emulation.setTouchEmulationEnabled",
     ]);
+    expect(afterTap[0].params).toMatchObject({ enabled: true });
     expect(afterTap[1].params).toMatchObject({
       type: "touchStart",
       touchPoints: [{ x: 10, y: 20, id: 1 }],
     });
     expect(afterTap[2].params).toEqual({ type: "touchEnd", touchPoints: [] });
+    // Touch emulation ends with the gesture, so the page does not stay a touch device.
+    expect(afterTap[3].params).toEqual({ enabled: false });
 
     const swipeStartIndex = fake.cdpCommands().length;
     parseToolResult(await server.callTool("simulate_input", {
@@ -1150,7 +1154,7 @@ describe("simulate_input", () => {
       },
     }));
     const swipe = fake.cdpCommands().slice(swipeStartIndex);
-    expect(swipe).toHaveLength(11);
+    expect(swipe).toHaveLength(12);
     expect(swipe[2]).toMatchObject({
       method: "Input.dispatchTouchEvent",
       params: { type: "touchMove", touchPoints: [{ x: 10, y: 20 }] },
@@ -1160,6 +1164,7 @@ describe("simulate_input", () => {
       params: { type: "touchMove", touchPoints: [{ x: 80, y: 90 }] },
     });
     expect(swipe[10].params).toEqual({ type: "touchEnd", touchPoints: [] });
+    expect(swipe[11].params).toEqual({ enabled: false });
 
     const longPressStartedAt = Date.now();
     parseToolResult(await server.callTool("simulate_input", {
@@ -1167,7 +1172,7 @@ describe("simulate_input", () => {
       action: { type: "touch", x: 30, y: 40, gesture: "longPress" },
     }));
     expect(Date.now() - longPressStartedAt).toBeGreaterThanOrEqual(450);
-    expect(fake.cdpCommands().slice(-2).map((command) => command.params.type)).toEqual([
+    expect(fake.cdpCommands().slice(-3, -1).map((command) => command.params.type)).toEqual([
       "touchStart",
       "touchEnd",
     ]);
