@@ -4,7 +4,25 @@
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Construct3ProjectReader } from '../construct3/project-reader.js';
+import { ProjectReadError, type Construct3ProjectReader } from '../construct3/project-reader.js';
+
+/**
+ * The name hint for a failed get_*_details read. A read that found the file
+ * but could not use it (over the size cap, invalid JSON, unreadable) had the
+ * right name, so suggesting other names would mislead: no hint then.
+ */
+function nameHint(
+  reader: Construct3ProjectReader,
+  error: unknown,
+  name: string,
+  category: 'objects' | 'eventsheets' | 'layouts',
+  listTool: string,
+): string {
+  if (error instanceof ProjectReadError && error.code !== 'E_FILE_NOT_FOUND') return '';
+  const suggestions = reader.findNearestName(name, category);
+  const listHint = `\nUse ${listTool} to see all available names.`;
+  return suggestions.length > 0 ? `\nDid you mean: ${suggestions.join(', ')}?${listHint}` : listHint;
+}
 
 export function registerQueryTools(server: McpServer, reader: Construct3ProjectReader) {
   server.tool(
@@ -96,8 +114,7 @@ export function registerQueryTools(server: McpServer, reader: Construct3ProjectR
           content: [{ type: 'text' as const, text: JSON.stringify(objectData, null, 2) }],
         };
       } catch (error) {
-        const suggestions = reader.findNearestName(args.name, 'objects');
-        const hint = suggestions.length > 0 ? `\nDid you mean: ${suggestions.join(', ')}?\nUse list_objects to see all available names.` : '\nUse list_objects to see all available names.';
+        const hint = nameHint(reader, error, args.name, 'objects', 'list_objects');
         return {
           content: [{ type: 'text' as const, text: `Error reading object "${args.name}": ${error instanceof Error ? error.message : String(error)}${hint}` }],
           isError: true,
@@ -117,8 +134,7 @@ export function registerQueryTools(server: McpServer, reader: Construct3ProjectR
           content: [{ type: 'text' as const, text: JSON.stringify(eventSheetData, null, 2) }],
         };
       } catch (error) {
-        const suggestions = reader.findNearestName(args.name, 'eventsheets');
-        const hint = suggestions.length > 0 ? `\nDid you mean: ${suggestions.join(', ')}?\nUse list_eventsheets to see all available names.` : '\nUse list_eventsheets to see all available names.';
+        const hint = nameHint(reader, error, args.name, 'eventsheets', 'list_eventsheets');
         return {
           content: [{ type: 'text' as const, text: `Error reading event sheet "${args.name}": ${error instanceof Error ? error.message : String(error)}${hint}` }],
           isError: true,
@@ -138,8 +154,7 @@ export function registerQueryTools(server: McpServer, reader: Construct3ProjectR
           content: [{ type: 'text' as const, text: JSON.stringify(layoutData, null, 2) }],
         };
       } catch (error) {
-        const suggestions = reader.findNearestName(args.name, 'layouts');
-        const hint = suggestions.length > 0 ? `\nDid you mean: ${suggestions.join(', ')}?\nUse list_layouts to see all available names.` : '\nUse list_layouts to see all available names.';
+        const hint = nameHint(reader, error, args.name, 'layouts', 'list_layouts');
         return {
           content: [{ type: 'text' as const, text: `Error reading layout "${args.name}": ${error instanceof Error ? error.message : String(error)}${hint}` }],
           isError: true,

@@ -116,7 +116,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances) |
 | `get_asset_usage` | Track sound, image, font, video and project file usage (used, unused or not analysed) |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
-| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, behaviors and instance variables that events use but their object lacks, missing addons, legacy `"behavior-type"` keys, layout instances without behavior entries, event shapes older versions wrote that the editor never writes, scripts in the one-string shape of older Construct 3 releases, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger and else placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Rules verified only in part are reported as warnings (details in [API.md](docs/API.md#validate_project)) |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, behaviors and instance variables that events use but their object lacks, missing addons, legacy `"behavior-type"` keys, layout instances without behavior entries, event shapes older versions wrote that the editor never writes, scripts in the one-string shape of older Construct 3 releases, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger and else placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Rules verified only in part are reported as warnings (details in [API.md](docs/API.md#validate_project)). `valid` means no errors and every registered file was checked; `complete` (and so `valid`) is false when a registered file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable; listed in `unscannedFiles`) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 | `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
 | `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
@@ -140,7 +140,7 @@ node dist/index.js /path/to/your/project.c3proj
 | Tool | Description |
 |------|-------------|
 | `create_event_sheet` | Create a new event sheet with optional includes; refuses names that differ from an existing sheet only in case |
-| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); the names of a new (global) variable and of function parameters are checked like in the editor |
+| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); functions take the editor's return type, *Asynchronous* and *Copy picked* options; the names of a new (global) variable and of function parameters are checked like in the editor |
 | `add_event_block` | Add a block event with conditions + actions (gameplay logic), written in the editor's own shapes: sub-events (also without conditions), else/else-if blocks, OR blocks, function calls, script actions, comment rows; refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) and warns where Else cannot stand (after a triggered event) |
 | `update_event_block` | Update an existing block: modify/add/remove actions and conditions, make it an else or OR block (load-time checked) |
 | `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; function call arguments as an array; load-time checked) |
@@ -236,7 +236,7 @@ Mutation tools follow a strict safety protocol (exceptions below):
 
 1. **Validation** — Names checked for reserved words, path traversal, format. Plugin/behavior IDs validated against `usedAddons`.
 2. **Backup** — JSON files are backed up to `<filename>.bak` before modification.
-3. **ID Generation** — SIDs (15-digit random), UIDs (sequential), and imageSpriteIds (7-digit) are collision-checked against the entire project.
+3. **ID Generation** — SIDs (15-digit random), UIDs (sequential), and imageSpriteIds (7-digit) are collision-checked against the entire project. Layouts and object types over the 10MB read limit or with invalid JSON are scanned as text for their UIDs and SIDs; when a registered layout or object type exists but cannot be read at all, a new UID is refused instead of guessed.
 4. **Write** — JSON is pre-validated (round-trip test, size limit), then written to a temp file and renamed into place. Files keep their text style (see below).
 5. **Verify** — Files are read back, compared with what was written, and re-parsed to confirm integrity.
 6. **Cache Invalidation** — All reader caches and indexes are cleared so subsequent reads see fresh data.

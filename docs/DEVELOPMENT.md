@@ -67,7 +67,7 @@ construct3-mcp/
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/              # Analysis modules
-│   │       ├── index-builder.ts    # Cross-reference index (cached)
+│   │       ├── index-builder.ts    # Cross-reference index (cached per reader)
 │   │       ├── event-flow.ts       # Include hierarchy visualization, function map
 │   │       ├── object-deps.ts      # Object dependency tracking, orphaned objects
 │   │       ├── asset-usage.ts      # Asset tracking
@@ -210,10 +210,12 @@ Key things to know when working with Construct 3 project files:
 After any write operation, three caches must be cleared:
 
 1. **Reader caches** — `reader.invalidateCaches()` clears entity caches
-2. **Project index** — `resetProjectIndex()` clears the cross-reference index
+2. **Project index** — `resetProjectIndex(reader)` clears the cross-reference index of that reader's project
 3. **ID generator** — `idGen.reset()` forces re-scan of existing IDs
 
 The `ProjectWriter.invalidateAll()` method handles all three. The `addToProject()` and `removeFromProject()` methods also call `reader.reloadProject()` which re-reads the c3proj file.
+
+`getProjectIndex(reader)` caches one index per reader, so a script, test or embedding can open several projects in one process: give each project its own reader, writer and `IdGenerator` (a generator scans the project of the reader it is first called with), and open each project with one reader only: a second reader on the same project sees the other's writes neither in its caches nor in its index. A write through the writer or the event tools resets only its own project's index; `resetProjectIndex()` without a reader resets every project's index, which tests use between cases. The MCP server opens one project per process.
 
 ## Testing
 
@@ -282,6 +284,7 @@ Tests prove what the files look like, not that Construct 3 accepts them. Before 
 - [ ] Duplicate name: `create_object` with existing name — must reject
 - [ ] Case-only clash: `create_object` with an existing family's name in other case — must reject
 - [ ] Load-time gate: `add_event_block` with an unterminated string in an expression — must reject
+- [ ] Layout over 10MB: `add_instance_to_layout` on another layout allocates a UID above the big layout's, `validate_project` returns `complete: false` with the file in `unscannedFiles`
 
 ## Contributing
 
