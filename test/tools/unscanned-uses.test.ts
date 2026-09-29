@@ -630,6 +630,42 @@ describe('instance variable, behavior and member removal with event sheets that 
   });
 });
 
+// ─── rename_animation ───────────────────────────────────────
+
+describe('rename_animation with layouts that could not be parsed', () => {
+  it('warns that instances in a layout over the read cap may still start with the old name', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Walk' })]);
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/layouts\/Big \(over the 10MB read limit\).*"Walk".*NOT updated/);
+  });
+
+  it('warns about a layout it cannot read, even as text', async () => {
+    await addEnemy();
+    await addUnreadable('layouts', 'Bad');
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/layouts\/Bad \(could not be read, not even as text\)/);
+  });
+
+  it('only notes that a layout that does not name the animation was searched as text', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Idle' })]);
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    const warnings = result.warnings.join(' ');
+    expect(warnings).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text');
+    expect(warnings).not.toContain('NOT updated');
+  });
+});
+
 // ─── Own files that could not be parsed (review of #55) ─────
 
 /** Cut the end off an entity file, so it is no longer valid JSON. */
@@ -707,41 +743,175 @@ describe('checks whose own definition file could not be parsed', () => {
     expect(result.success).toBe(true);
   });
 
+  it('update_family warns that it could not update the instances of a member whose object type file is not valid JSON', async () => {
+    await addEnemy();
+    await addFoesWithFlash();
+    await breakFile('objectTypes', 'Enemy');
+    await startServer();
+
+    const result = await call('update_family', { name: 'Foes', removeMembers: ['Enemy'] });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toContain('Instances of "Enemy" were NOT updated: objectTypes/Enemy (not valid JSON) could not be parsed');
+  });
+
+  it('delete_family refuses without force when its own file is not valid JSON, deletes with force', async () => {
+    await addEnemy();
+    await addFoes();
+    await breakFile('families', 'Foes');
+    await addParsedSheet('Uses', [block(760000000000010, [setX('Enemy.armor * 2')])]);
+    await startServer();
+
+    const result = await call('delete_family', { name: 'Foes' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.message).toContain('Its own file could not be parsed: families/Foes (not valid JSON); its members, instance variables, behaviors and SID are unknown');
+    expect(result.unscannedFiles).toEqual([expect.objectContaining({ file: 'families/Foes', textSearch: 'not-searched' })]);
+    expect(await exists('families', 'Foes')).toBe(true);
+
+    const forced = await call('delete_family', { name: 'Foes', force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toContain('Deleted with force=true: Its own file could not be parsed: families/Foes');
+    expect(forced.unscannedFiles).toHaveLength(1);
+    expect(await exists('families', 'Foes')).toBe(false);
+  });
+
+  it('delete_object refuses without force when its own file is not valid JSON (its SID is unknown), deletes with force', async () => {
+    await addEnemy();
+    await addParsedLayout('L2', [instance('Sprite', { properties: { object: ENEMY_SID } })]);
+    await breakFile('objectTypes', 'Enemy');
+    await startServer();
+
+    const result = await call('delete_object', { name: 'Enemy' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.message).toContain('Its own file could not be parsed: objectTypes/Enemy (not valid JSON); its SID is unknown');
+    expect(await exists('objectTypes', 'Enemy')).toBe(true);
+
+    const forced = await call('delete_object', { name: 'Enemy', force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toContain('Deleted with force=true: Its own file could not be parsed: objectTypes/Enemy');
+  });
+
+  it('delete_object of another object is not held up by an object type file that could not be parsed', async () => {
+    await addEnemy();
+    await breakFile('objectTypes', 'Enemy');
+    await addEntity('objectTypes', 'Spare', {
+      name: 'Spare', 'plugin-id': 'Sprite', sid: 710000000000200, isGlobal: false,
+      instanceVariables: [], behaviorTypes: [], effectTypes: [], animations: { items: [animation('A', 710000000000201)], subfolders: [] },
+    });
+    await startServer();
+
+    const result = await call('delete_object', { name: 'Spare' });
+    expect(result.success).toBe(true);
+    expect(result.unscannedFiles).toBeUndefined();
+  });
 });
 
-// ─── rename_animation ───────────────────────────────────────
+// ─── Instances in layouts that could not be parsed ──────────
 
-describe('rename_animation with layouts that could not be parsed', () => {
-  it('warns that instances in a layout over the read cap may still start with the old name', async () => {
+describe('instance updates in layouts that could not be parsed', () => {
+  it('update_object_properties warns that instances there were not updated when it removes a behavior', async () => {
     await addEnemy();
-    await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Walk' })]);
+    await addBigLayout('Big', [instance('Enemy', { behaviors: { Fade: { properties: {} } }, instanceVariables: { hp: 5 } })]);
     await startServer();
 
-    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    const result = await call('update_object_properties', { name: 'Enemy', removeBehaviors: ['Fade'] });
     expect(result.success).toBe(true);
-    expect(result.warnings.join(' ')).toMatch(/layouts\/Big \(over the 10MB read limit\).*"Walk".*NOT updated/);
+    expect(result.warnings.join(' ')).toContain(
+      'Instances in layouts that could not be parsed were NOT updated: layouts/Big (over the 10MB read limit), whose text names "Enemy"');
+    expect(result.unscannedFiles).toEqual([
+      { file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use', names: ['Enemy'] },
+    ]);
   });
 
-  it('warns about a layout it cannot read, even as text', async () => {
+  it('update_object_properties says nothing about such a layout without the object, or when no behavior changes', async () => {
     await addEnemy();
-    await addUnreadable('layouts', 'Bad');
+    await addBigLayout('Big', [instance('Sprite')]);
     await startServer();
 
-    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
-    expect(result.success).toBe(true);
-    expect(result.warnings.join(' ')).toMatch(/layouts\/Bad \(could not be read, not even as text\)/);
+    const removed = await call('update_object_properties', { name: 'Enemy', removeBehaviors: ['Fade'] });
+    expect(removed.success).toBe(true);
+    expect(JSON.stringify(removed.warnings ?? [])).not.toContain('NOT updated');
+
+    const added = await call('update_object_properties', { name: 'Enemy', addVariables: [{ name: 'speed', type: 'number' }] });
+    expect(added.success).toBe(true);
+    expect(added.unscannedFiles).toBeUndefined();
   });
 
-  it('only notes that a layout that does not name the animation was searched as text', async () => {
+  it('update_family and delete_family warn that member instances there keep the family\'s behavior entries', async () => {
     await addEnemy();
-    await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Idle' })]);
+    await addFoesWithFlash();
+    await addBigLayout('Big', [instance('Enemy', { behaviors: { Flash: { properties: {} }, Fade: { properties: {} } }, instanceVariables: { armor: 1 } })]);
     await startServer();
 
-    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
-    expect(result.success).toBe(true);
-    const warnings = result.warnings.join(' ');
-    expect(warnings).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text');
-    expect(warnings).not.toContain('NOT updated');
+    const removed = await call('update_family', { name: 'Foes', removeMembers: ['Enemy'] });
+    expect(removed.success).toBe(true);
+    expect(removed.warnings.join(' ')).toContain('Instances in layouts that could not be parsed were NOT updated: layouts/Big');
+    await call('update_family', { name: 'Foes', addMembers: ['Enemy'] });
+
+    const deleted = await call('delete_family', { name: 'Foes' });
+    expect(deleted.success).toBe(true);
+    const warnings = deleted.warnings.join(' ');
+    // The family's own name and SID are not in the layout; the member's instances are
+    expect(warnings).toContain(`layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text (for: Foes, SID ${FOES_SID} of "Foes")`);
+    expect(warnings).toContain('Instances in layouts that could not be parsed were NOT updated: layouts/Big');
+    expect(deleted.unscannedFiles).toEqual([
+      { file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use', names: ['Enemy'] },
+    ]);
+  });
+});
+
+// ─── Encodings and escapes ──────────────────────────────────
+
+describe('files in another encoding, and names written with \\u escapes', () => {
+  const utf16 = (data: unknown, bom: number[]) => Buffer.concat([Buffer.from(bom), Buffer.from(JSON.stringify(data), 'utf16le')]);
+
+  it('delete_object finds an instance in a UTF-16LE layout (with byte order mark)', async () => {
+    await addEnemy();
+    await register('layouts', 'U16');
+    await writeEntity('layouts', 'U16', utf16({ name: 'U16', layers: [{ name: 'Main', sid: 1, instances: [instance('Enemy')] }], sid: 2, eventSheet: '' }, [0xff, 0xfe]));
+    await startServer();
+
+    const result = await call('delete_object', { name: 'Enemy' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([
+      { file: 'layouts/U16', reason: 'not valid JSON', textSearch: 'possible-use', names: ['Enemy'] },
+    ]);
+  });
+
+  it('delete_layout refuses its own UTF-16LE layout with instances', async () => {
+    await register('layouts', 'U16');
+    await writeEntity('layouts', 'U16', utf16({ name: 'U16', layers: [{ name: 'Main', sid: 1, instances: [instance('Sprite')] }], sid: 2, eventSheet: 'MainSheet' }, [0xff, 0xfe]));
+    await startServer();
+
+    const result = await call('delete_layout', { name: 'U16' });
+    expect(result.action).toBe('delete_blocked');
+    expect(await exists('layouts', 'U16')).toBe(true);
+  });
+
+  it('a file without a byte order mark that holds NUL characters counts as unreadable', async () => {
+    await addEnemy();
+    await register('layouts', 'NoBom');
+    await writeEntity('layouts', 'NoBom', Buffer.from(JSON.stringify({ name: 'NoBom', layers: [] }), 'utf16le'));
+    await startServer();
+
+    const result = await call('delete_object', { name: 'Enemy' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([{ file: 'layouts/NoBom', reason: 'not valid JSON', textSearch: 'unreadable' }]);
+  });
+
+  it('delete_object finds a name outside ASCII written with \\u escapes, and a name after a \\u escape', async () => {
+    await addEntity('objectTypes', 'Gegnér', {
+      name: 'Gegnér', 'plugin-id': 'Sprite', sid: 710000000000077, isGlobal: false,
+      instanceVariables: [], behaviorTypes: [], effectTypes: [], animations: { items: [animation('A', 710000000000078)], subfolders: [] },
+    });
+    await addEnemy();
+    await register('eventSheets', 'Esc');
+    await writeEntity('eventSheets', 'Esc', String.raw`{"name":"Esc","events":[{"eventType":"block","sid":1,"conditions":[],"actions":[` +
+      String.raw`{"id":"set-x","objectClass":"Gegnér","sid":2,"parameters":{"x":"1"}},` +
+      String.raw`{"type":"script","script":"const a = 1;\u000bEnemy.getFirstInstance();"}]}]`);
+    await startServer();
+
+    expect((await call('delete_object', { name: 'Gegnér' })).action).toBe('delete_blocked');
+    expect((await call('delete_object', { name: 'Enemy' })).action).toBe('delete_blocked');
   });
 });
 

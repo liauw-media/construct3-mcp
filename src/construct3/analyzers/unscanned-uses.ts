@@ -19,7 +19,12 @@
  *   that no longer exists, ENOENT, holds no uses and is left out): the checks
  *   refuse without force;
  * - "no-match": nothing found; the checks go ahead and warn that the file was
- *   only searched as text.
+ *   only searched as text, and for what (`searchedFor`);
+ * - "not-searched": the file was not searched. With `unchecked`, it is the
+ *   file that defines what the check is about (delete_object's object type,
+ *   delete_family's family): what it holds is unknown, so what depends on it
+ *   could not be checked, and the check refuses without force. Without, the
+ *   analysis had nothing to search it for.
  * A registered file that does not exist (E_FILE_NOT_FOUND) is not a skipped
  * file: it holds no uses. The search runs only while there are skipped files
  * of the categories a check looks at.
@@ -44,7 +49,7 @@ export interface UnscannedFile {
   reason: string;
 }
 
-export type TextSearchOutcome = 'possible-use' | 'no-match' | 'unreadable';
+export type TextSearchOutcome = 'possible-use' | 'no-match' | 'unreadable' | 'not-searched';
 
 /** What the text search of one skipped file found, as tool results list it (`unscannedFiles`). */
 export interface UnscannedFileReport {
@@ -53,6 +58,10 @@ export interface UnscannedFileReport {
   textSearch: TextSearchOutcome;
   /** With "possible-use": the names the text holds, of those the check looks for */
   names?: string[];
+  /** With "no-match": what the text was searched for (names, and descriptions of patterns) */
+  searchedFor?: string[];
+  /** With "not-searched", in a check: what could not be checked because the file could not be parsed */
+  unchecked?: string;
 }
 
 /**
@@ -71,6 +80,11 @@ const REASONS: Record<Exclude<ReadFailureCode, 'E_FILE_NOT_FOUND'>, string> = {
   E_INVALID_JSON: 'not valid JSON',
   E_READ_ERROR: 'could not be read',
 };
+
+/** Why a bulk read skipped a file, for messages: "over the 10MB read limit", "not valid JSON", ... */
+export function describeReadFailure(code: ReadFailureCode): string {
+  return code === 'E_FILE_NOT_FOUND' ? 'not found' : REASONS[code];
+}
 
 /**
  * The registered entities of a category that a bulk read skipped: registered
@@ -133,15 +147,65 @@ export async function checkUnscannedFiles(
   return searched.map(({ file, found }): UnscannedFileReport => {
     if (found === null) return { file: file.file, reason: file.reason, textSearch: 'unreadable' };
     const hits = rulesFor(file).filter(r => r.allOf.every(group => group.some(t => found.has(t.key))));
-    if (hits.length === 0) return { file: file.file, reason: file.reason, textSearch: 'no-match' };
+    if (hits.length === 0) {
+      const searchedFor = [...new Set(rulesFor(file).flatMap(r => r.allOf.flat().map(t => t.key)))];
+      return { file: file.file, reason: file.reason, textSearch: 'no-match', searchedFor };
+    }
     const names = [...new Set(hits.flatMap(r => r.allOf.flatMap(group => group.filter(t => found.has(t.key)).map(t => t.key))))];
     return { file: file.file, reason: file.reason, textSearch: 'possible-use', names };
   });
 }
 
-/** True when a check must refuse without force: a possible use, or a file it could not search. */
+/**
+ * Reports for the files that define what a check is about (the object type
+ * delete_object deletes, the family delete_family deletes), for those of
+ * `own` the bulk reads skipped: what they hold is unknown, so `unchecked`
+ * could not be checked. They are not searched.
+ */
+export function ownFileReports(
+  files: readonly UnscannedFile[],
+  own: ReadonlyArray<{ category: EntityCategory; name: string; unchecked: string }>,
+): UnscannedFileReport[] {
+  return own.flatMap(({ category, name, unchecked }) => files
+    .filter(f => f.category === category && f.name === name)
+    .map((f): UnscannedFileReport => ({ file: f.file, reason: f.reason, textSearch: 'not-searched', unchecked })));
+}
+
+/** True when a check must refuse without force: a possible use, a file it could not search, or its own file unknown. */
 export function blocksWithoutForce(reports: readonly UnscannedFileReport[]): boolean {
-  return reports.some(r => r.textSearch !== 'no-match');
+  return reports.some(r => r.textSearch === 'possible-use' || r.textSearch === 'unreadable' ||
+    (r.textSearch === 'not-searched' && r.unchecked !== undefined));
+}
+
+const OUTCOME_RANK: Record<TextSearchOutcome, number> = { 'unreadable': 3, 'possible-use': 2, 'no-match': 1, 'not-searched': 0 };
+
+/**
+ * One report per file from several searches of the same files (a file a
+ * tool searched for different things): the weightiest outcome, with the
+ * names found and searched for of all of them.
+ */
+export function mergeUnscannedReports(...lists: ReadonlyArray<readonly UnscannedFileReport[]>): UnscannedFileReport[] {
+  const merged = new Map<string, UnscannedFileReport>();
+  for (const report of lists.flat()) {
+    const seen = merged.get(report.file);
+    if (!seen) {
+      merged.set(report.file, { ...report });
+      continue;
+    }
+    const textSearch = OUTCOME_RANK[report.textSearch] > OUTCOME_RANK[seen.textSearch] ? report.textSearch : seen.textSearch;
+    const names = [...new Set([...(seen.names ?? []), ...(report.names ?? [])])];
+    const searchedFor = [...new Set([...(seen.searchedFor ?? []), ...(report.searchedFor ?? [])])];
+    const unchecked = seen.unchecked ?? report.unchecked;
+    merged.set(report.file, {
+      file: seen.file,
+      reason: seen.reason,
+      textSearch,
+      ...(textSearch === 'possible-use' && names.length > 0 ? { names } : {}),
+      ...(textSearch === 'no-match' && searchedFor.length > 0 ? { searchedFor } : {}),
+      ...(unchecked !== undefined ? { unchecked } : {}),
+    });
+  }
+  return [...merged.values()];
 }
 
 function quoted(names: readonly string[] = []): string {
@@ -163,7 +227,8 @@ export function describeUnscannedFile(report: UnscannedFileReport): string {
 export function unscannedRefusal(reports: readonly UnscannedFileReport[]): string {
   const possible = reports.filter(r => r.textSearch === 'possible-use');
   const unreadable = reports.filter(r => r.textSearch === 'unreadable');
-  const sentences: string[] = [];
+  const own = reports.filter(r => r.textSearch === 'not-searched' && r.unchecked !== undefined);
+  const sentences: string[] = own.map(r => `Its own file could not be parsed: ${describeUnscannedFile(r)}; ${r.unchecked}.`);
   if (possible.length > 0) {
     sentences.push(`There are possible uses in files that could not be parsed: ` +
       possible.map(r => `${describeUnscannedFile(r)}, whose text names ${quoted(r.names)}`).join('; ') +
@@ -184,15 +249,23 @@ export function unscannedRefusal(reports: readonly UnscannedFileReport[]): strin
 export function unscannedWarnings(reports: readonly UnscannedFileReport[], done: string): string[] {
   const warnings: string[] = [];
   if (blocksWithoutForce(reports)) {
-    warnings.push(`${done} with force=true: ${unscannedRefusal(reports)} Uses in these files were NOT checked beyond ` +
-      'this text search and were NOT changed.');
+    const searched = reports.some(r => r.textSearch === 'possible-use' || r.textSearch === 'unreadable');
+    warnings.push(`${done} with force=true: ${unscannedRefusal(reports)}` +
+      (searched ? ' Uses in these files were NOT checked beyond this text search and were NOT changed.' : ''));
   }
-  const searched = reports.filter(r => r.textSearch === 'no-match');
-  if (searched.length > 0) {
-    warnings.push(`${searched.map(describeUnscannedFile).join(', ')} could not be parsed and ` +
-      `${searched.length === 1 ? 'was' : 'were'} only searched as text; the search found no possible use.`);
+  for (const r of reports.filter(r => r.textSearch === 'no-match')) {
+    warnings.push(`${describeUnscannedFile(r)} could not be parsed and was only searched as text` +
+      (r.searchedFor && r.searchedFor.length > 0
+        ? ` (for: ${listSome(r.searchedFor)}); none of these was found.`
+        : '; the search found no possible use.'));
   }
   return warnings;
+}
+
+/** "a, b, c" or "a, b, c, d, e and 3 more" */
+function listSome(items: readonly string[], max = 5): string {
+  const shown = items.slice(0, max).join(', ');
+  return items.length > max ? `${shown} and ${items.length - max} more` : shown;
 }
 
 /** Tool result fields for the skipped files a check searched: none when there were none. */

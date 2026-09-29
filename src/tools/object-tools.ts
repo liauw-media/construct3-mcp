@@ -23,14 +23,19 @@ import { forEachLayoutInstance } from '../construct3/layers.js';
 import {
   blocksWithoutForce,
   checkUnscannedFiles,
+  describeReadFailure,
+  describeUnscannedFile,
+  mergeUnscannedReports,
+  ownFileReports,
   unscannedFields,
+  unscannedFilesOf,
   unscannedRefusal,
   unscannedWarnings,
   type UnscannedFileReport,
   type UseRule,
 } from '../construct3/analyzers/unscanned-uses.js';
 import { nameTerm, numberTerm } from '../construct3/raw-text-search.js';
-import type { EntityCategory } from '../construct3/project-reader.js';
+import { classifyReadError, type EntityCategory } from '../construct3/project-reader.js';
 import {
   checkFamilyPlugins,
   findObjectClassNameClash,
@@ -343,6 +348,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             [args.name, { expected, add: addedBehaviors, drop: removedBehaviors }],
           ]));
           warnings.push(...sync.warnings);
+          unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
         }
 
         const result: WriteResult = {
@@ -385,10 +391,18 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const hasRefs = index.isObjectReferenced(args.name);
         const eventSheetRefs = [...new Set(usage.events.map(r => r.eventSheet))];
         const layoutRefs = [...new Set([...usage.placements, ...usage.instanceProperties].map(p => p.layout))];
-        // Files the index could not parse: the name, and the SID an object property holds
-        const unscanned = await checkUnscannedFiles(reader, index.unscannedFiles, nameOrSidRules(
-          args.name, index.sidOf(args.name), ['eventSheets', 'layouts', 'families'],
-        ));
+        // Files the index could not parse: the name, and the SID an object property holds.
+        // The object type's own file: without it, its SID is unknown
+        const unscanned = mergeUnscannedReports(
+          ownFileReports(index.unscannedFiles, [{
+            category: 'objectTypes',
+            name: args.name,
+            unchecked: 'its SID is unknown, so object properties of instances that hold it could not be checked',
+          }]),
+          await checkUnscannedFiles(reader, index.unscannedFiles, nameOrSidRules(
+            args.name, index.sidOf(args.name), ['eventSheets', 'layouts', 'families'],
+          )),
+        );
         const unscannedBlock = blocksWithoutForce(unscanned);
 
         if ((hasRefs || unscannedBlock) && !args.force) {
@@ -701,8 +715,10 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (familyBehaviors.length > 0 && memberChanges.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.set(args.name, family);
-          const plans = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
-          warnings.push(...(await syncLayoutInstances(reader, writer, plans)).warnings);
+          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
+          const sync = await syncLayoutInstances(reader, writer, plans);
+          warnings.push(...planWarnings, ...sync.warnings);
+          unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
         }
 
         const result: WriteResult = {
@@ -751,13 +767,22 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           ...index.memberNamesOf(args.name, 'instance variable'),
           ...index.memberNamesOf(args.name, 'behavior'),
         ];
-        const unscanned = await checkUnscannedFiles(reader, index.unscannedFiles, [
-          ...nameOrSidRules(args.name, index.sidOf(args.name), ['eventSheets', 'layouts']),
-          {
-            categories: ['eventSheets'],
-            allOf: [familyMemberNames.map(n => nameTerm(n)), (index.familyMembers.get(args.name) ?? []).map(n => nameTerm(n))],
-          },
-        ]);
+        // The family's own file: without it, its members, names and SID are unknown
+        let unscanned = mergeUnscannedReports(
+          ownFileReports(index.unscannedFiles, [{
+            category: 'families',
+            name: args.name,
+            unchecked: 'its members, instance variables, behaviors and SID are unknown, so uses through its members ' +
+              'and object properties of instances that hold its SID could not be checked',
+          }]),
+          await checkUnscannedFiles(reader, index.unscannedFiles, [
+            ...nameOrSidRules(args.name, index.sidOf(args.name), ['eventSheets', 'layouts']),
+            {
+              categories: ['eventSheets'],
+              allOf: [familyMemberNames.map(n => nameTerm(n)), (index.familyMembers.get(args.name) ?? []).map(n => nameTerm(n))],
+            },
+          ]),
+        );
         const unscannedBlock = blocksWithoutForce(unscanned);
 
         if ((hasRefs || unscannedBlock) && !args.force) {
@@ -812,10 +837,12 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (familyBehaviors.length > 0 && formerMembers.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.delete(args.name);
-          const plans = await familyMemberPlans(
+          const { plans, warnings: planWarnings } = await familyMemberPlans(
             reader, families, formerMembers.map(m => ({ member: m, joined: false })), familyBehaviors,
           );
-          warnings.push(...(await syncLayoutInstances(reader, writer, plans)).warnings);
+          const sync = await syncLayoutInstances(reader, writer, plans);
+          warnings.push(...planWarnings, ...sync.warnings);
+          unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
         }
 
         const result: WriteResult = {
@@ -825,6 +852,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           action: 'deleted',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -1150,14 +1178,19 @@ interface InstanceSyncPlan {
  *
  * Returns warnings naming the modified layouts, the entries that were missing
  * before the change, and any behavior that got an empty entry because its
- * defaults are not known.
+ * defaults are not known. Layouts that could not be parsed (over the read
+ * cap, not valid JSON) are not updated (issue #55): when a plan adds or drops
+ * entries, their text is searched for the object types' names, and
+ * `unscanned` reports them; a warning names those that possibly hold their
+ * instances or could not be searched.
  */
 async function syncLayoutInstances(
   reader: Construct3ProjectReader,
   writer: Construct3ProjectWriter,
   plans: ReadonlyMap<string, InstanceSyncPlan>,
-): Promise<{ warnings: string[] }> {
+): Promise<{ warnings: string[]; unscanned: UnscannedFileReport[] }> {
   const layouts = await reader.readAllLayouts();
+  const layoutFailures = reader.getReadFailures('layouts');
   const modifiedLayouts: string[] = [];
   const unknownDefaults: InstanceBehavior[] = [];
   /** Per object type: instances that lacked entries the change did not add, and those behavior names */
@@ -1204,7 +1237,36 @@ async function syncLayoutInstances(
       + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores an entry for every behavior of the object and its families on each instance.');
   }
   if (unknownDefaults.length > 0) warnings.push(unknownDefaultsWarning(unknownDefaults));
-  return { warnings };
+
+  const changing = [...plans].filter(([, plan]) => (plan.add?.length ?? 0) > 0 || (plan.drop?.length ?? 0) > 0);
+  const skipped = unscannedFilesOf('layouts', await reader.listLayouts(), layouts, layoutFailures);
+  const unscanned = changing.length > 0 && skipped.length > 0
+    ? await checkUnscannedFiles(reader, skipped, [{ categories: ['layouts'], allOf: [changing.map(([name]) => nameTerm(name))] }])
+    : [];
+  warnings.push(...unsyncedLayoutWarnings(unscanned));
+  return { warnings, unscanned };
+}
+
+/**
+ * Warnings for the layouts syncLayoutInstances could not parse: those whose
+ * text names an object type whose instances it updates (possibly instances,
+ * left as they were), and those it could not search.
+ */
+function unsyncedLayoutWarnings(reports: readonly UnscannedFileReport[]): string[] {
+  const warnings: string[] = [];
+  const possible = reports.filter(r => r.textSearch === 'possible-use');
+  const unreadable = reports.filter(r => r.textSearch === 'unreadable');
+  if (possible.length > 0) {
+    warnings.push('Instances in layouts that could not be parsed were NOT updated: ' +
+      possible.map(r => `${describeUnscannedFile(r)}, whose text names ${(r.names ?? []).map(n => `"${n}"`).join(', ')}`).join('; ') +
+      '. Instances there possibly still have the old behavior entries (a text search cannot tell an instance from the same name ' +
+      'in another string); check them in the Construct 3 editor.');
+  }
+  if (unreadable.length > 0) {
+    warnings.push('Layouts that could not be parsed could not be searched for instances either, and were NOT updated: ' +
+      `${unreadable.map(describeUnscannedFile).join(', ')}.`);
+  }
+  return warnings;
 }
 
 /**
@@ -1218,18 +1280,30 @@ async function familyMemberPlans(
   families: ReadonlyMap<string, unknown>,
   changes: Array<{ member: string; joined: boolean }>,
   familyBehaviors: string[],
-): Promise<Map<string, InstanceSyncPlan>> {
-  const memberObjects = await readMemberObjects(reader, changes.map(c => c.member));
+): Promise<{ plans: Map<string, InstanceSyncPlan>; warnings: string[] }> {
   const plans = new Map<string, InstanceSyncPlan>();
+  const warnings: string[] = [];
   for (const { member, joined } of changes) {
-    const obj = memberObjects.get(member);
-    if (!obj) continue; // missing object type: it has no instances to update
+    let obj: unknown;
+    try {
+      obj = await reader.readObjectType(member);
+    } catch (error) {
+      // A missing object type has no instances to update. One whose file could not be
+      // parsed does (issue #55), but the entries its instances should have are unknown
+      const code = classifyReadError(error);
+      if (code !== 'E_FILE_NOT_FOUND') {
+        warnings.push(`Instances of "${member}" were NOT updated: objectTypes/${member} (${describeReadFailure(code)}) could not ` +
+          `be parsed, so the behaviors its instances need entries for are unknown. Their entries for the family's behaviors ` +
+          `(${familyBehaviors.map(b => `"${b}"`).join(', ')}) were left as they were; check them in the Construct 3 editor.`);
+      }
+      continue;
+    }
     plans.set(member, {
       expected: expectedInstanceBehaviors(member, obj, families),
       ...(joined ? { add: familyBehaviors } : { drop: familyBehaviors }),
     });
   }
-  return plans;
+  return { plans, warnings };
 }
 
 /**

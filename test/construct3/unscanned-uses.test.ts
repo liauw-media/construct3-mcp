@@ -9,6 +9,8 @@ import { MockReader } from '../mocks/mock-reader.js';
 import {
   blocksWithoutForce,
   checkUnscannedFiles,
+  mergeUnscannedReports,
+  ownFileReports,
   unscannedFilesOf,
   unscannedRefusal,
   unscannedWarnings,
@@ -55,9 +57,12 @@ describe('checkUnscannedFiles', () => {
     ]);
     expect(reports).toEqual([
       { file: 'layouts/A', reason: 'not valid JSON', textSearch: 'possible-use', names: ['hp', 'Enemy'] },
-      { file: 'layouts/B', reason: 'not valid JSON', textSearch: 'no-match' },
+      { file: 'layouts/B', reason: 'not valid JSON', textSearch: 'no-match', searchedFor: ['hp', 'Enemy'] },
     ]);
     expect(blocksWithoutForce(reports)).toBe(true);
+    expect(unscannedWarnings(reports.slice(1), 'Deleted')).toEqual([
+      'layouts/B (not valid JSON) could not be parsed and was only searched as text (for: hp, Enemy); none of these was found.',
+    ]);
   });
 
   it('searches only the files of the rules\' categories, and nothing for rules with an empty group', async () => {
@@ -101,5 +106,48 @@ describe('checkUnscannedFiles', () => {
       'There are possible uses in files that could not be parsed: layouts/Big (over the 10MB read limit), whose text names "Enemy". ' +
       'They were found by a text search, which cannot tell a use from the same name in another string.');
     expect(unscannedWarnings(reports, 'Deleted')[0]).toMatch(/^Deleted with force=true: There are possible uses .* NOT changed\.$/);
+  });
+});
+
+describe('ownFileReports and mergeUnscannedReports', () => {
+  const skipped: UnscannedFile[] = [
+    { category: 'families', name: 'Foes', file: 'families/Foes', reason: 'not valid JSON' },
+    { category: 'layouts', name: 'Big', file: 'layouts/Big', reason: 'over the 10MB read limit' },
+  ];
+
+  it('reports the file that defines what a check is about as not searched, and blocks on it', () => {
+    const own = ownFileReports(skipped, [
+      { category: 'families', name: 'Foes', unchecked: 'its members are unknown' },
+      { category: 'objectTypes', name: 'Foes', unchecked: 'not skipped' },
+    ]);
+    expect(own).toEqual([
+      { file: 'families/Foes', reason: 'not valid JSON', textSearch: 'not-searched', unchecked: 'its members are unknown' },
+    ]);
+    expect(blocksWithoutForce(own)).toBe(true);
+    expect(unscannedRefusal(own)).toBe('Its own file could not be parsed: families/Foes (not valid JSON); its members are unknown.');
+    expect(unscannedWarnings(own, 'Deleted')).toEqual([
+      'Deleted with force=true: Its own file could not be parsed: families/Foes (not valid JSON); its members are unknown.',
+    ]);
+  });
+
+  it('a file an analysis did not search for anything does not block', () => {
+    expect(blocksWithoutForce([{ file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'not-searched' }])).toBe(false);
+  });
+
+  it('merges several searches of one file: the weightiest outcome, with all the names', () => {
+    const merged = mergeUnscannedReports(
+      [
+        { file: 'layouts/Big', reason: 'r', textSearch: 'no-match', searchedFor: ['Foes'] },
+        { file: 'eventSheets/S', reason: 'r', textSearch: 'no-match', searchedFor: ['Foes'] },
+      ],
+      [
+        { file: 'layouts/Big', reason: 'r', textSearch: 'possible-use', names: ['Enemy'] },
+        { file: 'eventSheets/S', reason: 'r', textSearch: 'no-match', searchedFor: ['armor'] },
+      ],
+    );
+    expect(merged).toEqual([
+      { file: 'layouts/Big', reason: 'r', textSearch: 'possible-use', names: ['Enemy'] },
+      { file: 'eventSheets/S', reason: 'r', textSearch: 'no-match', searchedFor: ['Foes', 'armor'] },
+    ]);
   });
 });
