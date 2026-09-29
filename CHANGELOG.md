@@ -2,10 +2,19 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
-## [Unreleased]
+## [1.9.1] - 2026-09-29
+
+### Highlights
+
+- **Frame images stay with their frames.** Inserting or deleting a sprite frame by index moves the positional image files with the frames instead of overwriting or misaligning them. Replaced and deleted images are kept as `.bak`, a failed step rolls back images and the object file, and `validate_project` reports frames without an image file (#36).
+- **No duplicate UIDs next to very large files.** Layouts and object types over the 10MB read limit are scanned as text for their UIDs and SIDs, so new instances no longer reuse an ID. `validate_project` reports such files honestly (`unscanned-file`, `complete: false`, `valid: false`) instead of calling them missing (#49, based on work by @BeatsByZann).
+- **Function options.** `add_event_to_sheet` sets a new function's return type, *Asynchronous* and *Copy picked* options (#49).
+- **One cross-reference index per project.** Tools no longer mix up the index of two projects opened in one process, which could let a delete guard miss real uses (#38).
+- **User guide.** [docs/USER-GUIDE.md](docs/USER-GUIDE.md) covers installing the server, connecting Claude Code, Claude Desktop, Cursor and VS Code, a first session, the safe editing workflow and the runtime bridge, verified step by step (#50).
 
 ### Added
 
+- `docs/USER-GUIDE.md`, a verified user guide; README setup instructions corrected (Claude Code does not read `~/.claude/mcp.json`; the server is a stdio server that waits for a client) (#50).
 - `validate_project` check `frame-image`: a warning for Sprite animation frames without their image file in `images/` (the name follows the frame's index and `fileType`, compared ignoring case and Unicode normalization), and info for files named like frames past an animation's last frame that no frame uses. The `backup-file` info also lists `.bak` files directly in `images/`, where the frame tools keep images (#36).
 - `add_event_to_sheet` takes the function options `functionReturnType` (`none`, `number`, `string`, `any`), `functionIsAsync` and `functionCopyPicked`, the editor's *Return type*, *Asynchronous* and *Copy picked*, instead of always writing `none`/`false`/`false` (#49).
 - `validate_project` returns `complete` and `unscannedFiles`: `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable), and `unscannedFiles` names those files (#49).

@@ -1,6 +1,6 @@
 {
   "name": "construct3-mcp-server",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "MCP server that lets Claude, Cursor and other AI assistants read, analyze and safely edit Construct 3 projects — editor-faithful writes with backups and validation.",
   "type": "module",
   "main": "dist/index.js",

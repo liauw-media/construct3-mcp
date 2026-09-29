@@ -2,11 +2,21 @@
 
 > An MCP server that lets Claude, Cursor and other AI assistants read, analyze and safely edit Construct 3 projects — editor-faithful writes with backups and validation. New here? Start with the [User Guide](docs/USER-GUIDE.md).
 
-> **v1.9.0** — Writes follow what the Construct 3 editor itself saves and checks: load-time rules before every event sheet write, the editor's event shapes and name rules, and a `validate_project` without the false reports it gave on editor-saved projects. See [What's new in 1.9.0](#whats-new-in-190) and the [CHANGELOG](CHANGELOG.md).
+> **v1.9.1** — Frame images move with their frames, no duplicate UIDs next to layouts over 10MB, function options in `add_event_to_sheet`, and a new [User Guide](docs/USER-GUIDE.md). See [What's new in 1.9.1](#whats-new-in-191) and the [CHANGELOG](CHANGELOG.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
+
+## What's new in 1.9.1
+
+- **Frame images stay with their frames** — `add_frame_to_animation` with `index` and `delete_frame_from_animation` move the image files with the frames, keep replaced or deleted images as `.bak`, refuse an index past the end and roll back on failure; `validate_project` reports frames without an image file (`frame-image`).
+- **No duplicate UIDs next to files over 10MB** — such layouts and object types are scanned as text for their IDs; `validate_project` reports them as `unscanned-file` with `complete: false`, and `valid` is `false` whenever `complete` is.
+- **Function options** — `add_event_to_sheet` takes `functionReturnType`, `functionIsAsync` and `functionCopyPicked`.
+- **Per-project index cache** — tools no longer mix up two projects opened in one process.
+- **[User Guide](docs/USER-GUIDE.md)** — install, connect your AI tool, first session, safe editing workflow, runtime bridge.
+
+Full list: [CHANGELOG](CHANGELOG.md).
 
 ## What's new in 1.9.0
 
