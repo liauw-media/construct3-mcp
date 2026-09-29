@@ -834,7 +834,7 @@ print(json.dumps({
 
   server.tool(
     'export_for_preview',
-    'Prepare the C3 project for preview testing. Ensures the runtime bridge is injected and worker mode is set to "dom" (required for globalThis access). Returns info needed to serve and open the project.',
+    'Prepare the C3 project for runtime testing: injects the runtime bridge (unless injectBridge is false), reports where the runtime will run ("Use worker"; the bridge is reached on the page and in the worker alike) and lists the next steps: preview in the editor or export, serve_preview, connect_to_game.',
     {
       injectBridge: z.boolean().optional().default(true).describe('Whether to inject the runtime bridge script'),
     },
@@ -846,17 +846,23 @@ print(json.dumps({
 
         const checks: Array<{ check: string; status: string; detail?: string }> = [];
 
-        // Check worker mode
+        // Where the runtime (and with it the bridge) runs. connect_to_game
+        // reaches the bridge on the page and in the runtime's worker, so no
+        // setting is required. "Auto" turns the worker off when the project
+        // uses scripts (manual, "Projects" > "Use worker"), which it does
+        // once the bridge is injected.
         const useWorker = projectData.useWorker ?? 'auto';
-        if (useWorker !== 'dom' && useWorker !== 'no') {
-          checks.push({
-            check: 'workerMode',
-            status: 'warning',
-            detail: `useWorker is "${useWorker}" — should be "dom" for runtime bridge access. Set to "dom" in project settings.`,
-          });
-        } else {
-          checks.push({ check: 'workerMode', status: 'ok' });
-        }
+        const runsInWorker = useWorker === 'worker' || useWorker === 'yes';
+        const runsOnPage = useWorker === 'dom' || useWorker === 'no';
+        checks.push({
+          check: 'workerMode',
+          status: 'ok',
+          detail: runsOnPage
+            ? `useWorker is "${useWorker}": the runtime and the bridge run on the page.`
+            : runsInWorker
+              ? `useWorker is "${useWorker}": the runtime and the bridge run in a worker; connect_to_game reaches the bridge there (bridgeContext "worker"), input and screenshots go to the page.`
+              : `useWorker is "${useWorker}": Construct turns the worker off when the project uses scripts, which it does with the bridge injected, so the runtime runs on the page; without scripts it would run in a worker, which connect_to_game reaches as well.`,
+        });
 
         // Inject bridge if requested
         if (injectBridge) {
@@ -873,11 +879,10 @@ print(json.dumps({
           useWorker,
           checks,
           nextSteps: [
-            'Open the project in Construct 3 editor (construct.net)',
-            'Click Preview to launch the game',
-            'The runtime bridge will activate via runOnStartup()',
-            'Access via: globalThis.__c3bridge.submit("ping", {})',
-            'Or use Playwright or any CDP-capable tool to automate the entire flow',
+            'Reload the project in the Construct editor, then either preview it in a browser started with --remote-debugging-port, or export it (Menu > Project > Export > Web (HTML5)) and serve the exported folder with serve_preview (launchBrowser: true)',
+            'connect_to_game with the cdpEndpoint serve_preview names, or with the host and debugging port of the browser running the preview',
+            'Drive and observe the game with call_bridge, wait_for_condition, subscribe_events, simulate_input and screenshot_game; stop_preview and disconnect_from_game when done',
+            'remove_runtime_bridge before shipping the project',
           ],
         }, { projectWritten: injectBridge });
       } catch (error) {

@@ -141,3 +141,24 @@ describe('inject_runtime_bridge', () => {
     expect(bridgeEntries(await readProject(dir))).toEqual([]);
   });
 });
+
+describe('export_for_preview', () => {
+  async function withUseWorker(value: string): Promise<string> {
+    const dir = await copyFixture('minimal-project');
+    const project = await readProject(dir);
+    project.useWorker = value;
+    await writeFile(join(dir, 'project.c3proj'), JSON.stringify(project, null, '\t'), 'utf8');
+    return dir;
+  }
+
+  it('does not warn about "Use worker": auto runs on the page with the bridge, worker is reached there', async () => {
+    for (const [useWorker, detail] of [['auto', /scripts/u], ['dom', /page/u], ['worker', /worker/u]] as const) {
+      const server = await tools(await withUseWorker(useWorker));
+      const result = payload(await server.callTool('export_for_preview', { injectBridge: true }));
+      const check = result.checks.find((c: { check: string }) => c.check === 'workerMode');
+      expect(check.status, useWorker).toBe('ok');
+      expect(check.detail, useWorker).toMatch(detail);
+      expect(result.nextSteps.join(' ')).toContain('serve_preview');
+    }
+  });
+});
