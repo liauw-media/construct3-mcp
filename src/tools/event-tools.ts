@@ -215,7 +215,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         await writer.writeEntityFile('eventSheets', args.name, data, args.subfolder, { createOnly: true });
         await writer.addToProject('eventSheets', args.name, args.subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,
@@ -337,7 +337,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,
@@ -461,7 +461,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,
@@ -536,7 +536,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
         const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
         await writer.removeFromProject('eventSheets', args.name);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,
@@ -620,7 +620,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
           const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
           const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-          resetProjectIndex();
+          resetProjectIndex(reader);
 
           return toolResult({
             success: true,
@@ -741,7 +741,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // The event is already out of the sheet (load-time check above)
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,
@@ -805,7 +805,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         return toolResult({
           success: true,
@@ -911,7 +911,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         return toolResult({
           success: true,
@@ -1125,7 +1125,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sourceBackup = await writer.writeEntityFile('eventSheets', args.sourceSheet, sourceSheetData, sourceSubfolder);
         }
 
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         return toolResult({
           success: true,
@@ -1465,7 +1465,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Write back
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,
@@ -1562,7 +1562,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sheets.push(entry);
         }
 
-        if (writtenSheets.length > 0) resetProjectIndex();
+        if (writtenSheets.length > 0) resetProjectIndex(reader);
 
         const parts: string[] = [];
         if (totalRenamed > 0) {
@@ -1686,7 +1686,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sheets.push(entry);
         }
 
-        if (writtenSheets.length > 0) resetProjectIndex();
+        if (writtenSheets.length > 0) resetProjectIndex(reader);
 
         const parts: string[] = [];
         if (totalConverted > 0) {
@@ -1804,7 +1804,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
         const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
-        resetProjectIndex();
+        resetProjectIndex(reader);
 
         const result: WriteResult = {
           success: true,

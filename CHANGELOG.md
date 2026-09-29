@@ -2,6 +2,12 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- The cross-reference index is cached per project (per reader) instead of once per process. With two projects open in one process, the analysis tools (`validate_project`, `find_orphaned_objects`, `get_object_dependencies`, `get_asset_usage`, `get_eventsheet_flow`, `get_function_map`, `analyze_performance`) and the reference checks and warnings of `delete_object`, `delete_family`, `delete_event_sheet`, `delete_layout`, `update_object_properties` and `update_family` used the index of whichever project had built it first: `validate_project` reported the other project's objects as broken references, `delete_object` deleted an object the project still used, and `update_object_properties` removed an instance variable its events still used. A write through the project writer or the event tools now resets only the index of the project it wrote to. The MCP server opens one project per process and was not affected; scripts, tests and embeddings that open several projects in one process were (#38).
+
 ## [1.9.0] - 2026-09-27
 
 ### Highlights
