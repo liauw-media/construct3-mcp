@@ -172,6 +172,36 @@ describe('planFrameImageShift', () => {
       'images/hero-walk-000.png cannot be renamed to images/hero-walk-001.png: images/hero-walk-001.png would be replaced',
     ]);
   });
+
+  describe('file names listed decomposed (NFD, as macOS HFS+ lists them) for a composed (NFC) animation name', () => {
+    const name = 'L\u00e4ufer'; // "Läufer" as the JSON stores it (NFC)
+    const nfd = (index: number, extension = 'png') => `hero-l\u00e4ufer-00${index}.${extension}`.normalize('NFD');
+    const nfc = (index: number, extension = 'png') => `hero-l\u00e4ufer-00${index}.${extension}`;
+
+    it('inserting finds and moves them', () => {
+      const plan = planFrameImageShift([nfd(0), nfd(1, 'jpg'), nfd(2)], 'Hero', name, [png, jpeg, png], { insertAt: 0 });
+      expect(plan.renames).toEqual([
+        { from: nfd(2), to: nfc(3) },
+        { from: nfd(1, 'jpg'), to: nfc(2, 'jpg') },
+        { from: nfd(0), to: nfc(1) },
+      ]);
+      expect(plan).toMatchObject({ missing: [], backedUp: [], clashes: [], newFrameFile: nfc(0) });
+    });
+
+    it('deleting keeps the deleted frame\'s file and moves the later ones', () => {
+      const plan = planFrameImageShift([nfd(0), nfd(1)], 'Hero', name, [png, png], { deleteAt: 0 });
+      expect(plan.parked).toEqual([{ from: nfd(0), to: `${nfd(0)}.bak` }]);
+      expect(plan.shifted).toEqual([{ from: nfd(1), to: nfc(0) }]);
+      expect(plan.missing).toEqual([]);
+    });
+
+    it('keeps a file no frame uses under the new frame\'s name, instead of writing over it', () => {
+      // On a file system that ignores normalization, "…-001.png" in NFC and NFD is one file
+      const plan = planFrameImageShift([nfd(0), nfd(1)], 'Hero', name, [png], { insertAt: 1 });
+      expect(plan.backedUp).toEqual([{ from: nfd(1), to: `${nfd(1)}.bak` }]);
+      expect(plan.clashes).toEqual([]);
+    });
+  });
 });
 
 describe('simulateImageRenames', () => {
@@ -198,6 +228,16 @@ describe('simulateImageRenames', () => {
 
   it('allows a rename that changes only the case of a name', () => {
     expect(simulateImageRenames(['A-000.png'], [{ from: 'A-000.png', to: 'a-000.png' }]).clashes).toEqual([]);
+  });
+
+  it('compares names ignoring Unicode normalization too (NFC and NFD name the same file on macOS)', () => {
+    const composed = 'l\u00e4ufer-000.png';
+    const decomposed = composed.normalize('NFD');
+    const result = simulateImageRenames([decomposed, 'b.png'], [
+      { from: 'b.png', to: composed },
+      { from: decomposed, to: composed },
+    ]);
+    expect(result.clashes).toEqual([{ from: 'b.png', to: composed, occupant: decomposed, renamedThere: false }]);
   });
 });
 

@@ -19,6 +19,7 @@ import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
+import { nameKey } from '../names.js';
 import {
   checkEventLoadRules,
   checkFamilyPlugins,
@@ -1458,8 +1459,9 @@ async function checkOrphanedObjects(
  * Sprite animation frames and the image files in images/. The editor names a
  * frame's image lower("<object>-<animation>-NNN.<ext>"), NNN being the frame's
  * index and ext following its fileType (see animation-rename.ts). images/ is
- * read once and compared ignoring case, as Windows and macOS do. The check
- * is skipped when the project has no images/ folder.
+ * read once and names are compared by nameKey(), ignoring case and Unicode
+ * normalization, as Windows and macOS do. The check is skipped when the
+ * project has no images/ folder.
  *
  * - Warning, one per animation: frames without their image file. Older
  *   versions of add_frame_to_animation left the frames after an insert index
@@ -1482,9 +1484,9 @@ async function checkFrameImages(
     return; // No images/ folder
   }
   const images = indexImageFiles(files);
-  // "<object>-<animation>-" → the animations whose frame images start with it
+  // nameKey("<object>-<animation>-") → the animations whose frame images start with it
   const byPrefix = new Map<string, Array<{ entity: string; name: string; frameCount: number }>>();
-  // Lowercase names without extension that a frame of any animation uses
+  // nameKey() of the names without extension that a frame of any animation uses
   const usedStems = new Set<string>();
 
   for (const [objectName, obj] of objects) {
@@ -1497,7 +1499,7 @@ async function checkFrameImages(
       const missing: string[] = [];
       frames.forEach((frame, index) => {
         const base = frameImageBaseName(objectName, animationName, index);
-        usedStems.add(base);
+        usedStems.add(nameKey(base));
         const fileType = isRecord(frame) ? frame.fileType : undefined;
         if (images.frameFiles(base, fileType).length === 0) missing.push(`images/${expectedFrameImageName(base, fileType)}`);
       });
@@ -1512,7 +1514,7 @@ async function checkFrameImages(
             + 'the frames after an add_frame_to_animation index without their images.',
         });
       }
-      const prefix = frameImageBaseName(objectName, animationName, 0).slice(0, -'000'.length);
+      const prefix = nameKey(frameImageBaseName(objectName, animationName, 0).slice(0, -'000'.length));
       const list = byPrefix.get(prefix);
       const entry = { entity, name: animationName, frameCount: frames.length };
       if (list) list.push(entry); else byPrefix.set(prefix, [entry]);
@@ -1522,7 +1524,7 @@ async function checkFrameImages(
   // Files named like a frame past the last one of an animation, which no frame uses
   const unused = new Map<{ entity: string; name: string; frameCount: number }, string[]>();
   for (const file of files) {
-    const match = /^(.*-)(\d{3,})\.[^.]+$/.exec(file.toLowerCase());
+    const match = /^(.*-)(\d{3,})\.[^.]+$/.exec(nameKey(file));
     if (!match) continue;
     const [, prefix, digits] = match;
     const frameIndex = Number(digits);

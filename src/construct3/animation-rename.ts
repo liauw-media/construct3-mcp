@@ -35,6 +35,7 @@
 
 import { getImageFileName } from './png-generator.js';
 import { forEachLayoutInstance } from './layers.js';
+import { nameKey } from './names.js';
 
 /** A file in images/ to rename (names relative to images/). */
 export interface ImageFileRename {
@@ -76,40 +77,50 @@ export function expectedFrameImageName(base: string, fileType: unknown): string 
   return `${base}.${frameImageExtension(fileType) ?? '*'}`;
 }
 
-/** The files of a listing of images/, looked up ignoring case. */
+/**
+ * The files of a listing of images/, looked up by nameKey() (names.ts):
+ * ignoring case and Unicode normalization, as Windows and macOS compare file
+ * names (macOS HFS+ lists "ä" decomposed, NFD, where a name built from the
+ * JSON usually has it composed, NFC).
+ */
 export interface ImageFileIndex {
-  /** The files whose lowercase name is `lowerName` (several only on a case-sensitive file system) */
-  named(lowerName: string): string[];
+  /** The files whose name is `name` by nameKey() (several only on a case- or normalization-sensitive file system) */
+  named(name: string): string[];
   /**
    * The files that hold the image of the frame whose file name without
-   * extension is `base` (lowercase): the file its fileType points to; for
-   * another fileType, every file named `base` with a single extension.
+   * extension is `base`: the file its fileType points to; for another
+   * fileType, every file named `base` with a single extension.
    */
   frameFiles(base: string, fileType: unknown): string[];
 }
 
-/** Index a listing of images/ (file names) for lookups that ignore case. */
+/** Index a listing of images/ (file names) for lookups by nameKey(). */
 export function indexImageFiles(files: readonly string[]): ImageFileIndex {
-  const byLowerName = new Map<string, string[]>();
+  const byKey = new Map<string, string[]>();
   const byStem = new Map<string, string[]>();
   const add = (map: Map<string, string[]>, key: string, file: string) => {
     const list = map.get(key);
     if (list) list.push(file); else map.set(key, [file]);
   };
   for (const file of files) {
-    const lower = file.toLowerCase();
-    add(byLowerName, lower, file);
+    const key = nameKey(file);
+    add(byKey, key, file);
     // "hero-walk-000.gif" has the stem "hero-walk-000", "hero-walk-000.png.bak" has none that a frame uses
-    const dot = lower.lastIndexOf('.');
-    if (dot > 0 && dot < lower.length - 1) add(byStem, lower.slice(0, dot), file);
+    const dot = key.lastIndexOf('.');
+    if (dot > 0 && dot < key.length - 1) add(byStem, key.slice(0, dot), file);
   }
   return {
-    named: lowerName => byLowerName.get(lowerName) ?? [],
+    named: name => byKey.get(nameKey(name)) ?? [],
     frameFiles: (base, fileType) => {
       const extension = frameImageExtension(fileType);
-      return extension !== undefined ? byLowerName.get(`${base}.${extension}`) ?? [] : byStem.get(base) ?? [];
+      return extension !== undefined ? byKey.get(nameKey(`${base}.${extension}`)) ?? [] : byStem.get(nameKey(base)) ?? [];
     },
   };
+}
+
+/** The extension of a file name, lowercase ("PNG" of "a.b.PNG" → "png"). */
+function extensionOf(file: string): string {
+  return file.slice(file.lastIndexOf('.') + 1).toLowerCase();
 }
 
 /**
@@ -140,11 +151,11 @@ export function planFrameImageRenames(
       return;
     }
     for (const from of sources) {
-      const to = `${newBase}.${from.slice(oldBase.length + 1).toLowerCase()}`;
+      const to = `${newBase}.${extensionOf(from)}`;
       if (from === to) continue;
       // Another file under the target name (any case) would be replaced, or
       // two files that differ only in case would get the same name
-      if (index.named(to).some(file => file !== from) || plan.renames.some(r => r.to === to)) {
+      if (index.named(to).some(file => file !== from) || plan.renames.some(r => nameKey(r.to) === nameKey(to))) {
         plan.clashes.push(to);
         continue;
       }
@@ -212,13 +223,13 @@ export function planFrameImageShift(
   const base = (frameIndex: number) => frameImageBaseName(objectName, animationName, frameIndex);
   const plan: FrameImageShiftPlan = { renames: [], shifted: [], parked: [], backedUp: [], missing: [], clashes: [] };
 
-  // Every name in images/ so far, and those the renames produce, ignoring case (for free .bak names)
-  const taken = new Set(files.map(f => f.toLowerCase()));
+  // Every name in images/ so far, and those the renames produce, by nameKey() (for free .bak names)
+  const taken = new Set(files.map(nameKey));
   const backupName = (file: string): string => {
     for (let n = 0; ; n++) {
       const name = n === 0 ? `${file}.bak` : `${file}.${n}.bak`;
-      if (!taken.has(name.toLowerCase())) {
-        taken.add(name.toLowerCase());
+      if (!taken.has(nameKey(name))) {
+        taken.add(nameKey(name));
         return name;
       }
     }
@@ -229,9 +240,9 @@ export function planFrameImageShift(
     const sources = index.frameFiles(base(from), fileType);
     if (sources.length === 0) plan.missing.push(expectedFrameImageName(base(from), fileType));
     for (const file of sources) {
-      const target = `${base(to)}.${file.slice(base(from).length + 1).toLowerCase()}`;
+      const target = `${base(to)}.${extensionOf(file)}`;
       plan.shifted.push({ from: file, to: target });
-      taken.add(target);
+      taken.add(nameKey(target));
     }
   };
 
@@ -249,7 +260,7 @@ export function planFrameImageShift(
   const moved = new Set([...plan.parked, ...plan.shifted].map(r => r.from));
   const targets = [...plan.shifted.map(r => r.to), ...(plan.newFrameFile !== undefined ? [plan.newFrameFile] : [])];
   for (const target of targets) {
-    for (const file of index.named(target.toLowerCase())) {
+    for (const file of index.named(target)) {
       if (!moved.has(file) && !plan.backedUp.some(r => r.from === file)) {
         plan.backedUp.push({ from: file, to: backupName(file) });
       }
@@ -259,7 +270,7 @@ export function planFrameImageShift(
   const result = simulateImageRenames(files, plan.renames);
   plan.clashes = result.clashes.map(c => `images/${c.from} cannot be renamed to images/${c.to}: images/${c.occupant} would be replaced`);
   if (plan.newFrameFile !== undefined && plan.clashes.length === 0) {
-    const occupant = result.present.get(plan.newFrameFile.toLowerCase())?.[0];
+    const occupant = result.present.get(nameKey(plan.newFrameFile))?.[0];
     if (occupant !== undefined) plan.clashes.push(`images/${occupant} would be replaced by the new frame's image`);
   }
   return plan;
@@ -274,29 +285,33 @@ export interface ImageRenameClash extends ImageFileRename {
 }
 
 /**
- * Apply `renames` in order to a listing of images/, comparing names ignoring
- * case (as Windows and macOS do): a target name is free when no file has it
- * at that point, also when an earlier rename moved its file away. Returns the
- * renames whose target is taken by another file (these are skipped) and the
- * files present afterwards by lowercase name.
+ * Apply `renames` in order to a listing of images/, comparing names by
+ * nameKey() (ignoring case and Unicode normalization, as Windows and macOS
+ * do): a target name is free when no file has it at that point, also when an
+ * earlier rename moved its file away. Returns the renames whose target is
+ * taken by another file (these are skipped) and the files present afterwards
+ * by nameKey().
  */
 export function simulateImageRenames(
   files: readonly string[],
   renames: readonly ImageFileRename[],
 ): { clashes: ImageRenameClash[]; present: Map<string, string[]> } {
   const present = new Map<string, string[]>();
-  const add = (file: string) => present.set(file.toLowerCase(), [...(present.get(file.toLowerCase()) ?? []), file]);
+  const add = (file: string) => {
+    const list = present.get(nameKey(file));
+    if (list) list.push(file); else present.set(nameKey(file), [file]);
+  };
   files.forEach(add);
   const renamedThere = new Set<string>();
   const clashes: ImageRenameClash[] = [];
   for (const { from, to } of renames) {
-    const occupant = (present.get(to.toLowerCase()) ?? []).find(file => file !== from);
+    const occupant = (present.get(nameKey(to)) ?? []).find(file => file !== from);
     if (occupant !== undefined) {
       clashes.push({ from, to, occupant, renamedThere: renamedThere.has(occupant) });
       continue;
     }
-    const left = (present.get(from.toLowerCase()) ?? []).filter(file => file !== from);
-    if (left.length > 0) present.set(from.toLowerCase(), left); else present.delete(from.toLowerCase());
+    const left = (present.get(nameKey(from)) ?? []).filter(file => file !== from);
+    if (left.length > 0) present.set(nameKey(from), left); else present.delete(nameKey(from));
     add(to);
     renamedThere.add(to);
   }

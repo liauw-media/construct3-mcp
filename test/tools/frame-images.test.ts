@@ -273,6 +273,40 @@ describe('delete_frame_from_animation keeps every frame\'s image', () => {
   });
 });
 
+describe('frame image names compared ignoring Unicode normalization', () => {
+  // "Läufer" as the JSON stores it (NFC); macOS HFS+ lists file names decomposed (NFD)
+  const LAEUFER = 'L\u00e4ufer';
+  const file = (index: number) => `sprite-l\u00e4ufer-${String(index).padStart(3, '0')}.png`;
+
+  /** images/ as name → label, names in NFC (how a file system stores a name that differs only in normalization varies). */
+  async function nfcSnapshot(): Promise<Record<string, string>> {
+    return Object.fromEntries(Object.entries(await snapshot()).map(([name, label]) => [name.normalize('NFC'), label]));
+  }
+
+  it('an insert moves image files whose names are listed decomposed', async () => {
+    await setupFrames([{ label: 'A', file: file(0).normalize('NFD') }, { label: 'B', file: file(1).normalize('NFD') }]);
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    obj.animations.items[0].name = LAEUFER;
+    await writeFile(objectPath(), JSON.stringify(obj, null, '\t'));
+
+    const data = await ok('add_frame_to_animation', { animationName: LAEUFER, index: 0 });
+    expect(data.warnings.join('\n')).not.toContain('No image file');
+    expect(await nfcSnapshot()).toEqual({ [file(0)]: 'NEW', [file(1)]: 'A', [file(2)]: 'B' });
+  });
+
+  it('validate_project finds frame images whose names are listed decomposed', async () => {
+    await setupFrames([{ label: 'A', file: file(0).normalize('NFD') }]);
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    obj.animations.items[0].name = LAEUFER;
+    await writeFile(objectPath(), JSON.stringify(obj, null, '\t'));
+    resetProjectIndex();
+    reader.invalidateCaches();
+
+    const result = await validateProjectIntegrity(reader);
+    expect([...result.warnings, ...result.info].filter(issue => issue.check === 'frame-image')).toEqual([]);
+  });
+});
+
 describe('frame image names follow the object\'s stored name', () => {
   // "./Sprite" reaches objectTypes/Sprite.json too; the editor names the images after the name in that file
   it('delete_frame_from_animation with another path to the object file still moves the images', async () => {
