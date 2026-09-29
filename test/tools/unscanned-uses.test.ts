@@ -1010,6 +1010,32 @@ describe('get_object_dependencies, find_orphaned_objects and get_asset_usage wit
     expect(deps.unscannedFiles).toBeUndefined();
   });
 
+  it('lists the files it could not parse even when no object is without a use, as not searched', async () => {
+    await addBigLayout('Big', [instance('Sprite')]);
+    await addParsedSheet('Uses', [block(760000000000010, [setX('Sprite.X')])]);
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects', {});
+    expect(orphans.orphanedObjects).toEqual([]);
+    expect(orphans.unscannedFiles).toEqual([{ file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'not-searched' }]);
+    const deps = await call('get_object_dependencies', {});
+    expect(deps.unscannedFiles).toEqual([{ file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'not-searched' }]);
+  });
+
+  it('analyze_performance does not count possibly used objects as unused', async () => {
+    await addEnemy();
+    await addEntity('objectTypes', 'Unused', {
+      name: 'Unused', 'plugin-id': 'Sprite', sid: 710000000000100, isGlobal: false,
+      instanceVariables: [], behaviorTypes: [], effectTypes: [], animations: { items: [animation('A', 710000000000101)], subfolders: [] },
+    });
+    await addBigLayout('Big', [instance('Enemy')]);
+    await startServer();
+
+    const result = await call('analyze_performance', {});
+    const cleanup = result.issues.find((i: { category: string }) => i.category === 'cleanup' && i.location === 'project');
+    expect(cleanup.message).toMatch(/^1 object\(s\) not used by any event .*; 1 more possibly used in files that could not be parsed/);
+  });
+
   it('get_asset_usage does not report the images of such an object as unused', async () => {
     await addEnemy();
     await addBigLayout('Big', [instance('Enemy')]);

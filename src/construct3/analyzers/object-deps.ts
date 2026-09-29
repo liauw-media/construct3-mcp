@@ -28,7 +28,11 @@ export interface ObjectDependencyResult {
     totalObjects: number;
     totalReferenced: number;
   };
-  /** Event sheets, layouts and families the index could not parse, searched as text */
+  /**
+   * Event sheets, layouts and families the index could not parse, searched as
+   * text for the object (project-wide: for the objects without a use the index
+   * found; "not-searched" when there are none)
+   */
   unscannedFiles?: UnscannedFileSummary[];
 }
 
@@ -44,7 +48,11 @@ export interface OrphanedObjectsResult {
   totalObjects: number;
   /** Objects that would be orphans but that files the index could not parse possibly use, with those files */
   possiblyUsed?: Array<{ name: string; pluginId: string; isGlobal: boolean; files: string[] }>;
-  /** Event sheets, layouts and families the index could not parse, searched as text */
+  /**
+   * Event sheets, layouts and families the index could not parse, searched as
+   * text for the objects without a use the index found ("not-searched" when
+   * there are none)
+   */
   unscannedFiles?: UnscannedFileSummary[];
 }
 
@@ -53,8 +61,9 @@ export interface OrphanedObjectsResult {
  * index could not parse (issue #55): one text search per file for all the
  * names (and, in layouts, the SIDs object properties hold). `byObject` maps
  * each object to the files whose text names it; a file that cannot be read
- * even as text counts for every object. Nothing is read while every file
- * could be parsed.
+ * even as text counts for every object. `files` lists every such file, its
+ * textSearch about these objects only ("not-searched" when there are none).
+ * Nothing is read while every file could be parsed.
  */
 async function possibleObjectUses(
   reader: Construct3ProjectReader,
@@ -63,7 +72,10 @@ async function possibleObjectUses(
 ): Promise<{ files: UnscannedFileSummary[]; byObject: Map<string, string[]> }> {
   const byObject = new Map<string, string[]>();
   const skipped = index.unscannedFiles.filter(f => f.category !== 'objectTypes');
-  if (skipped.length === 0 || objects.length === 0) return { files: [], byObject };
+  if (objects.length === 0) {
+    return { files: skipped.map(f => ({ file: f.file, reason: f.reason, textSearch: 'not-searched' as const })), byObject };
+  }
+  if (skipped.length === 0) return { files: [], byObject };
 
   const owner = new Map<string, string>();
   const nameTerms: RawTextTerm[] = [];
