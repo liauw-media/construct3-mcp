@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, rm, mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdtemp, cp, rm, mkdir, readFile, writeFile, stat } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { MockServer } from '../mocks/mock-server.js';
@@ -128,6 +128,22 @@ describe('UIDs next to files over the read cap', () => {
     expect(result.content[0].text).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
     expect(result.content[0].text).not.toContain(tmpDir);
     expect(Buffer.compare(await readFile(join(tmpDir, 'layouts', 'Layout 1.json')), before)).toBe(0);
+  });
+
+  it('create_object refuses a global plugin, and writes nothing, when a registered layout cannot be scanned', async () => {
+    await registerInProject('layouts', 'Bad');
+    await mkdir(join(tmpDir, 'layouts', 'Bad.json'));
+    await startServer();
+    const c3projPath = join(tmpDir, 'project.c3proj');
+    const before = await readFile(c3projPath);
+
+    // Keyboard is not in usedAddons yet: registering it writes project.c3proj
+    const result = await server.callTool('create_object', { name: 'Keys', pluginId: 'Keyboard' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
+    expect(Buffer.compare(await readFile(c3projPath), before)).toBe(0);
+    await expect(stat(`${c3projPath}.bak`)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(tmpDir, 'objectTypes', 'Keys.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('a registered layout without a file does not block add_instance_to_layout', async () => {

@@ -91,17 +91,22 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const fileRefusal = await writer.entityFileRefusal('objectTypes', args.name, args.subfolder);
         if (fileRefusal) return toolError(fileRefusal);
 
+        const isSingleglobal = GLOBAL_PLUGINS.has(args.pluginId);
+        const isNonworldGlobal = NONWORLD_GLOBAL_PLUGINS.has(args.pluginId);
+        // A global object's UID before any write too: generateUid refuses while
+        // a project file's UIDs are unknown. Registering the addon below only
+        // rewrites project.c3proj, which holds no UIDs, so the UID stays free.
+        const uid = isSingleglobal || (args.isGlobal && !isNonworldGlobal)
+          ? await idGen.generateUid(reader)
+          : undefined;
+
         // Ensure the plugin is registered in usedAddons
         const addonWarning = await writer.ensureAddonRegistered('plugin', args.pluginId);
 
         const sid = await idGen.generateSid(reader);
-        const isSingleglobal = GLOBAL_PLUGINS.has(args.pluginId);
-        const isNonworldGlobal = NONWORLD_GLOBAL_PLUGINS.has(args.pluginId);
         let data: ObjectType;
-        let uid: number | undefined;
 
-        if (isSingleglobal || (args.isGlobal && !isNonworldGlobal)) {
-          uid = await idGen.generateUid(reader);
+        if (uid !== undefined) {
           const sgiSid = await idGen.generateSid(reader);
           data = createGlobalObject(args.name, args.pluginId, sid, uid, sgiSid);
         } else if (args.pluginId === 'Sprite') {

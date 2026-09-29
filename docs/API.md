@@ -430,7 +430,7 @@ Create a new object type in the project.
 **What it does:**
 1. Validates name (uniqueness, reserved names, format). A name equal to an existing object type or family name, or to `"System"` or the name of the built-in Functions object (`functionsName`), ignoring case, is refused: the editor would fail to open the project (load-time rule `duplicate-object-name`, see [`validate_project`](#validate_project)).
 2. Ensures plugin is registered in `usedAddons` (auto-adds known Scirra plugins)
-3. Generates SID (+ UID for global plugins, + animation SID for Sprite). The UID follows the same rules as in [`add_instance_to_layout`](#add_instance_to_layout): files over the 10MB read limit count, and a layout or object type that exists but cannot be read refuses the global plugin
+3. Generates SID (+ UID for global plugins, + animation SID for Sprite). The UID follows the same rules as in [`add_instance_to_layout`](#add_instance_to_layout): files over the 10MB read limit count, and a layout or object type that exists but cannot be read refuses the global plugin. The UID is generated before step 2, so such a refusal writes nothing, `usedAddons` included
 4. Builds from plugin-specific template
 5. Writes `objectTypes/<name>.json`
 6. Adds name to `project.c3proj` objectTypes container
