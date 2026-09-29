@@ -4,6 +4,7 @@
  * add_frame_to_animation with an index and delete_frame_from_animation rename
  * the image files of the frames after it, keep the deleted frame's image and
  * any file in the way as .bak, and undo everything when a step fails.
+ * validate_project reports frames without an image file (frame-image).
  * Checked on a temp copy of the minimal fixture with the real reader and
  * writer; every image has distinct content, compared by hash before and after.
  */
@@ -19,6 +20,7 @@ import { Construct3ProjectWriter } from '../../src/construct3/project-writer.js'
 import { IdGenerator } from '../../src/construct3/id-generator.js';
 import { generatePlaceholderPng } from '../../src/construct3/png-generator.js';
 import { registerAnimationTools } from '../../src/tools/animation-tools.js';
+import { validateProjectIntegrity } from '../../src/construct3/analyzers/integrity.js';
 import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
@@ -360,5 +362,79 @@ describe('frame image changes are undone when a step fails', () => {
       expect(result.content[0].text).toContain('Nothing was changed: the image files have their old names again');
       await expectUnchanged();
     }
+  });
+});
+
+describe('validate_project frame-image', () => {
+  const frameIssues = async () => {
+    resetProjectIndex();
+    reader.invalidateCaches();
+    const result = await validateProjectIntegrity(reader);
+    return {
+      warnings: result.warnings.filter(w => w.check === 'frame-image'),
+      info: result.info.filter(i => i.check === 'frame-image'),
+      valid: result.valid,
+    };
+  };
+
+  it('reports nothing when every frame has its image, found ignoring case and by fileType', async () => {
+    await setupFrames([
+      { label: 'A', file: 'Sprite-Animation 1-000.PNG' }, { label: 'J', fileType: 'image/jpeg' }, { label: 'G', fileType: 'image/gif' },
+    ]);
+    expect(await frameIssues()).toEqual({ warnings: [], info: [], valid: true });
+  });
+
+  it('warns about frames without their image file, with the name each one needs', async () => {
+    // Frame 1 is JPEG but only a PNG of its name exists; frame 2 has no file; frame 3 has an unknown fileType
+    await setupFrames(
+      [{ label: 'A' }, { label: 'J', fileType: 'image/jpeg', file: null }, { label: 'C', file: null }, { label: 'W', fileType: 'image/webp', file: null }],
+      images({ '001.png': 'stale png' }),
+    );
+    const { warnings, valid } = await frameIssues();
+    expect(valid).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].entity).toBe('objectTypes/Sprite/animation:Animation 1');
+    expect(warnings[0].message).toBe('3 of 4 frame(s) of animation "Animation 1" have no image file: images/sprite-animation 1-001.jpg, '
+      + 'images/sprite-animation 1-002.png, images/sprite-animation 1-003.*');
+    expect(warnings[0].suggestion).toContain('what it does when the file is missing is not verified');
+    expect(warnings[0].suggestion).not.toMatch(/will not open|refuses? to open/);
+  });
+
+  it('reports the frames an insert of older versions left without images, and the file a delete left behind', async () => {
+    // add_frame_to_animation at index 1 on 3 frames before #36: the last frame had no file
+    await setupFrames([{ label: 'A' }, { label: 'NEW' }, { label: 'C' }, { label: 'x', file: null }]);
+    expect((await frameIssues()).warnings.map(w => w.message)).toEqual([
+      '1 of 4 frame(s) of animation "Animation 1" have no image file: images/sprite-animation 1-003.png',
+    ]);
+
+    // delete_frame_from_animation before #36: the last file stayed
+    await setupFrames([{ label: 'A' }, { label: 'B' }], images({ '002.png': 'C', '010.gif': 'D', '002.png.bak': 'backup' }));
+    const { warnings, info } = await frameIssues();
+    expect(warnings).toEqual([]);
+    expect(info.map(i => [i.entity, i.message])).toEqual([[
+      'objectTypes/Sprite/animation:Animation 1',
+      '2 file(s) in images/ are named like frames of animation "Animation 1" past its last frame (it has 2), and no frame uses them: '
+        + 'images/sprite-animation 1-002.png, images/sprite-animation 1-010.gif',
+    ]]);
+  });
+
+  it('does not report a file another animation uses as unused', async () => {
+    // "ANIMATION 1" (which older versions could create next to "Animation 1") uses the same lowercase
+    // file names; its second frame uses 001.png, past the last frame of "Animation 1"
+    await setupFrames([{ label: 'A' }], images({ '001.png': 'B' }));
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    const frame = { width: 64, height: 64, originX: 0.5, originY: 0.5, duration: 1 };
+    obj.animations.items.push({
+      name: 'ANIMATION 1', sid: 300000000000009, speed: 5, isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0,
+      frames: [frame, frame],
+    });
+    await writeFile(objectPath(), JSON.stringify(obj, null, '\t'));
+    const { warnings, info } = await frameIssues();
+    expect({ warnings, info }).toEqual({ warnings: [], info: [] });
+  });
+
+  it('is skipped when the project has no images/ folder', async () => {
+    // The minimal fixture's Sprite has a frame, but there is no images/ folder
+    expect(await frameIssues()).toEqual({ warnings: [], info: [], valid: true });
   });
 });

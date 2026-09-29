@@ -4,6 +4,10 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `validate_project` check `frame-image`: a warning for Sprite animation frames without their image file in `images/` (the name follows the frame's index and `fileType`, compared ignoring case), and info for files named like frames past an animation's last frame that no frame uses (#36).
+
 ### Fixed
 
 - `add_frame_to_animation` with `index` renames the image files of the frames from that index on one index up, so every frame keeps its image, instead of writing the placeholder over the image at the index without a backup and leaving the last frame without one. JPEG, GIF and other frames keep their own extension, and mixed-case file names are found (#36).

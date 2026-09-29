@@ -18,6 +18,7 @@ import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.
 import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
+import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
 import {
   checkEventLoadRules,
   checkFamilyPlugins,
@@ -124,11 +125,15 @@ export async function validateProjectIntegrity(
   await checkBackupFiles(reader, info);
   await checkOrphanedObjects(reader, info);
 
+  // Frame images: warnings for frames without one, info for unused ones
+  await checkFrameImages(reader, objects, warnings, info);
+
   // 13 original checks + legacy-behavior-key + legacy-event-shape +
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
-  // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable
-  const checksRun = 25;
+  // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable,
+  // frame-image
+  const checksRun = 26;
 
   return {
     valid: errors.length === 0,
@@ -1443,6 +1448,98 @@ async function checkOrphanedObjects(
         (families.length > 0
           ? ` It is a member of ${families.map(f => `"${f}"`).join(', ')}: remove it from the family first (update_family removeMembers).`
           : ''),
+    });
+  }
+}
+
+// ─── Check 13: Frame Images ──────────────────────────────────
+
+/**
+ * Sprite animation frames and the image files in images/. The editor names a
+ * frame's image lower("<object>-<animation>-NNN.<ext>"), NNN being the frame's
+ * index and ext following its fileType (see animation-rename.ts). images/ is
+ * read once and compared ignoring case, as Windows and macOS do. The check
+ * is skipped when the project has no images/ folder.
+ *
+ * - Warning, one per animation: frames without their image file. Older
+ *   versions of add_frame_to_animation left the frames after an insert index
+ *   without one. What the editor does with a frame whose image file is
+ *   missing is not verified, so this is a warning.
+ * - Info, one per animation: files named like frames of the animation past
+ *   its last frame that no frame uses, e.g. left behind by older versions of
+ *   delete_frame_from_animation.
+ */
+async function checkFrameImages(
+  reader: Construct3ProjectReader,
+  objects: Map<string, ObjectType>,
+  warnings: IntegrityIssue[],
+  info: IntegrityIssue[]
+): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(join(reader.getProjectDir(), 'images'));
+  } catch {
+    return; // No images/ folder
+  }
+  const images = indexImageFiles(files);
+  // "<object>-<animation>-" → the animations whose frame images start with it
+  const byPrefix = new Map<string, Array<{ entity: string; name: string; frameCount: number }>>();
+  // Lowercase names without extension that a frame of any animation uses
+  const usedStems = new Set<string>();
+
+  for (const [objectName, obj] of objects) {
+    if (obj['plugin-id'] !== 'Sprite') continue;
+    for (const anim of everyAnimation<{ name?: unknown; frames?: unknown }>(obj.animations)) {
+      if (typeof anim.name !== 'string') continue;
+      const animationName = anim.name;
+      const frames: unknown[] = Array.isArray(anim.frames) ? anim.frames : [];
+      const entity = `objectTypes/${objectName}/animation:${animationName}`;
+      const missing: string[] = [];
+      frames.forEach((frame, index) => {
+        const base = frameImageBaseName(objectName, animationName, index);
+        usedStems.add(base);
+        const fileType = isRecord(frame) ? frame.fileType : undefined;
+        if (images.frameFiles(base, fileType).length === 0) missing.push(`images/${expectedFrameImageName(base, fileType)}`);
+      });
+      if (missing.length > 0) {
+        warnings.push({
+          check: 'frame-image',
+          entity,
+          message: `${missing.length} of ${frames.length} frame(s) of animation "${animationName}" have no image file: ${listFew(missing)}`,
+          suggestion: 'Construct 3 loads a frame\'s image from images/<object>-<animation>-NNN.<ext> (NNN = frame index, .jpg for a JPEG frame, '
+            + '.png otherwise, all lowercase); what it does when the file is missing is not verified. Restore the file (from a .bak copy in '
+            + 'images/ or version control), or give the frame an image with replace_sprite_image. Older versions of construct3-mcp left '
+            + 'the frames after an add_frame_to_animation index without their images.',
+        });
+      }
+      const prefix = frameImageBaseName(objectName, animationName, 0).slice(0, -'000'.length);
+      const list = byPrefix.get(prefix);
+      const entry = { entity, name: animationName, frameCount: frames.length };
+      if (list) list.push(entry); else byPrefix.set(prefix, [entry]);
+    }
+  }
+
+  // Files named like a frame past the last one of an animation, which no frame uses
+  const unused = new Map<{ entity: string; name: string; frameCount: number }, string[]>();
+  for (const file of files) {
+    const match = /^(.*-)(\d{3,})\.[^.]+$/.exec(file.toLowerCase());
+    if (!match) continue;
+    const [, prefix, digits] = match;
+    const frameIndex = Number(digits);
+    if (digits !== String(frameIndex).padStart(3, '0') || usedStems.has(`${prefix}${digits}`)) continue;
+    const anim = byPrefix.get(prefix)?.find(a => frameIndex >= a.frameCount);
+    if (!anim) continue;
+    unused.set(anim, [...(unused.get(anim) ?? []), `images/${file}`]);
+  }
+  for (const [anim, unusedFiles] of unused) {
+    info.push({
+      check: 'frame-image',
+      entity: anim.entity,
+      message: `${unusedFiles.length} file(s) in images/ are named like frames of animation "${anim.name}" past its last frame `
+        + `(it has ${anim.frameCount}), and no frame uses them: ${listFew(unusedFiles.sort())}`,
+      suggestion: 'They can be images of deleted frames (older versions of delete_frame_from_animation left the last one behind) '
+        + 'or of frames the animation had before. Check them before deleting them; add_frame_to_animation keeps such a file as .bak '
+        + 'instead of writing over it.',
     });
   }
 }

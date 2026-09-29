@@ -137,6 +137,12 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 **Solution**: Use the registered name the error suggests (`list_objects`, `list_families`).
 
+### Sprite frames show the wrong image, or `validate_project` reports `frame-image`
+
+**Cause**: The editor loads a frame's image from `images/<object>-<animation>-NNN.<ext>`, NNN being the frame's index. In construct3-mcp 1.9.0 and earlier, `add_frame_to_animation` with an `index` wrote its placeholder over the image at that index (without a backup) and did not move the later images, and `delete_frame_from_animation` did not move them either: the frames after the change show their neighbour's image, the last frame after an insert has no image file (`frame-image` warning), and the last file after a delete is left over (`frame-image` info), where a later append wrote its placeholder over it.
+
+**Solution**: Later versions move the image files with their frames and keep replaced or deleted images as `<file>.bak`. For frames changed by an older version, restore the images from version control or a copy of the project, or rename the files in `images/` by hand so that each frame's file carries its index (all lowercase, `.jpg` for a JPEG frame), then run `validate_project` again. An image the old insert wrote over cannot be recovered from the project folder.
+
 ### Backup files (.bak)
 
 Every mutation creates `.bak` backup files next to the modified files. If something goes wrong:
