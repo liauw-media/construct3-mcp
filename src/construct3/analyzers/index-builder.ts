@@ -58,7 +58,11 @@
  * is deleted. Scripts that read instance variables and behaviors by name
  * (instVars.name, behaviors.Name in script actions, script events and project
  * script files) are listed apart (getScriptMemberReads): which object's
- * instances they read is not known, so they only warrant a warning.
+ * instances they read is not known, so they only warrant a warning. A
+ * registered object type whose file could not be parsed (over the read cap,
+ * not valid JSON) still counts as an object type, with the names it gets
+ * from its families only (its own are unknown), so the uses of its families'
+ * names through it are found (issue #55).
  */
 
 import type { Construct3ProjectReader } from '../project-reader.js';
@@ -222,6 +226,12 @@ interface ClassMembers {
   isFamily: boolean;
   variables: string[];
   behaviors: string[];
+  /**
+   * The object type's file could not be parsed (issue #55): its own
+   * instance variables and behaviors are unknown (variables and behaviors
+   * are empty), only those it gets from its families are known
+   */
+  ownUnknown?: boolean;
 }
 
 const MAX_NODES = 100_000;
@@ -556,7 +566,8 @@ export class ProjectIndex {
     const families = await reader.readAllFamilies();
     const familyFailures = reader.getReadFailures('families');
     const familyNames = await reader.listFamilies();
-    this.indexClassMembers(objectTypes, families);
+    const unparsedObjectTypes = unscannedFilesOf('objectTypes', this.allObjects, objectTypes, objectTypeFailures);
+    this.indexClassMembers(objectTypes, families, unparsedObjectTypes.map(f => f.name));
     this.unreadableFamilies = familyNames.some(name => !families.has(name));
     this.functionsName = functionsObjectName(reader);
 
@@ -600,7 +611,7 @@ export class ProjectIndex {
     this.unscannedFiles = [
       ...unscannedFilesOf('eventSheets', this.allEventSheets, eventSheets, eventSheetFailures),
       ...unscannedFilesOf('layouts', this.allLayouts, layouts, layoutFailures),
-      ...unscannedFilesOf('objectTypes', this.allObjects, objectTypes, objectTypeFailures),
+      ...unparsedObjectTypes,
       ...unscannedFilesOf('families', familyNames, families, familyFailures),
     ];
 
@@ -830,21 +841,31 @@ export class ProjectIndex {
     return !this.variableNames.has(name);
   }
 
-  /** Instance variable and behavior names of the object types and families, and each object type's families. */
+  /**
+   * Instance variable and behavior names of the object types and families,
+   * and each object type's families. A registered object type whose file
+   * could not be parsed (`unparsedObjectTypes`) is a class whose own names are
+   * unknown: the uses of the names it gets from a family are still found and
+   * checked (delete_family, update_family), and validate_project does not
+   * report its uses as unresolved.
+   */
   private indexClassMembers(
     objectTypes: ReadonlyMap<string, unknown>,
     families: ReadonlyMap<string, Record<string, unknown>>,
+    unparsedObjectTypes: readonly string[],
   ): void {
-    const add = (name: string, data: unknown, isFamily: boolean) => {
+    const add = (name: string, data: unknown, isFamily: boolean, ownUnknown = false) => {
       const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
       this.classMembers.set(name, {
         isFamily,
         variables: entryNames(record.instanceVariables),
         behaviors: entryNames(record.behaviorTypes),
+        ...(ownUnknown ? { ownUnknown } : {}),
       });
       if (!this.classNamesLower.has(name.toLowerCase())) this.classNamesLower.set(name.toLowerCase(), name);
     };
     for (const [name, data] of objectTypes) add(name, data, false);
+    for (const name of unparsedObjectTypes) add(name, undefined, false, true);
     for (const [name, data] of families) {
       add(name, data, true);
       if (!Array.isArray(data?.members)) continue;
@@ -859,7 +880,9 @@ export class ProjectIndex {
   /**
    * Whether an object type or family has an instance variable or behavior of
    * this name (ignoring case) after `removal`: its own, or for an object type
-   * one of a family it stays a member of.
+   * one of a family it stays a member of. An object type whose file could not
+   * be parsed has no known names of its own, so a use of a family's name
+   * through it counts as broken when it loses that family's name.
    */
   hasMember(
     objectClass: string, kind: MemberReference['kind'], name: string, removal: MemberRemoval = {},
@@ -1060,14 +1083,14 @@ export class ProjectIndex {
     }
   }
 
-  /**
-   * Get unique event sheets that reference a given object
-   */
   /** SID of an object type or family whose file could be read. */
   sidOf(name: string): number | undefined {
     return this.sidsByName.get(name);
   }
 
+  /**
+   * Get unique event sheets that reference a given object
+   */
   getEventSheetsForObject(objectName: string): string[] {
     const refs = this.objectToEventSheets.get(objectName) || [];
     return [...new Set(refs.map(r => r.eventSheet))];
@@ -1139,12 +1162,14 @@ export class ProjectIndex {
    * parameter, behaviorType and "Name.Behavior.Expression"; a "Name.member"
    * that names none is one of the plugin's expressions, and the legacy
    * "behavior-type" key is validate_project's legacy-behavior-key check. Uses
-   * through an object type are left out while a family file could not be read.
+   * through an object type are left out while a family file could not be read,
+   * and uses through an object type whose own file could not be parsed.
    */
   findUnresolvedMemberReferences(): MemberReference[] {
     return this.memberReferences.filter(ref =>
       ref.form !== 'member-expression' && ref.form !== 'legacy-behavior-type' &&
       !(this.unreadableFamilies && this.classMembers.get(ref.objectClass)?.isFamily === false) &&
+      !this.classMembers.get(ref.objectClass)?.ownUnknown &&
       !this.hasMember(ref.objectClass, ref.kind, ref.name));
   }
 

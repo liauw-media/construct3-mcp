@@ -630,6 +630,85 @@ describe('instance variable, behavior and member removal with event sheets that 
   });
 });
 
+// ─── Own files that could not be parsed (review of #55) ─────
+
+/** Cut the end off an entity file, so it is no longer valid JSON. */
+async function breakFile(category: Category, name: string): Promise<void> {
+  const path = join(tmpDir, category, `${name}.json`);
+  const text = await readFile(path, 'utf-8');
+  await writeFile(path, text.slice(0, text.length - 3));
+}
+
+async function addParsedSheet(name: string, events: unknown[]): Promise<void> {
+  await addEntity('eventSheets', name, { name, events, sid: 750000000000040 });
+}
+
+async function addParsedLayout(name: string, instances: unknown[]): Promise<void> {
+  await addEntity('layouts', name, {
+    name, layers: [{ name: 'Main', sid: 740000000000021, instances }], sid: 740000000000022, eventSheet: '', width: 100, height: 100,
+  });
+}
+
+/** Family Foes with member Enemy, instance variable "armor" and behavior "Flash". */
+async function addFoesWithFlash(): Promise<void> {
+  await addEntity('families', 'Foes', {
+    name: 'Foes', 'plugin-id': 'Sprite', sid: FOES_SID,
+    instanceVariables: [{ name: 'armor', type: 'number', desc: '', show: true, sid: 720000000000002 }],
+    behaviorTypes: [{ behaviorId: 'Flash', name: 'Flash', sid: 720000000000003 }],
+    effectTypes: [], members: ['Enemy'],
+  });
+}
+
+describe('checks whose own definition file could not be parsed', () => {
+  it('delete_family finds uses of the family\'s names through a member whose object type file is not valid JSON', async () => {
+    await addEnemy();
+    await addFoes();
+    await breakFile('objectTypes', 'Enemy');
+    await addParsedSheet('Uses', [block(760000000000010, [setX('Enemy.armor * 2')])]);
+    await startServer();
+
+    const result = await call('delete_family', { name: 'Foes' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.message).toContain('instance variable "armor" of "Enemy"');
+    expect(await exists('families', 'Foes')).toBe(true);
+  });
+
+  it('update_family refuses to remove a variable or a member such a member uses in a parsed sheet', async () => {
+    await addEnemy();
+    await addFoes();
+    await breakFile('objectTypes', 'Enemy');
+    await addParsedSheet('Uses', [block(760000000000010, [setX('Enemy.armor * 2')])]);
+    await startServer();
+
+    const variable = await call('update_family', { name: 'Foes', removeVariables: ['armor'] });
+    expect(variable.action).toBe('update_blocked');
+    expect(variable.references.eventSheets).toEqual(['Uses']);
+    const member = await call('update_family', { name: 'Foes', removeMembers: ['Enemy'] });
+    expect(member.action).toBe('update_blocked');
+    const foes = JSON.parse(await readFile(join(tmpDir, 'families', 'Foes.json'), 'utf-8'));
+    expect(foes.instanceVariables.map((v: { name: string }) => v.name)).toEqual(['armor']);
+    expect(foes.members).toEqual(['Enemy']);
+  });
+
+  it('such a member does not block when events use none of the family\'s names through it, nor make validate_project report its own names', async () => {
+    await addEnemy();
+    await addFoes();
+    await breakFile('objectTypes', 'Enemy');
+    // Enemy's own behavior and a plugin expression: its own names are unknown, not missing
+    await addParsedSheet('Uses', [block(760000000000010, [
+      setX('Enemy.X + Enemy.Fade.Speed'),
+      { id: 'start-fade', objectClass: 'Enemy', behaviorType: 'Fade', sid: 760000000000013 },
+    ])]);
+    await startServer();
+
+    const validation = await call('validate_project', {});
+    expect(JSON.stringify(validation)).not.toContain('missing-behavior-or-variable');
+    const result = await call('delete_family', { name: 'Foes' });
+    expect(result.success).toBe(true);
+  });
+
+});
+
 // ─── rename_animation ───────────────────────────────────────
 
 describe('rename_animation with layouts that could not be parsed', () => {
