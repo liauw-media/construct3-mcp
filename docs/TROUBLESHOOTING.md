@@ -6,7 +6,13 @@ Common issues and solutions for the Construct3 MCP Server.
 
 ### "No .c3proj file found in directory"
 
-**Cause**: The path you provided doesn't contain a `.c3proj` file.
+**Cause**: The path you provided doesn't contain a `.c3proj` file directly. Only that folder is searched, not its subfolders or parent folders. The same message appears when:
+- the path does not exist (a typo),
+- the path is a `.c3p` file (single-file projects cannot be opened),
+- the path is a subfolder of the project (e.g. `layouts/`) or a parent folder (e.g. a repository root with the game in `game/`),
+- no path was given and the server was started in a folder without a `.c3proj`. Without an argument and without `C3_PROJECT_PATH` the server uses its working directory; Claude Code starts it in the folder where you started `claude`.
+
+The server exits with code 1, so the client only reports that the connection closed. Run the command from your MCP config in a terminal to see this message.
 
 **Solutions**:
 - Pass the path directly to the `.c3proj` file: `node dist/index.js /path/to/project.c3proj`
@@ -15,16 +21,18 @@ Common issues and solutions for the Construct3 MCP Server.
 
 ### "Invalid Construct3 project file"
 
-**Cause**: The `.c3proj` file exists but isn't valid JSON or is missing required fields.
+**Cause**: The path ends in `.c3proj` but the file does not exist, isn't valid JSON, or lacks the top-level fields `projectFormatVersion` and `name`.
 
 **Solutions**:
+- Check the path (a missing `.c3proj` file gives this message, not "No .c3proj file found")
 - Open the project in Construct 3 editor and re-save it
-- Check the file isn't corrupted (open it in a text editor — it should be valid JSON)
-- Ensure it has required top-level fields: `name`, `objectTypes`, `eventSheets`, `layouts`
+- Check the file isn't corrupted (open it in a text editor — it should be valid JSON with `projectFormatVersion` and `name`)
 
-### "Usage: construct3-mcp <project-path>"
+A file that passes this check but lacks other parts of a project (e.g. `objectTypes`) fails with `Failed to load Construct3 project: Cannot read properties of undefined (reading 'items')` instead.
 
-**Cause**: No project path was provided.
+### Started without a project path
+
+There is no usage message. Without an argument and without `C3_PROJECT_PATH`, the server looks for a `.c3proj` in its working directory. If there is none, it prints `Failed to start server: No .c3proj file found in directory: <working directory>` and exits with code 1.
 
 **Solutions**:
 - Pass the path as the first argument: `node dist/index.js /path/to/project`
@@ -35,10 +43,12 @@ Common issues and solutions for the Construct3 MCP Server.
 ### Server starts but Claude doesn't see the tools
 
 **Solutions**:
-- Verify your MCP config JSON is valid (check for trailing commas, etc.)
+- Verify your MCP config JSON is valid (check for trailing commas, etc.). On Windows use forward slashes or doubled backslashes in JSON paths
 - Make sure the path to `dist/index.js` is absolute
-- Restart Claude Code / Claude Desktop after changing MCP config
+- Restart Claude Code / Claude Desktop after changing MCP config (quit Claude Desktop completely; closing the window is not enough)
 - Check stderr output for error messages: `node dist/index.js /path/to/project 2>debug.log`
+- Claude Code: run `claude mcp list`. `✘ Failed to connect` means the server exited (run its command in a terminal to see why). `⏸ Pending approval` means a `.mcp.json` server that you still have to approve by starting `claude` in that folder. Claude Code does not read `~/.claude/mcp.json`; add servers with `claude mcp add` or a `.mcp.json` in the project folder. See the [User Guide](USER-GUIDE.md#claude-code)
+- VS Code: `.vscode/mcp.json` uses the top-level key `"servers"`, not `"mcpServers"`
 
 ### "Server disconnected" errors
 
@@ -53,7 +63,7 @@ Common issues and solutions for the Construct3 MCP Server.
 
 ### "Object type X not found"
 
-**Cause**: The name doesn't match exactly (case-sensitive).
+**Cause**: The name doesn't match. On Windows, read tools such as `get_object_details` also accept a name that differs only in letter case, because the file is found case-insensitively there; `update_object_properties` and `update_family` do not (see [below](#-not-found-names-are-matched-with-their-letter-case)).
 
 **Solutions**:
 - Use `list_objects` to see all available names
@@ -66,7 +76,7 @@ Same as above — use the corresponding `list_` tool to find the correct name.
 
 ### "File too large (... exceeds 10MB limit)"
 
-**Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the analysis tools leave it out. `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, even when `valid` is true.
+**Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the analysis tools and the reference checks of the delete and update tools leave it out: `delete_object` without `force` deletes an object whose only uses are in that file. `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, and `valid` is `false`, also when `summary.errors` is 0.
 
 New UIDs are still allocated above the UIDs in the file, so `add_instance_to_layout` and `create_object` keep working: the file is scanned as text for its UIDs and SIDs. That scan reads the whole file, again for the first new UID or SID after each write, so it costs time and memory in proportion to the file's size (for a 150MB layout, one to two seconds per call). A file too large to read into memory as text (about 512MB) cannot be scanned, and new UIDs are refused (see "Cannot generate a safe UID" below).
 
@@ -77,9 +87,9 @@ Known gap: tools that edit the large file itself, such as `add_instance_to_layou
 
 ### Stale data after editing in C3 editor
 
-**Cause**: The reader caches project data at startup.
+**Cause**: The reader loads `project.c3proj` at startup and keeps it, so the lists of objects, event sheets and layouts (e.g. `list_objects`) stay as they were. Single entity files (an event sheet, an object type) are read from disk again, so the data can be a mix of old and new. The server reloads `project.c3proj` itself only after its own writes.
 
-**Solution**: Restart the MCP server to pick up changes made in the C3 editor. The server caches data for performance — external changes aren't detected automatically.
+**Solution**: Restart or reconnect the MCP server to pick up changes made in the C3 editor (Claude Code: `/mcp` > `construct3` > **Reconnect**). External changes aren't detected automatically.
 
 ## Mutation Tool Issues
 
@@ -164,7 +174,9 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### Backup files (.bak)
 
-Every mutation creates `.bak` backup files next to the modified files. If something goes wrong:
+Writes through the project writer copy each file to `<file>.bak` next to it before changing or deleting it. There is only one `.bak` per file and every write to the same file overwrites it, so it holds the state before the **last** write to that file, not the state before your session (one request can write the same file twice, e.g. `create_object` with a new built-in addon writes `project.c3proj` twice). `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) and PNG image writes make no `.bak` (see [Safety Model](../README.md#safety-model)). Nothing deletes `.bak` files; `validate_project` lists them as `backup-file` info entries.
+
+For undo across several steps, keep the project under git and commit before each session (see the [User Guide](USER-GUIDE.md#the-safe-editing-workflow)). To undo only the last change to one file:
 
 1. Find the `.bak` file next to the affected file
 2. Delete or rename the corrupted file
@@ -216,4 +228,4 @@ If you get type errors after modifying the code:
 
 ---
 
-**Last Updated**: 2026-02-16
+**Last Updated**: 2026-09-29

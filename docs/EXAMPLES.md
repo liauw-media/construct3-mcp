@@ -140,7 +140,7 @@ Real-world examples of using the Construct3 MCP Server with Claude.
 ### Add Variables and Behaviors to an Object
 
 **Query:**
-> "Add a health variable (number, default 100) and a Tween behavior to the Enemy object"
+> "Add a number instance variable health and a Tween behavior to the Enemy object"
 
 **Claude uses**: `update_object_properties` with:
 ```json
@@ -156,6 +156,8 @@ Real-world examples of using the Construct3 MCP Server with Claude.
 2. Validates "Tween" behavior is in `usedAddons` (auto-registers if known Scirra)
 3. Generates unique SIDs for the new variable and behavior
 4. Writes updated object back with backup
+
+`addVariables` takes a name and a type only; `update_object_properties` cannot set a variable's initial value.
 
 ### Create an Event Sheet with Includes
 
@@ -340,7 +342,7 @@ Returns success with a warning that names the remaining uses (references are NOT
     {
       "id": "set-instvar-value",
       "objectClass": "Player",
-      "parameters": { "variable": "health", "value": "100" }
+      "parameters": { "instance-variable": "health", "value": "100" }
     }
   ]
 }
@@ -390,7 +392,7 @@ Returns success with a warning that names the remaining uses (references are NOT
     {
       "id": "set-instvar-value",
       "objectClass": "Enemy",
-      "parameters": { "variable": "health", "value": "Enemy.health - 10" }
+      "parameters": { "instance-variable": "health", "value": "Enemy.health - 10" }
     }
   ]
 }
@@ -424,7 +426,7 @@ Returns success with a warning that names the remaining uses (references are NOT
     {
       "id": "subtract-from-instvar",
       "objectClass": "Player",
-      "parameters": { "variable": "health", "value": "1" }
+      "parameters": { "instance-variable": "health", "value": "1" }
     }
   ]
 }
@@ -469,7 +471,7 @@ The script is written the way the editor saves it: `{ "type": "script", "languag
     {
       "id": "subtract-from-instvar",
       "objectClass": "Enemy",
-      "parameters": { "variable": "health", "value": "10" }
+      "parameters": { "instance-variable": "health", "value": "10" }
     }
   ],
   "children": [
@@ -478,7 +480,7 @@ The script is written the way the editor saves it: `{ "type": "script", "languag
         {
           "id": "compare-instance-variable",
           "objectClass": "Enemy",
-          "parameters": { "variable": "health", "comparison": "≤", "value": "0" }
+          "parameters": { "instance-variable": "health", "comparison": 3, "value": "0" }
         }
       ],
       "actions": [
@@ -488,6 +490,8 @@ The script is written the way the editor saves it: `{ "type": "script", "languag
   ]
 }
 ```
+
+Parameter keys are the ones Construct 3 saves: instance variable conditions and actions use `"instance-variable"` (the reference checks of `update_object_properties` and `validate_project` only recognise that key; System event variable ACEs use `"variable"`). The comparison operator is a number: `0` is *equal to*, as in editor-saved sheets; the others follow Construct's comparison order (`1` not equal, `2` less, `3` less or equal, `4` greater, `5` greater or equal), which was not checked in the editor for this document. The server does not validate parameter keys or operator values, so if in doubt build one such condition in the editor and read it with `get_eventsheet_details`.
 
 ### Else Block
 
@@ -509,17 +513,17 @@ An else block belongs after the block it is the else of, at the same level (only
         {
           "id": "compare-instance-variable",
           "objectClass": "Player",
-          "parameters": { "variable": "score", "comparison": "≥", "value": "100" }
+          "parameters": { "instance-variable": "score", "comparison": 5, "value": "100" }
         }
       ],
       "actions": [
-        { "id": "set-visible", "objectClass": "WinText", "parameters": { "visible": true } }
+        { "id": "set-visible", "objectClass": "WinText", "parameters": { "visibility": "visible" } }
       ]
     },
     {
       "isElse": true,
       "actions": [
-        { "id": "set-visible", "objectClass": "TryAgainText", "parameters": { "visible": true } }
+        { "id": "set-visible", "objectClass": "TryAgainText", "parameters": { "visibility": "visible" } }
       ]
     }
   ]
@@ -589,12 +593,12 @@ Arguments follow the order of the function's parameters: expressions as strings,
     {
       "id": "set-instvar-value",
       "objectClass": "Player",
-      "parameters": { "variable": "health", "value": "100" }
+      "parameters": { "instance-variable": "health", "value": "100" }
     },
     {
       "id": "set-instvar-value",
       "objectClass": "Player",
-      "parameters": { "variable": "health", "value": "999" },
+      "parameters": { "instance-variable": "health", "value": "999" },
       "disabled": true
     }
   ]

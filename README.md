@@ -1,6 +1,6 @@
 # Construct3 MCP Server
 
-> A Model Context Protocol (MCP) server that enables AI assistants (Claude, Cursor, Antigravity, and any MCP-compatible tool) to safely read, analyze, and modify Construct 3 game engine projects.
+> An MCP server that lets Claude, Cursor and other AI assistants read, analyze and safely edit Construct 3 projects — editor-faithful writes with backups and validation. New here? Start with the [User Guide](docs/USER-GUIDE.md).
 
 > **v1.9.0** — Writes follow what the Construct 3 editor itself saves and checks: load-time rules before every event sheet write, the editor's event shapes and name rules, and a `validate_project` without the false reports it gave on editor-saved projects. See [What's new in 1.9.0](#whats-new-in-190) and the [CHANGELOG](CHANGELOG.md).
 
@@ -10,7 +10,7 @@
 
 ## What's new in 1.9.0
 
-- **Editor load-time checks** — `validate_project` checks the rules the Construct 3 editor enforces when it opens a project, and event sheet writes that would add such an error are refused.
+- **Editor load-time checks** — `validate_project` checks a set of rules the Construct 3 editor enforces when it opens a project, and event sheet writes that would add such an error are refused.
 - **Behavior conditions and actions the editor reads** — written with `behaviorType`; `fix_legacy_behavior_keys` repairs sheets from older versions (`behavior-type` is still accepted as a deprecated input alias).
 - **Find events by editor number** — `locate_event` and `get_eventsheet_outline` turn "sheet, event N, action M" into the event's JSON path.
 - **Runtime traps** — `find_runtime_traps`, the `construct3://docs/pitfalls` resource and the `debug_stuck_game` prompt for logic that loads but hangs or fails silently.
@@ -23,28 +23,24 @@ Full list: [CHANGELOG](CHANGELOG.md).
 
 ## Quick Start
 
+**New to this server? Read the [User Guide](docs/USER-GUIDE.md).** It covers requirements, setup for each AI tool, a first session, the safe editing workflow (close the project in Construct 3 while the AI edits it) and runtime testing.
+
+The server is not published on npm. Clone it and build it once (Node.js 18 or newer):
+
 ```bash
-# Install dependencies
-npm install
-
-# Build the server
-npm run build
-
-# Test with your project
-node dist/index.js /path/to/your/project.c3proj
+git clone https://github.com/liauw-media/construct3-mcp.git
+cd construct3-mcp
+npm ci    # installs dependencies and builds dist/ (prepare script)
 ```
 
-**Add to your MCP config** (Claude Code, Cursor, Antigravity — [see Usage](#usage) for config file locations):
-```json
-{
-  "mcpServers": {
-    "construct3": {
-      "command": "node",
-      "args": ["/absolute/path/to/construct3-mcp/dist/index.js"]
-    }
-  }
-}
+Connect it to Claude Code with absolute paths to `dist/index.js` and to your project folder (the folder that contains `project.c3proj`; `.c3p` files cannot be opened):
+
+```bash
+claude mcp add construct3 --scope user -- node /absolute/path/to/construct3-mcp/dist/index.js "/absolute/path/to/My Game"
+claude mcp list    # construct3: ... - ✔ Connected
 ```
+
+Claude Desktop, Cursor, VS Code and others use a JSON config instead, see [Usage](#usage).
 
 ## Table of Contents
 
@@ -71,7 +67,7 @@ node dist/index.js /path/to/your/project.c3proj
 - Provides structured access to project data via resources and query tools
 - Enables deep analysis (dependency graphs, orphan detection, performance audits)
 - Safely creates, updates, and deletes project entities with automatic backup, ID generation, and validation
-- Includes access to official Construct 3 documentation
+- Links to the official Construct 3 manual and includes a curated list of Construct 3 pitfalls
 
 ## Features
 
@@ -86,7 +82,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `construct3://eventsheets/{name}` | Specific event sheet details |
 | `construct3://layouts/{name}` | Specific layout details |
 | `construct3://docs/index` | Index of documentation categories and popular topics |
-| `construct3://docs/manual/{topic}` | Official Construct 3 documentation |
+| `construct3://docs/manual/{topic}` | Link to the construct.net manual page for a topic (the page text is not fetched) |
 | `construct3://docs/pitfalls` | Curated Construct 3 pitfalls (signals, scripts, picking, expressions), each tagged with its source |
 
 ### Query Tools (Read-Only)
@@ -116,7 +112,7 @@ node dist/index.js /path/to/your/project.c3proj
 | `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions and script actions) or layout (including sub-layers, non-world instances and object properties of other instances) |
 | `get_asset_usage` | Track sound, image, font, video and project file usage (used, unused or not analysed) |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
-| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, behaviors and instance variables that events use but their object lacks, missing addons, legacy `"behavior-type"` keys, layout instances without behavior entries, event shapes older versions wrote that the editor never writes, scripts in the one-string shape of older Construct 3 releases, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger and else placement, expression syntax, empty expressions, duplicate names/SIDs, family plugins). Rules verified only in part are reported as warnings (details in [API.md](docs/API.md#validate_project)). `valid` means no errors and every registered file was checked; `complete` (and so `valid`) is false when a registered file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable; listed in `unscannedFiles`) |
+| `validate_project` | Integrity checks: missing files, required fields, duplicate SIDs/UIDs, repeated layer names, broken references and includes, behaviors and instance variables that events use but their object lacks, missing addons, legacy `"behavior-type"` keys, layout instances without behavior entries, event shapes older versions wrote that the editor never writes, scripts in the one-string shape of older Construct 3 releases, orphaned and backup files, plus the rules the C3 editor enforces at load (trigger and else placement, expression syntax limited to unterminated string literals and backslashes outside them, empty expressions, duplicate names/SIDs, family plugins). Rules verified only in part are reported as warnings (details in [API.md](docs/API.md#validate_project)). `valid` means no errors and every registered file was checked; `complete` (and so `valid`) is false when a registered file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable; listed in `unscannedFiles`) |
 | `get_group_settings` | Event group settings (`isActiveOnStart`, disabled) across sheets, filterable by sheet and active state |
 | `locate_event` | Map an editor event number ("es_game, event 72, action 1") to its JSON path, sid, content and neighbouring events |
 | `get_eventsheet_outline` | Readable, paged event sheet outline with editor event numbers (IF/DO/CALL/SCRIPT/GROUP/FUNCTION/VAR) |
@@ -141,7 +137,7 @@ node dist/index.js /path/to/your/project.c3proj
 |------|-------------|
 | `create_event_sheet` | Create a new event sheet with optional includes; refuses names that differ from an existing sheet only in case |
 | `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); functions take the editor's return type, *Asynchronous* and *Copy picked* options; the names of a new (global) variable and of function parameters are checked like in the editor |
-| `add_event_block` | Add a block event with conditions + actions (gameplay logic), written in the editor's own shapes: sub-events (also without conditions), else/else-if blocks, OR blocks, function calls, script actions, comment rows; refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) and warns where Else cannot stand (after a triggered event) |
+| `add_event_block` | Add a block event with conditions + actions (gameplay logic), written in the editor's own shapes: sub-events (also without conditions), else/else-if blocks, OR blocks, function calls, script actions, comment rows; refuses writes that break the checked editor load-time rules (unterminated string literals and backslashes outside them, empty expressions, trigger placement) and warns where Else cannot stand (after a triggered event) |
 | `update_event_block` | Update an existing block: modify/add/remove actions and conditions, make it an else or OR block (load-time checked) |
 | `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; function call arguments as an array; load-time checked) |
 | `update_event_variable` | Rename a variable or change its type, initial value, static or constant flag; a new name is checked like in the editor |
@@ -204,19 +200,22 @@ Event SIDs are not always unique in editor-saved sheets. The tools that find an 
 | `inject_runtime_bridge` | Inject a bridge script into the C3 project that exposes the runtime via `globalThis.__c3bridge` |
 | `remove_runtime_bridge` | Remove the bridge script and clean up the project |
 | `get_bridge_commands` | List all commands the bridge supports (callFunction, getGlobalVar, getObjectState, etc.) |
-| `generate_bridge_eval_script` | Generate a curl/python script to execute a bridge command via browser remote debugging |
-| `export_for_preview` | Pre-flight checks (worker mode, bridge injection) for preview testing |
+| `generate_bridge_eval_script` | Return the browser-console lines that submit a bridge command and read its result, plus a Python snippet that only prints those lines (nothing connects to the browser) |
+| `export_for_preview` | Pre-flight checks (worker mode, bridge injection) for preview testing; reports the worker mode without changing it, and injects the bridge into the project unless `injectBridge: false` |
 | `clone_project` | Deep-copy the project with optional bridge injection |
-| `pack_project` | Pack the project folder into a `.c3p` file that Construct 3 can open (optionally injects the bridge first) |
+| `pack_project` | Pack the project folder into a `.c3p` file that Construct 3 can open (injects the bridge into the project first unless `injectBridge: false`) |
 
-The runtime bridge enables external tools (Playwright, browser console, curl) to control a running C3 game. Once injected and the game is previewed, you can:
+The runtime bridge lets the browser console or a browser-automation tool (Playwright, anything that speaks the Chrome DevTools Protocol) control a running C3 game. The bridge is registered as a script with Purpose "(none)", and according to the Construct 3 manual Construct only runs the main script automatically, so import it from your main script (`import "./c3-runtime-bridge.js";`) or set its Purpose to Main script; this step is not yet confirmed in a live preview (see the [User Guide](docs/USER-GUIDE.md#testing-a-running-game-with-the-runtime-bridge)). With *Use worker* set to *No* and the game previewed, `submit()` queues a command and returns its id; the result is available after the next tick and can be read once with `getResult()`:
 
 ```javascript
 // From the browser console or any CDP-capable automation tool
+const id = globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" });
+globalThis.__c3bridge.getResult(id);   // { ok: true, value: ... }, null while pending
 globalThis.__c3bridge.submit("callFunction", { name: "StartGame", params: [] });
-globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" });
 globalThis.__c3bridge.submit("getObjectState", { objectName: "Player" });
 ```
+
+Remove the bridge before exporting the game for players: while it runs, anyone with the browser console can change variables and call functions. `remove_runtime_bridge` deletes only the script file and its entry in `project.c3proj`, not an import line in your main script. So first delete the `import "./c3-runtime-bridge.js";` line from your main script in Construct 3 (save, close), then run `remove_runtime_bridge`. See the [User Guide](docs/USER-GUIDE.md#remove-the-bridge-before-you-export).
 
 ### Prompts (Workflow Templates)
 
@@ -251,7 +250,7 @@ Steps 2, 4 and 5 apply in full to writes that go through the project writer: obj
 
 Additional safeguards:
 - **Reference checking** — `delete_object`, `delete_family`, `delete_event_sheet`, and `delete_layout` scan for references before deleting; `update_object_properties` and `update_family` check the events before removing an instance variable, a behavior or a family member.
-- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error.
+- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error unless `register_addon` added them to `usedAddons` first (it does not check the ID or install anything).
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
 - **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs, named like the editor names them: `images/<object>-<animation>-000.png`, all lowercase. Batch writes roll back on failure.
@@ -267,6 +266,7 @@ Additional safeguards:
 
 Detailed documentation is available in the `/docs` folder:
 
+- [**User Guide**](docs/USER-GUIDE.md) - Install, connect your AI tool, first session, safe editing workflow, runtime testing
 - [**Architecture**](docs/ARCHITECTURE.md) - System design, components, and data flow
 - [**API Reference**](docs/API.md) - Complete reference for all resources, tools, and prompts
 - [**Examples**](docs/EXAMPLES.md) - Usage examples and workflows
@@ -283,46 +283,61 @@ Detailed documentation is available in the `/docs` folder:
 
 ### Install Dependencies
 
+The package is not on npm. Clone the repository and install:
+
 ```bash
+git clone https://github.com/liauw-media/construct3-mcp.git
 cd construct3-mcp
-npm install
+npm ci
 ```
 
+`npm install` works too. Do not install with `--omit=dev` or `--production`: the build step needs the TypeScript dev dependency and fails without it.
+
 ### Build
+
+`npm ci` and `npm install` already build the server (the `prepare` script runs `npm run build`), which compiles TypeScript to JavaScript in the `dist/` folder. Run the build yourself only after changing the source:
 
 ```bash
 npm run build
 ```
 
-This compiles TypeScript to JavaScript in the `dist/` folder.
-
 ## Usage
 
-All MCP-compatible tools use the same JSON configuration format. The server auto-detects `.c3proj` in your working directory, or you can pass an explicit project path.
+Step-by-step instructions for each client are in the [User Guide](docs/USER-GUIDE.md#connect-your-ai-tool).
 
-**MCP config** (same for all tools):
+The server finds its project in this order: the first argument after `dist/index.js` (a project folder or the `.c3proj` file), the `C3_PROJECT_PATH` environment variable, the working directory it is started in. A folder must contain the `.c3proj` file directly; subfolders and parent folders are not searched. Most clients do not start the server in your project folder, so pass the project path.
+
+**MCP config** (Claude Desktop, Antigravity, Windsurf and a hand-written Claude Code `.mcp.json`; Cursor and VS Code need `"type": "stdio"`, and VS Code uses a different top-level key, see below):
 ```json
 {
   "mcpServers": {
     "construct3": {
       "command": "node",
-      "args": ["/absolute/path/to/construct3-mcp/dist/index.js"]
+      "args": ["/absolute/path/to/construct3-mcp/dist/index.js", "/absolute/path/to/your-project"]
     }
   }
 }
 ```
 
-To target a specific project instead of auto-detecting:
-```json
-"args": ["/path/to/construct3-mcp/dist/index.js", "/path/to/your-project"]
-```
+On Windows, write paths in JSON with forward slashes (`"C:/Games/My Game"`) or doubled backslashes (`"C:\\Games\\My Game"`); single backslashes make the file invalid JSON. Each path is one array element, also when it contains spaces. Leave out the project path only if the client starts the server in the folder that contains the `.c3proj`.
 
 ### With Claude Code
 
-Add the config above to your project's `.mcp.json` or global `~/.claude/mcp.json`.
+Add the server with the CLI:
 
-1. Open Claude Code inside any Construct 3 project folder
-2. The MCP tools appear automatically
+```bash
+claude mcp add construct3 --scope user -- node /absolute/path/to/construct3-mcp/dist/index.js "/absolute/path/to/your-project"
+claude mcp list
+```
+
+`claude mcp list` should show `construct3: ... - ✔ Connected`. Inside a session, `/mcp` shows the status and can reconnect the server.
+
+- `--scope user` stores the server in `~/.claude.json` for every folder. Without `--scope` (local scope) it only applies when `claude` is started in the folder where you ran the command; if that folder is in a git repository, it applies anywhere in that repository (a second `claude mcp add construct3` for another game in the same repository fails with `already exists in local config`; see the [User Guide](docs/USER-GUIDE.md#which-scope) for several games). `--scope project` writes a `.mcp.json` into the current folder.
+- A `.mcp.json` in the project folder (the JSON above) also works, but Claude Code does not start it until you approve it: `claude mcp list` shows `⏸ Pending approval` until you start `claude` in that folder, trust the folder and approve the server.
+- Claude Code does not read `~/.claude/mcp.json`.
+- Without a project path, the server only starts when Claude Code is started in the folder that directly contains the `.c3proj`. Started anywhere else, `claude mcp list` shows `✘ Failed to connect`.
+
+Windows shell pitfalls (PowerShell and `--`, Git Bash and backslashes) and tool permissions: [User Guide](docs/USER-GUIDE.md#claude-code).
 
 ### With Claude Desktop
 
@@ -331,23 +346,55 @@ Add the config to your Claude Desktop settings file:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Note: Claude Desktop doesn't change working directory per-project, so pass the project path explicitly in `args`.
+Note: Claude Desktop doesn't change working directory per-project, so pass the project path explicitly in `args`. Quit Claude Desktop completely and start it again after editing the file; closing the window is not enough.
 
 ### With Cursor
 
-Add the config to `.cursor/mcp.json` in your project root (project-specific) or `~/.cursor/mcp.json` (global).
+Add the config to `.cursor/mcp.json` in your project root (project-specific) or `~/.cursor/mcp.json` (global). Cursor's documentation lists `"type": "stdio"` as a required field of each server entry. In `.cursor/mcp.json`, `"${workspaceFolder}"` can stand for the project path:
+
+```json
+{
+  "mcpServers": {
+    "construct3": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/construct3-mcp/dist/index.js", "${workspaceFolder}"]
+    }
+  }
+}
+```
 
 1. Restart Cursor after adding or modifying the config
 2. The Construct 3 tools appear in Cursor's AI agent
+
+### With VS Code
+
+VS Code (GitHub Copilot agent mode) reads `.vscode/mcp.json`, whose top-level key is `"servers"`, not `"mcpServers"`, and each entry needs `"type": "stdio"`:
+
+```json
+{
+  "servers": {
+    "construct3": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/construct3-mcp/dist/index.js", "${workspaceFolder}"]
+    }
+  }
+}
+```
 
 ### With Antigravity
 
 Add the config to Antigravity's MCP configuration:
 
 - **Via UI**: Click the `...` menu in the Agent panel → **MCP Servers** → **Manage MCP Servers** → **View raw config**
-- **Direct edit**: `~/.gemini/antigravity/mcp_config.json`
+- **Direct edit**: the current Antigravity documentation names `~/.gemini/config/mcp_config.json` (global) and `.agents/mcp_config.json` (workspace); the UI route above opens the right file
 
 Note: Antigravity doesn't set a working directory per-project, so pass the project path explicitly in `args`.
+
+### With Windsurf
+
+Windsurf (now Devin Desktop) uses the same `mcpServers` format. Its Cascade agent allows at most 100 tools in total, and this server alone brings 71.
 
 ### Standalone Testing
 
@@ -360,6 +407,8 @@ node /path/to/construct3-mcp/dist/index.js
 node dist/index.js /path/to/project.c3proj
 node dist/index.js /path/to/project-folder
 ```
+
+On success the server prints `Construct3 MCP Server ready` (on stderr) and then waits silently for an MCP client on stdin; that is not a hang. Press Ctrl+C to stop it. On a wrong path it prints `Failed to start server: ...` and exits with code 1.
 
 ### Example Queries
 
@@ -386,8 +435,8 @@ Once the MCP server is running, ask Claude:
 - "Place a Player instance at position 100, 200 on the Game layout"
 
 **Documentation:**
-- "Show me the Construct 3 documentation for the Sprite plugin"
-- "What are the best practices for event sheets?"
+- "Which Construct 3 pitfalls should I know about?" (reads `construct3://docs/pitfalls`)
+- "Give me the manual link for the Sprite plugin" (the documentation resources return construct.net links, not the page text)
 
 ## Development
 
@@ -574,7 +623,7 @@ We welcome contributions! Here's how to get started:
 
 - **Folder Format Only**: Works with .c3proj folder projects; `pack_project` can write a .c3p, but .c3p files cannot be opened
 - **Editor Holds the Project in Memory**: Close and reopen the project in Construct 3 after MCP edits and before saving there, or the editor can overwrite them
-- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned, see Phase 7)
+- **No Rename Refactoring**: Objects, families, event sheets, layouts and timelines cannot be renamed; renaming a layer (`update_layer`) or an event variable (`update_event_variable`) does not update the events that use the old name (issue #38). `rename_animation` renames the frame images and the layout instances' start animation, but not text in events. Renaming with reference updates is planned (Phase 7)
 - **Runtime Bridge Requires Browser Automation**: The runtime tools inject a bridge script but need an external tool (Playwright, curl, or any CDP-capable tool) to drive the browser and interact with the running game
 - **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs). Only the editor load-time rules listed under `validate_project` are checked; triggers are recognised by the `on-` id convention, which third-party addons do not always follow, so their trigger problems are warnings only. OR blocks are created with `isOrBlock`
 
