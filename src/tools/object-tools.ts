@@ -463,28 +463,22 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
         // Its frame images (or single image) lose their user: kept as .bak, like
-        // the image of a deleted frame. Renamed first, renamed back when the
-        // object file cannot be deleted.
+        // the image of a deleted frame. Renamed first; when the object file cannot
+        // be deleted or project.c3proj not updated, the object file is restored
+        // and the images renamed back.
         const images = await planDeletedObjectImages(reader, writer, args.name);
-        if (images.parking) await writer.renameImageFiles(images.parking.renames);
+        const renames = images.parking?.renames ?? [];
+        if (renames.length > 0) await writer.renameImageFiles(renames);
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
-        let backupPath: string;
+        let backupPath: string | undefined;
         try {
           backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
+          await writer.removeFromProject('objectTypes', args.name);
         } catch (error) {
-          const renames = images.parking?.renames ?? [];
-          if (renames.length > 0) {
-            const cause = error instanceof Error ? error.message : String(error);
-            try {
-              await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })).reverse());
-            } catch (e) {
-              throw new Error(`${cause}. Renaming its image files back from .bak failed too: ${e instanceof Error ? e.message : String(e)}`);
-            }
-            throw new Error(`${cause}. Its image files were renamed back from .bak.`);
-          }
-          throw error;
+          const rollback = await rollBackObjectDelete(writer, backupPath, renames);
+          if (rollback === '') throw error;
+          throw new Error(`${error instanceof Error ? error.message : String(error)}. ${rollback}`);
         }
-        await writer.removeFromProject('objectTypes', args.name);
         warnings.push(...images.warnings);
 
         const result: WriteResult = {
@@ -943,6 +937,40 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
       }
     }
   );
+}
+
+/**
+ * Undo what delete_object did before a step failed: restore the object file
+ * from `backupPath` (when it was deleted) and rename the image files back
+ * from .bak (`renames`, as made). Returns sentences on what was undone and
+ * what could not be, naming the files to recover by hand; empty when there
+ * was nothing to undo.
+ */
+async function rollBackObjectDelete(
+  writer: Construct3ProjectWriter,
+  backupPath: string | undefined,
+  renames: ReadonlyArray<{ from: string; to: string }>,
+): Promise<string> {
+  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const sentences: string[] = [];
+  if (backupPath !== undefined) {
+    try {
+      await writer.restoreEntityFile(backupPath);
+      sentences.push('The object file was restored from its backup.');
+    } catch (e) {
+      sentences.push(`Restoring the object file failed (${message(e)}): ${backupPath} holds it.`);
+    }
+  }
+  if (renames.length > 0) {
+    try {
+      await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })).reverse());
+      sentences.push('Its image files were renamed back from .bak.');
+    } catch (e) {
+      sentences.push(`Renaming its image files back from .bak failed too (${message(e)}); rename them back by hand: ` +
+        `${renames.map(r => `"images/${r.to}" → "images/${r.from}"`).join(', ')}.`);
+    }
+  }
+  return sentences.join(' ');
 }
 
 /**

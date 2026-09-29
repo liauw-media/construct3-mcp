@@ -129,6 +129,41 @@ describe('delete_object keeps the object\'s image files as .bak', () => {
     expect(result.content[0].text).toContain('Its image files were renamed back from .bak');
     expect(await images()).toEqual(['coin-animation 1-000.png', 'coin-spin-000.png', 'coin-spin-001.jpg']);
   });
+
+  it('restores the object file and renames the images back when project.c3proj cannot be updated', async () => {
+    await createCoin();
+    const before = await readFile(objectPath('Coin'), 'utf8');
+    writer.removeFromProject = async () => { throw new Error('project.c3proj is read-only'); };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('project.c3proj is read-only. The object file was restored from its backup. ' +
+      'Its image files were renamed back from .bak.');
+    expect(await readFile(objectPath('Coin'), 'utf8')).toBe(before);
+    expect(await images()).toEqual(['coin-animation 1-000.png', 'coin-spin-000.png', 'coin-spin-001.jpg']);
+    resetProjectIndex();
+    const check = await validateProjectIntegrity(reader);
+    expect(check.errors.filter(e => e.check === 'file-existence')).toEqual([]);
+  });
+
+  it('names the image files to rename back by hand when renaming them back fails', async () => {
+    await createCoin();
+    writer.removeFromProject = async () => { throw new Error('project.c3proj is read-only'); };
+    const rename = writer.renameImageFiles.bind(writer);
+    let calls = 0;
+    writer.renameImageFiles = async renames => {
+      if (++calls > 1) throw new Error('images/ is locked');
+      return rename(renames);
+    };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('The object file was restored from its backup.');
+    expect(text).toContain('Renaming its image files back from .bak failed too (images/ is locked); rename them back by hand: ' +
+      '"images/coin-animation 1-000.png.bak" → "images/coin-animation 1-000.png"');
+    expect(text).toContain('"images/coin-spin-001.jpg.bak" → "images/coin-spin-001.jpg".');
+  });
 });
 
 describe('validate_project orphaned-image', () => {
