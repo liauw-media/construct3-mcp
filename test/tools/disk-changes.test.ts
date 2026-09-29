@@ -28,6 +28,8 @@ import { registerQueryTools } from '../../src/tools/query.js';
 import { registerAnalysisTools } from '../../src/tools/analysis.js';
 import { registerMutationTools } from '../../src/tools/mutations.js';
 import { registerRuntimeTools } from '../../src/tools/runtime-tools.js';
+import { registerProjectResources } from '../../src/resources/project.js';
+import { registerWorkflowPrompts } from '../../src/prompts/workflows.js';
 
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 
@@ -119,6 +121,8 @@ beforeEach(async () => {
   idGen = new IdGenerator();
   writer = new Construct3ProjectWriter(reader, idGen);
   server = new MockServer();
+  registerProjectResources(server as never, reader);
+  registerWorkflowPrompts(server as never, reader);
   registerQueryTools(server as never, reader);
   registerAnalysisTools(server as never, reader);
   registerMutationTools(server as never, reader, writer, idGen);
@@ -230,6 +234,37 @@ describe('changes made on disk between tool calls are seen (#51)', () => {
     expect(uids).toEqual([0, 1, 2, 3]);
   });
 
+  it('a resource read shows project.c3proj as saved in the editor', async () => {
+    const info = async () => JSON.parse((await server.readResource('construct3://project/info')).contents[0].text);
+    expect((await info()).name).toBe('TestProject');
+
+    await editJson('project.c3proj', project => { project.name = 'Renamed in the editor'; });
+
+    expect((await info()).name).toBe('Renamed in the editor');
+  });
+
+  it('a prompt shows project.c3proj as saved in the editor', async () => {
+    const text = async () => (await server.getPrompt('analyze_project')).messages[0].content.text;
+    expect(await text()).toContain('Object Types: 1');
+
+    await editJson('project.c3proj', project => { project.objectTypes.items.push('Hero'); });
+
+    expect(await text()).toContain('Object Types: 2');
+  });
+
+  it('outside a tool call, syncWithDisk() brings the caches up to date', async () => {
+    expect((await reader.readAllEventSheets()).get('MainSheet')?.events).toHaveLength(1);
+    const epoch = reader.getDiskEpoch();
+
+    await editJson('eventSheets/MainSheet.json', sheet => { sheet.events = []; });
+
+    expect(await reader.syncWithDisk()).toBe(true);
+    expect(reader.getDiskEpoch()).toBe(epoch + 1);
+    expect((await reader.readAllEventSheets()).get('MainSheet')?.events).toHaveLength(0);
+    expect(await reader.syncWithDisk()).toBe(false);
+    expect(reader.getDiskEpoch()).toBe(epoch + 1);
+  });
+
   it('a tool call reports a project.c3proj that cannot be read, and works again once it can', async () => {
     const original = await readFile(join(dir, 'project.c3proj'), 'utf-8');
     await writeFile(join(dir, 'project.c3proj'), '{ "half written', 'utf-8');
@@ -291,6 +326,23 @@ describe('a write never replaces a change made on disk after the call read the f
       else expect(names).toContain(variable);
     }
     expect([a, b].filter(r => r.isError)).toHaveLength(1);
+  });
+
+  it('delete_event_sheet refuses when the sheet is saved in the editor during the call', async () => {
+    await expectSuccess('create_event_sheet', { name: 'Other' });
+    // Saved from the editor after the tool read the sheet (for its reference check), before it deletes it
+    const getSubfolderForEntity = writer.getSubfolderForEntity.bind(writer);
+    vi.spyOn(writer, 'getSubfolderForEntity').mockImplementation((category, name) => {
+      if (category === 'eventSheets' && name === 'Other') saveSheetInEditor('Other');
+      return getSubfolderForEntity(category, name);
+    });
+
+    const result = await call('delete_event_sheet', { name: 'Other' });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('eventSheets/Other.json was changed on disk after this server read it');
+    expect((await readJson('eventSheets/Other.json')).events).toEqual([{ eventType: 'comment', text: 'saved in the editor' }]);
+    expect((await readJson('project.c3proj')).eventSheets.items).toContain('Other');
   });
 
   it('of two parallel create_object calls with the same name, the second is refused', async () => {
