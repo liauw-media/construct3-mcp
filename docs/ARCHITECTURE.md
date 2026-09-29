@@ -232,7 +232,7 @@ A shared cross-reference index and sixteen analysis modules, several of which bu
 |--------|---------|
 | `index-builder.ts` | Builds the project-wide cross-reference index and caches it per reader |
 | `event-flow.ts` | Include hierarchy and layout bindings (Mermaid output); function definitions and call sites |
-| `object-deps.ts` | Object usage across event sheets, layouts, families; objects not referenced anywhere |
+| `object-deps.ts` | Object usage across event sheets, layouts, families; objects not referenced anywhere, and apart from them the objects whose own object type file could not be parsed (`unanalysedObjects`: their SID is unknown) |
 | `asset-usage.ts` | Sound, music, image, font, video, icon and project file usage (used, unused or not analysed); images follow the index's object usage |
 | `animations.ts` | Sprite animation trees as the editor saves them (items and animation subfolders); frame counts for the asset and performance analyses |
 | `performance.ts` | Heuristic performance audit (info/warning/critical) |

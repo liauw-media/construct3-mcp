@@ -510,6 +510,16 @@ export interface EventSheetFlowNode {
 }
 
 /** Node in the object dependency graph */
+/** An object type whose own file could not be parsed (issue #60). */
+export interface UnanalysedObjectFile {
+  /** "objectTypes/<name>", as validate_project lists unscanned files */
+  file: string;
+  /** Why it was not parsed, e.g. "over the 10MB read limit" */
+  reason: string;
+  /** What could not be checked because of it */
+  unchecked: string;
+}
+
 export interface ObjectDependencyNode {
   objectName: string;
   referencedIn: {
@@ -526,6 +536,12 @@ export interface ObjectDependencyNode {
    * referenceCount does not count
    */
   possiblyReferencedIn?: string[];
+  /**
+   * The object's own object type file could not be parsed: its SID is
+   * unknown, so references by SID (object properties of other instances)
+   * are not counted, and `unchecked` says so
+   */
+  unanalysed?: UnanalysedObjectFile;
 }
 
 /** Performance issue found by heuristic analysis */

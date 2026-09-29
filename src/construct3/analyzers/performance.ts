@@ -8,6 +8,9 @@ import { findOrphanedObjects } from './object-deps.js';
 import { forEachLayerInstance } from '../layers.js';
 import { countAnimationFrames } from './animations.js';
 import { isTriggerId } from './load-rules.js';
+import { getProjectIndex } from './index-builder.js';
+import { searchUnscannedFiles } from './unscanned-uses.js';
+import { patternTerm } from '../raw-text-search.js';
 import { isElseBlock } from '../event-shapes.js';
 
 /** Events visited per sheet at most */
@@ -132,6 +135,7 @@ export async function analyzePerformance(
   const orphans = await findOrphanedObjects(reader);
   const orphanedCount = orphans.count;
   const possiblyUsed = orphans.possiblyUsed?.length ?? 0;
+  const unanalysed = orphans.unanalysedObjects ?? [];
 
   if (orphanedCount > 0) {
     issues.push({
@@ -144,6 +148,17 @@ export async function analyzePerformance(
         'project script files, objects created by a name built at runtime, and script references it does not recognise.',
     });
   }
+  if (unanalysed.length > 0) {
+    issues.push({
+      severity: 'info',
+      category: 'cleanup',
+      location: 'project',
+      message: `${unanalysed.length} object(s) without a use found whose own object type file could not be parsed ` +
+        `(${unanalysed.slice(0, 5).map(o => `${o.file}: ${o.reason}`).join(', ')}${unanalysed.length > 5 ? ', ...' : ''}): ` +
+        'their SID is unknown, so whether they are used could not be told; they are not counted as unused',
+      suggestion: 'find_orphaned_objects lists them as unanalysedObjects. Repair or split the object type file (validate_project lists it) to analyse them.',
+    });
+  }
 
   // Check: Unused addons
   const project = reader.getProject();
@@ -151,15 +166,23 @@ export async function analyzePerformance(
   for (const [, objData] of objectTypes) {
     usedPluginIds.add(objData['plugin-id']);
   }
-  const unusedAddons = project.usedAddons.filter(
+  const candidates = project.usedAddons.filter(
     a => a.type === 'plugin' && !a.bundled && !usedPluginIds.has(a.id)
   );
-  if (unusedAddons.length > 0) {
+  // The plugins of object types whose file could not be parsed are unknown: search their text
+  const possiblyUsedAddons = await addonsPossiblyUsedByUnparsedObjects(reader, candidates.map(a => a.id));
+  const unusedAddons = candidates.filter(a => !possiblyUsedAddons.has(a.id));
+  const possiblyUsedNames = candidates.filter(a => possiblyUsedAddons.has(a.id)).map(a => a.name);
+  if (unusedAddons.length > 0 || possiblyUsedNames.length > 0) {
     issues.push({
       severity: 'info',
       category: 'cleanup',
       location: 'project',
-      message: `${unusedAddons.length} addon(s) declared but not used by any object: ${unusedAddons.map(a => a.name).join(', ')}`,
+      message: `${unusedAddons.length} addon(s) declared but not used by any object` +
+        (unusedAddons.length > 0 ? `: ${unusedAddons.map(a => a.name).join(', ')}` : '') +
+        (possiblyUsedNames.length > 0
+          ? `; ${possiblyUsedNames.length} more possibly used by object types whose files could not be parsed: ${possiblyUsedNames.join(', ')}`
+          : ''),
       suggestion: 'Remove unused addons to reduce project size',
     });
   }
@@ -178,6 +201,27 @@ export async function analyzePerformance(
   const outputIssues = detail === 'summary' ? issues.slice(0, 10) : issues;
 
   return { summary, issues: outputIssues };
+}
+
+/**
+ * Of the plugin ids `ids`, those that object types whose own file could not
+ * be parsed (over the read limit, not valid JSON) possibly use: their text
+ * holds `"plugin-id": "<id>"`. All of them while such a file cannot be read
+ * even as text. Nothing is read while every object type file was parsed.
+ */
+async function addonsPossiblyUsedByUnparsedObjects(reader: Construct3ProjectReader, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const files = (await getProjectIndex(reader)).unscannedFiles.filter(f => f.category === 'objectTypes');
+  if (files.length === 0) return new Set();
+  const terms = ids.map(id => {
+    const value = JSON.stringify(id).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+    return patternTerm(id, `"plugin-id"\\s{0,16}:\\s{0,16}${value}`, value.length + 48);
+  });
+  const found = new Set<string>();
+  for (const result of await searchUnscannedFiles(reader, files, () => terms)) {
+    for (const id of result.found ?? ids) found.add(id);
+  }
+  return found;
 }
 
 function countTotalEvents(events: C3Event[]): number {

@@ -161,6 +161,7 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 - Fix a file with invalid JSON (`validate_project` names it as a `file-existence` error), or split a very large layout, so the server can read it
 - Use `force: true` if the match is a false alarm; the warning names the files again, and nothing in them is changed
 - `find_orphaned_objects` and `get_object_dependencies` report such objects as possibly used (`possiblyUsed`, `possiblyUsedObjects`, `possiblyReferencedIn`) instead of unused, for the same reason
+- An object whose own object type file is such a file has an unknown SID: `find_orphaned_objects` and `get_object_dependencies` list it in `unanalysedObjects` (with the file and reason) instead of calling it unused, `get_object_dependencies` marks it with `unanalysed`, and `analyze_performance` names it apart
 - *Its own file could not be parsed* (`"textSearch": "not-searched"`): `delete_object` or `delete_family` refuses because the object type's or family's own file is over the limit or not valid JSON, so its SID is unknown. Fix the file, or delete with `force: true`
 - A file saved as UTF-16 without a byte order mark, or in UTF-16BE, cannot be searched and refuses as `unreadable`; save it as UTF-8 (the editor does)
 

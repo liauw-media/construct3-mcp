@@ -34,6 +34,7 @@ import {
   type UnscannedFileReport,
   type UseRule,
 } from '../construct3/analyzers/unscanned-uses.js';
+import { OWN_FILE_UNCHECKED } from '../construct3/analyzers/object-deps.js';
 import { nameTerm, numberTerm } from '../construct3/raw-text-search.js';
 import { classifyReadError, type EntityCategory } from '../construct3/project-reader.js';
 import {
@@ -397,7 +398,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           ownFileReports(index.unscannedFiles, [{
             category: 'objectTypes',
             name: args.name,
-            unchecked: 'its SID is unknown, so object properties of instances that hold it could not be checked',
+            unchecked: OWN_FILE_UNCHECKED,
           }]),
           await checkUnscannedFiles(reader, index.unscannedFiles, nameOrSidRules(
             args.name, index.sidOf(args.name), ['eventSheets', 'layouts', 'families'],
