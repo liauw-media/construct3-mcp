@@ -149,7 +149,7 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### Backup files (.bak)
 
-Writes through the project writer copy each file to `<file>.bak` next to it before changing or deleting it. There is only one `.bak` per file and every write to the same file overwrites it, so it holds the state before the **last** change to that file, not the state before your session. `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) and PNG image writes make no `.bak` (see [Safety Model](../README.md#safety-model)). Nothing deletes `.bak` files; `validate_project` lists them as `backup-file` info entries.
+Writes through the project writer copy each file to `<file>.bak` next to it before changing or deleting it. There is only one `.bak` per file and every write to the same file overwrites it, so it holds the state before the **last** write to that file, not the state before your session (one request can write the same file twice, e.g. `create_object` with a new built-in addon writes `project.c3proj` twice). `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) and PNG image writes make no `.bak` (see [Safety Model](../README.md#safety-model)). Nothing deletes `.bak` files; `validate_project` lists them as `backup-file` info entries.
 
 For undo across several steps, keep the project under git and commit before each session (see the [User Guide](USER-GUIDE.md#the-safe-editing-workflow)). To undo only the last change to one file:
 

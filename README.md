@@ -215,7 +215,7 @@ globalThis.__c3bridge.submit("callFunction", { name: "StartGame", params: [] });
 globalThis.__c3bridge.submit("getObjectState", { objectName: "Player" });
 ```
 
-Remove the bridge (`remove_runtime_bridge`) before exporting the game for players: while it runs, anyone with the browser console can change variables and call functions.
+Remove the bridge before exporting the game for players: while it runs, anyone with the browser console can change variables and call functions. `remove_runtime_bridge` deletes only the script file and its entry in `project.c3proj`, not an import line in your main script. So first delete the `import "./c3-runtime-bridge.js";` line from your main script in Construct 3 (save, close), then run `remove_runtime_bridge`. See the [User Guide](docs/USER-GUIDE.md#remove-the-bridge-before-you-export).
 
 ### Prompts (Workflow Templates)
 
@@ -250,7 +250,7 @@ Steps 2, 4 and 5 apply in full to writes that go through the project writer: obj
 
 Additional safeguards:
 - **Reference checking** — `delete_object`, `delete_family`, `delete_event_sheet`, and `delete_layout` scan for references before deleting; `update_object_properties` and `update_family` check the events before removing an instance variable, a behavior or a family member.
-- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error.
+- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error unless `register_addon` added them to `usedAddons` first (it does not check the ID or install anything).
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
 - **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs, named like the editor names them: `images/<object>-<animation>-000.png`, all lowercase. Batch writes roll back on failure.
@@ -306,7 +306,7 @@ Step-by-step instructions for each client are in the [User Guide](docs/USER-GUID
 
 The server finds its project in this order: the first argument after `dist/index.js` (a project folder or the `.c3proj` file), the `C3_PROJECT_PATH` environment variable, the working directory it is started in. A folder must contain the `.c3proj` file directly; subfolders and parent folders are not searched. Most clients do not start the server in your project folder, so pass the project path.
 
-**MCP config** (Claude Desktop, Cursor, Antigravity, Windsurf and a hand-written Claude Code `.mcp.json`; VS Code uses a different top-level key, see below):
+**MCP config** (Claude Desktop, Antigravity, Windsurf and a hand-written Claude Code `.mcp.json`; Cursor and VS Code need `"type": "stdio"`, and VS Code uses a different top-level key, see below):
 ```json
 {
   "mcpServers": {
@@ -331,7 +331,7 @@ claude mcp list
 
 `claude mcp list` should show `construct3: ... - ✔ Connected`. Inside a session, `/mcp` shows the status and can reconnect the server.
 
-- `--scope user` stores the server in `~/.claude.json` for every folder. Without `--scope` (local scope) it only applies when `claude` is started in the folder where you ran the command. `--scope project` writes a `.mcp.json` into the current folder.
+- `--scope user` stores the server in `~/.claude.json` for every folder. Without `--scope` (local scope) it only applies when `claude` is started in the folder where you ran the command; if that folder is in a git repository, it applies anywhere in that repository (a second `claude mcp add construct3` for another game in the same repository fails with `already exists in local config`; see the [User Guide](docs/USER-GUIDE.md#which-scope) for several games). `--scope project` writes a `.mcp.json` into the current folder.
 - A `.mcp.json` in the project folder (the JSON above) also works, but Claude Code does not start it until you approve it: `claude mcp list` shows `⏸ Pending approval` until you start `claude` in that folder, trust the folder and approve the server.
 - Claude Code does not read `~/.claude/mcp.json`.
 - Without a project path, the server only starts when Claude Code is started in the folder that directly contains the `.c3proj`. Started anywhere else, `claude mcp list` shows `✘ Failed to connect`.
@@ -349,7 +349,19 @@ Note: Claude Desktop doesn't change working directory per-project, so pass the p
 
 ### With Cursor
 
-Add the config to `.cursor/mcp.json` in your project root (project-specific) or `~/.cursor/mcp.json` (global). Cursor's documentation lists `"type": "stdio"` as a required field of each server entry. In `.cursor/mcp.json`, `"${workspaceFolder}"` can stand for the project path.
+Add the config to `.cursor/mcp.json` in your project root (project-specific) or `~/.cursor/mcp.json` (global). Cursor's documentation lists `"type": "stdio"` as a required field of each server entry. In `.cursor/mcp.json`, `"${workspaceFolder}"` can stand for the project path:
+
+```json
+{
+  "mcpServers": {
+    "construct3": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/construct3-mcp/dist/index.js", "${workspaceFolder}"]
+    }
+  }
+}
+```
 
 1. Restart Cursor after adding or modifying the config
 2. The Construct 3 tools appear in Cursor's AI agent
@@ -610,7 +622,7 @@ We welcome contributions! Here's how to get started:
 
 - **Folder Format Only**: Works with .c3proj folder projects; `pack_project` can write a .c3p, but .c3p files cannot be opened
 - **Editor Holds the Project in Memory**: Close and reopen the project in Construct 3 after MCP edits and before saving there, or the editor can overwrite them
-- **No Rename Refactoring**: Renaming objects/sheets does not update cross-references (planned, see Phase 7)
+- **No Rename Refactoring**: Objects, families, event sheets, layouts and timelines cannot be renamed; renaming a layer (`update_layer`) or an event variable (`update_event_variable`) does not update the events that use the old name (issue #38). `rename_animation` renames the frame images and the layout instances' start animation, but not text in events. Renaming with reference updates is planned (Phase 7)
 - **Runtime Bridge Requires Browser Automation**: The runtime tools inject a bridge script but need an external tool (Playwright, curl, or any CDP-capable tool) to drive the browser and interact with the running game
 - **No ACE Validation**: Event block conditions/actions are not validated against plugin schemas (the AI caller is expected to know valid ACE IDs). Only the editor load-time rules listed under `validate_project` are checked; triggers are recognised by the `on-` id convention, which third-party addons do not always follow, so their trigger problems are warnings only. OR blocks are created with `isOrBlock`
 

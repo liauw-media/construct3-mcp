@@ -26,11 +26,11 @@ This guide is for Construct 3 developers who want to use the server with Claude 
 
 ## What it does and what it doesn't
 
-construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 71 tools, 9 resources and 7 prompts for one Construct 3 project:
+construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 71 tools, 9 resources (5 fixed ones and 4 templates that take the name of an object, event sheet, layout or manual topic) and 7 prompts for one Construct 3 project:
 
 - **Read and explain**: list objects, layouts, event sheets, families, timelines and addons, show an event sheet as a readable outline with the editor's event numbers, find where an object is used, map functions, find unused objects and assets.
 - **Check**: `validate_project` runs 25 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
-- **Edit**: create, change and delete objects, families, event sheets and events, layouts, layers, instances, animations, timelines and project settings. Names and references are checked before anything is written, and each rewritten file gets a `.bak` copy.
+- **Edit**: create, change and delete objects, families, event sheets and events, layouts, layers, instances, animations and timelines, and change the project metadata (name, version, author, description). Names and references are checked before anything is written, and most rewritten files get a `.bak` copy (exceptions under [.bak files](#bak-files)).
 - **Prepare runtime testing**: add a "bridge" script to your project so you (or a browser-automation tool) can read variables and call functions in a running preview.
 
 What it does **not** do:
@@ -40,12 +40,12 @@ What it does **not** do:
 - It does not know Construct's list of conditions and actions or their parameter names, and it does not parse full expressions. A misspelled action id or an expression like `Player.X +` is written without complaint.
 - It does not download the Construct 3 manual. The documentation resources only return links.
 - It does not click through or play your game. The runtime bridge has to be driven from the browser console or an automation tool.
-- It cannot add third-party addons. Those must be added in the editor first.
+- It cannot install third-party addons. `register_addon` only writes an entry into the project's addon list (`usedAddons`), and after that the server creates objects for that addon whether it is installed or not. Add third-party addons in the editor and don't let the AI register them.
 - It opens no network port. Your AI tool talks to it over stdin/stdout only.
 
 ## Requirements
 
-- **Node.js 18 or newer.** Node 22 (current LTS) is recommended. Check with `node --version`. The server was built and run with Node 22.23.2 and with Node 18.20.8. Node 18 prints harmless `EBADENGINE` warnings for `vite` and `vitest` (test tools only). Node 18 is end-of-life.
+- **Node.js 18 or newer.** Node 22 or 24 (both LTS releases) is recommended. Check with `node --version`. The server was built and run with Node 22.23.2 and with Node 18.20.8. Node 18 prints harmless `EBADENGINE` warnings for `vite` and `vitest` (test tools only). Node 18 is end-of-life.
 - **git**, to download the server.
 - **An MCP client**: Claude Code, Claude Desktop, Cursor, VS Code with GitHub Copilot, or another tool that supports local (stdio) MCP servers.
 - **A Construct 3 project saved as a folder.** The folder contains `project.c3proj` next to folders such as `eventSheets/`, `layouts/` and `objectTypes/`.
@@ -61,7 +61,9 @@ From then on, open the folder project in Construct 3 with **Menu > Project > Ope
 
 ## Install
 
-The server is not published on npm. Download and build it once:
+The server is not published on npm. Download and build it once.
+
+First pick a permanent folder for it, outside your game projects, for example `C:\Tools` on Windows or `~/tools` on macOS. Create it and go there in your terminal: `cd C:\Tools` in PowerShell, `cd /d C:\Tools` in cmd, `cd /c/Tools` in Git Bash, `cd ~/tools` on macOS. Your AI tool will start the server from there. If you move the folder later, update the path in your AI tool. Then run:
 
 ```bash
 git clone https://github.com/liauw-media/construct3-mcp.git
@@ -69,7 +71,7 @@ cd construct3-mcp
 npm ci
 ```
 
-`npm ci` installs the dependencies **and** compiles the server into `dist/` (the `prepare` script runs the build). It takes about 30 to 40 seconds. The output looks like this:
+`npm ci` installs the dependencies **and** compiles the server into `dist/` (the `prepare` script runs the build). It took 30 to 45 seconds in our tests. The output looks like this:
 
 ```
 > construct3-mcp-server@1.9.0 prepare
@@ -82,14 +84,20 @@ npm ci
 
 added 154 packages, and audited 155 packages in 31s
 
+43 packages are looking for funding
+  run `npm fund` for details
+
 17 vulnerabilities (2 low, 2 moderate, 11 high, 2 critical)
+
+To address all issues, run:
+  npm audit fix
 ...
 ```
 
 `npm install` works the same way. You only need `npm run build` again if you change the source code.
 
 - Do **not** use `npm ci --omit=dev` or `--production`. The build needs the TypeScript compiler, which is a dev dependency, so the install fails with `tsc` not found and no `dist/` folder.
-- About the vulnerability summary (17 on 2026-09-29, 8 of them in runtime dependencies): the runtime ones come from the HTTP parts of the MCP SDK, the rest from test tools. This server only uses the SDK's stdio transport and opens no network port. You don't need to run `npm audit fix` to use it.
+- About the vulnerability summary (17 on 2026-09-29, 8 of them in runtime dependencies, the rest in test tools): 7 of the 8 runtime findings are in the HTTP server parts of the MCP SDK (express, hono and their dependencies), which this stdio server never loads. The eighth, `fast-uri`, is loaded as part of the SDK's JSON-schema validator (`ajv`). Its reported problems concern parsing untrusted URLs, which this server does not do. The server opens no network port. You don't need to run `npm audit fix` to use it.
 - To update later: `git pull`, then `npm ci` again, then restart or reconnect the server in your AI tool.
 
 Every configuration below needs the **absolute path** to `dist/index.js` in your clone. To print it, run this inside the clone folder:
@@ -125,7 +133,7 @@ To see the tool list without any AI tool, use the MCP Inspector in CLI mode:
 npx -y @modelcontextprotocol/inspector --cli node "C:/Tools/construct3-mcp/dist/index.js" "C:/Games/My Game" --method tools/list
 ```
 
-This prints a JSON list of 71 tools. The first run downloads the Inspector and can take a few minutes. Without `--cli` the Inspector starts a browser UI and keeps running.
+This prints a JSON list of 71 tools. The first run downloads the Inspector and can take a few minutes. It may also print a `npm warn deprecated` line and `Schema portability: 0 errors, 12 warnings across 6 tools`; both are harmless. Without `--cli` the Inspector starts a browser UI and keeps running.
 
 ### Alternative: run from GitHub without cloning
 
@@ -135,7 +143,7 @@ npm can build the server straight from GitHub:
 npx -y github:liauw-media/construct3-mcp "C:/Games/My Game"
 ```
 
-The first start took about 2 minutes (download and build), later starts about 8 seconds. It needs git and a network connection and always takes the default branch. Run it once in a terminal before you put it into an AI tool, because a client may give up while the first build is still running. The clone and `npm ci` route is more predictable: a fixed version that starts in one or two seconds.
+In our tests the first start took one to two minutes (download and build), later starts 7 to 8 seconds. It needs git and a network connection and always takes the default branch. Run it once in a terminal before you put it into an AI tool, because a client may give up while the first build is still running. The clone and `npm ci` route is more predictable: a fixed version that starts in one or two seconds.
 
 ## Tell the server which project to open
 
@@ -150,6 +158,12 @@ A folder must contain the `.c3proj` file **directly**. The server does not look 
 The safest choice is to always pass the project path as an argument. Claude Desktop and most other apps do not start the server in your project folder, so there the path is required.
 
 ## Connect your AI tool
+
+> **Quick path for Claude Code (3 steps).** Everything else in this chapter is detail and other clients.
+>
+> 1. `claude mcp add construct3 --scope user -- node "C:/Tools/construct3-mcp/dist/index.js" "C:/Games/My Game"` (your two paths, see [Recommended setup](#recommended-setup)).
+> 2. `claude mcp list` must show `construct3: ... - ✔ Connected`.
+> 3. Start `claude`, type `/mcp` to see `construct3` and its tools, then ask "Give me an overview of this project" and go on with the [first session](#first-session).
 
 ### Claude Code
 
@@ -170,7 +184,7 @@ claude mcp add construct3 --scope user -- node "C:/Tools/construct3-mcp/dist/ind
 ```
 
 - Everything after `--` is the command Claude Code runs to start the server.
-- Put paths with spaces in double quotes. On Windows, forward slashes (`C:/Games/My Game`) work everywhere. Backslashes work in PowerShell and cmd, but in Git Bash only inside single quotes.
+- Put paths with spaces in double quotes. On Windows, forward slashes (`C:/Games/My Game`) work everywhere. Backslashes work in PowerShell and cmd, but in Git Bash only inside quotes (unquoted backslashes are removed).
 - The Windows command was tested in PowerShell, cmd and Git Bash. The macOS/Linux line uses the same syntax but was not run on those systems.
 
 Check the connection:
@@ -191,21 +205,21 @@ construct3: node C:/Tools/construct3-mcp/dist/index.js C:/Games/My Game - ✔ Co
 
 | Scope | Command | Where it is stored | When it is active |
 |-------|---------|--------------------|-------------------|
-| `user` | `--scope user` | `~/.claude.json` (top-level `mcpServers`) | In every folder you start `claude` in |
-| `local` (default) | no `--scope` | `~/.claude.json`, under the folder you ran the command in | Only when `claude` is started in exactly that folder, not in its parent or subfolders |
+| `user` | `--scope user` | `~/.claude.json` (top-level `mcpServers`) | In every folder you start `claude` in, so the server also starts in sessions that have nothing to do with your game |
+| `local` (default) | no `--scope` | `~/.claude.json`, under the folder you ran the command in, or under the repository root if that folder is in a git repository | Outside git: only when `claude` is started in exactly that folder, not in its parent or subfolders. Inside a git repository: anywhere in that repository |
 | `project` | `--scope project` | `.mcp.json` in the current folder | In that folder, after you approve it (see below) |
 
 **Several games.** A `user` entry with a path always opens the same game. For several games, either:
 
-- add one `local` entry per game, from inside each game folder:
+- add one `local` entry per game, from inside each game folder, if every game is its own folder or its own git repository:
 
   ```
   cd "C:/Games/My Game"
   claude mcp add construct3 -- node "C:/Tools/construct3-mcp/dist/index.js" "C:/Games/My Game"
   ```
 
-  and always start `claude` in that game folder, or
-- add one `user` entry **without** a project path and always start `claude` in the folder that contains the `.c3proj`:
+  (in cmd, use `cd /d` if the game is on another drive) and always start `claude` in that game folder. This does not work for several games in **one** git repository: the entry belongs to the repository root, the second `claude mcp add` fails with `MCP server construct3 already exists in local config`, and in the second game's folder the server for the first game starts. Or
+- add one `user` entry **without** a project path and always start `claude` in the folder that contains the `.c3proj` (this also works for several games in one repository):
 
   ```
   claude mcp add construct3 --scope user -- node "C:/Tools/construct3-mcp/dist/index.js"
@@ -248,7 +262,7 @@ This format works, and so does the one `claude mcp add` writes (the same with `"
 
 #### Tool permissions
 
-Claude Code asks before it uses an MCP tool. In Claude Code the tools are named `mcp__construct3__<tool>`, for example `mcp__construct3__list_objects`. The server does not mark its tools as read-only or destructive, so your client cannot tell them apart by itself. These rules allow exactly the 25 read-only tools and nothing else (put them in `.claude/settings.json` or add them with `/permissions`):
+Claude Code asks before it uses an MCP tool. In Claude Code the tools are named `mcp__construct3__<tool>`, for example `mcp__construct3__list_objects`. The server does not mark its tools as read-only or destructive, so your client cannot tell them apart by itself. These rules allow exactly the 25 read-only tools and nothing else. Put them in `~/.claude/settings.json` (applies in every folder, which fits the `user` setup above), or in `.claude/settings.json` inside the game folder you start `claude` in (Claude Code reads it only from the start folder, not from parent folders, and applies its allow rules only after you trusted that folder). You can also add them with `/permissions`:
 
 ```json
 {
@@ -294,7 +308,7 @@ Add the server inside `mcpServers` (keep other entries that are already there):
 - Always pass the project path. Claude Desktop does not start the server in your project folder.
 - Quit Claude Desktop completely (tray or menu bar icon > Quit) and start it again. Closing the window is not enough.
 - Logs: `%APPDATA%\Claude\logs\` on Windows, `~/Library/Logs/Claude/` on macOS. `mcp-server-construct3.log` contains the server's own messages.
-- If the log says `spawn node ENOENT`, Claude Desktop cannot find Node.js in its `PATH`. Put the full path to Node in `"command"`: find it with `where node` (cmd), `(Get-Command node).Source` (PowerShell) or `which node` (macOS/Linux). After you change your Node installation, quit and restart Claude Desktop.
+- Not from the documentation, but Node.js's general error for a program it cannot find: if the log says `spawn node ENOENT`, Claude Desktop probably cannot find Node.js in its `PATH`. Put the full path to Node in `"command"`: find it with `where node` (cmd), `(Get-Command node).Source` (PowerShell) or `which node` (macOS/Linux). After you change your Node installation, quit and restart Claude Desktop.
 
 ### Cursor
 
@@ -345,7 +359,7 @@ Confirm the trust prompt when the server starts. Logs: Command Palette > **MCP: 
 
 ### Check that it works
 
-Your client should show `construct3` with 71 tools (plus 5 resources, 4 resource templates and 7 prompts). Then ask:
+Your client should show `construct3` with 71 tools (plus 5 resources, 4 resource templates and 7 prompts). In Claude Code, start `claude` (in your game folder if your setup has no project path), type `/mcp` and select `construct3` to see its status and tools. Then type:
 
 > Give me an overview of this project.
 
@@ -393,7 +407,13 @@ You don't need tool names. Ask in plain language and the AI picks the tools. The
 
 ### Make changes
 
-Read [the safe editing workflow](#the-safe-editing-workflow) first. Every successful write returns an `editorNote` (shortened to `"..."` below).
+> **Before your first change**, so that you can undo it:
+>
+> 1. Save and close the project in Construct 3.
+> 2. Put the project folder under git and commit, as shown in step 2 of [the safe editing workflow](#the-safe-editing-workflow).
+> 3. Read the rest of that workflow before you approve the first write.
+
+Every successful write returns an `editorNote` (shortened to `"..."` below).
 
 "Create a Sprite object called Player" calls `create_object {"name": "Player", "pluginId": "Sprite"}`:
 
@@ -415,6 +435,8 @@ The UID is what `update_instance` and `delete_instance_from_layout` need later. 
 
 "Add a global number variable Score" calls `add_event_to_sheet {"sheetName": "MainSheet", "eventType": "variable", "variableName": "Score", "variableType": "number", "initialValue": "0"}`.
 
+"Add a comment 'Player setup (added via MCP)'" calls `add_event_to_sheet {"sheetName": "MainSheet", "eventType": "comment", "commentText": "Player setup (added via MCP)"}`.
+
 "On start of layout set Player.health to 100" and "Every second subtract 1 from Player.health" call `add_event_block`:
 
 ```json
@@ -433,7 +455,7 @@ The UID is what `update_instance` and `delete_instance_from_layout` need later. 
 }
 ```
 
-The outline afterwards (a comment row was added as well):
+The outline afterwards:
 
 ```
 1 IF System.on-start-of-layout()
@@ -493,7 +515,7 @@ Resources are read-only context the AI can attach: `construct3://project/info`, 
 
 ## The safe editing workflow
 
-Construct 3 keeps an open project in memory and does not notice files changed by the server. If you save in the editor after the AI changed files, the editor writes its old copy over the AI's changes. Every successful write reminds you of this:
+Construct 3 keeps an open project in memory and does not notice files changed by the server. If you save in the editor after the AI changed files, the editor saves its own, older state of the files it considers changed. That can overwrite some or all of the AI's changes and leave the project inconsistent. Every successful write reminds you of this:
 
 ```
 "editorNote": "If this project is open in Construct 3, close and reopen it there before saving, or the editor can overwrite these changes."
@@ -502,17 +524,27 @@ Construct 3 keeps an open project in memory and does not notice files changed by
 Work in this order:
 
 1. **Save and close the project in Construct 3** (Menu > Project > Close project).
-2. **Put the project under git and commit.** When you save a folder project, Construct 3 writes a `.gitignore` for `*.uistate.json` and `ts-defs` (per Scirra's tutorial). Add `*.bak` to it:
+2. **Put the project under git and commit.** Open `.gitignore` in the project folder with a text editor and add this line. If there is no `.gitignore`, create one. Construct 3 writes one for `*.uistate.json` and `ts-defs` when you save a folder project (per Scirra's tutorial), but a project you unpacked from a `.c3p` may have none.
 
    ```
    *.bak
    ```
 
-   Then `git add -A` and `git commit -m "before AI session"`.
-3. **Reconnect the server** if you changed the project in the editor since the server started (Claude Code: `/mcp` > `construct3` > **Reconnect**).
+   Don't add the line with `echo *.bak >> .gitignore` in Windows PowerShell 5.1. It writes UTF-16, which git does not read as intended: in a new file the line has no effect, and appended to an existing `.gitignore` git read it as `*` and ignored every file in the project.
+
+   Then run these commands in a terminal in the project folder (the one with `project.c3proj`, for example after `cd "C:/Games/My Game"`). `git init` is only needed the first time:
+
+   ```bash
+   git init
+   git add -A
+   git commit -m "before AI session"
+   ```
+
+   If git answers `Author identity unknown` and `Please tell me who you are`, run the two `git config` commands it prints, with your name and e-mail, and commit again.
+3. **Reconnect the server** if you changed the project in the editor or with git since the server started (Claude Code: `/mcp` > `construct3` > **Reconnect**).
 4. **Ask for the changes.** Read what each write tool is about to do before you approve it, and read the answers: `"success": false` means nothing was changed.
-5. **Run `validate_project`.** `errors` are problems that can stop the editor from opening the project. `warnings` mean "check this": a project can be `"valid": true` and still have warnings such as `missing-behavior-or-variable`. Info entries named `backup-file` only list the `.bak` copies.
-6. **Review the diff** with `git diff` and `git status`. A typical session changes `project.c3proj`, event sheet and layout JSON files, and adds `objectTypes/<Name>.json` and images for new sprites. For files saved by Construct 3, line endings and tab indentation are kept, so the diff shows only the lines that changed.
+5. **Run `validate_project`.** `errors` are problems that can stop the editor from opening the project. `warnings` mean "check this": a project can be `"valid": true` and still have warnings such as `missing-behavior-or-variable`. Info entries are hints: `backup-file` lists a `.bak` copy, `orphaned-object` an object that nothing uses yet (every newly created object, until an event uses it).
+6. **Review the diff** with `git diff` and `git status`. A typical session changes `project.c3proj`, event sheet and layout JSON files, and adds `objectTypes/<Name>.json` and images for new sprites. For files saved by Construct 3, line endings and tab indentation are kept, so the diff shows only the lines that changed. The test project in this repository was written by hand, so its first change also spreads a few one-line number arrays (such as `"backgroundColor": [0, 0, 0, 0]`) over several lines; projects saved by Construct 3 already store them that way.
 7. **Reopen the project in Construct 3** and look at the new events and objects. Preview the game.
 8. **Commit** and delete the `.bak` files you no longer need.
 
@@ -524,8 +556,8 @@ If you forgot to close the project: close it in Construct 3 **without saving**, 
 
 Before the server rewrites or deletes a file, it copies it to `<file>.bak` next to it, for example `eventSheets/MainSheet.json.bak` or `project.c3proj.bak`.
 
-- There is only **one** `.bak` per file. The next write to the same file overwrites it, so it holds the state before the **last** change only, not the state before your session.
-- Nothing deletes them. Construct 3 ignores them because `project.c3proj` does not reference them. `pack_project` leaves them out of the `.c3p`.
+- There is only **one** `.bak` per file. The next write to the same file overwrites it, so it holds the state before the **last write** to that file, not the state before your session. One request can write the same file twice: after "Add keyboard input", `project.c3proj.bak` already contains the new `Keyboard` addon entry.
+- Nothing deletes them. They are not listed in `project.c3proj`, and `pack_project` leaves them out of the `.c3p`. Whether the Construct 3 editor shows or keeps them was not tested for this guide.
 - Some writes make no `.bak` at all: `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they add the bridge) and PNG images.
 
 To list or delete them:
@@ -548,7 +580,9 @@ git clean -nd      # list files and folders the session added (new objects, imag
 git clean -fd      # delete them
 ```
 
-`git restore .` alone leaves new files such as `objectTypes/Player.json` in place as untracked files. Construct 3 ignores files that `project.c3proj` does not reference, but `git clean` removes them. Files in `.gitignore` (like `*.bak`) are not touched by `git clean -fd`.
+`git restore .` alone leaves new files such as `objectTypes/Player.json` in place; `git status` shows them as untracked (`??`), and `git clean` removes them. Files in `.gitignore` (like `*.bak`) are not touched by `git clean -fd`. The `.bak` files now hold states from the session you undid, some of them for objects that no longer exist, and `validate_project` keeps listing them. Delete them (see [.bak files](#bak-files)).
+
+Then **reconnect the server** (Claude Code: `/mcp` > `construct3` > **Reconnect**) before you ask for more changes. The server keeps the lists it read at start, so it still sees the undone objects. In our test, asking for the same object again then failed with `Object "Player" already exists. Use update_object_properties to modify it.`, and placing it with `Object type "Player" does not exist.` The project files stayed unchanged (`git status` showed nothing); after a reconnect, creating the object worked again.
 
 ### If Construct 3 refuses to open the project
 
@@ -578,7 +612,11 @@ Defaults to know:
 
 - `export_for_preview` and `pack_project` add the runtime bridge **to your project folder** unless you pass `injectBridge: false`. `clone_project` adds it to the copy unless you pass `includeBridge: false`.
 - `fix_legacy_behavior_keys` and `fix_legacy_event_shapes` only report by default (`dryRun: true`).
-- `force: true` (on the delete tools, `update_object_properties`, `update_family` and `unregister_addon`) skips the reference checks and leaves the references behind.
+- `force: true` means different things per tool:
+  - On `delete_object`, `delete_family`, `delete_event_sheet`, `delete_event_from_sheet`, `delete_layout`, `update_object_properties` and `update_family` it skips the reference checks and leaves the references behind.
+  - On `delete_layer` it deletes the layer together with the instances on it.
+  - `unregister_addon` checks no references at all; `force` only allows removing a Scirra built-in addon. It also removes an addon that objects still use (it only adds the warning `If any objects/behaviors still reference it, C3 will error on load.`). Before you approve it, ask which objects use the addon. Afterwards `validate_project` reports leftover uses as `missing-addon` warnings, while the project still counts as `"valid": true`.
+  - The other delete tools (`delete_animation`, `delete_frame_from_animation`, `delete_instance_from_layout`, `delete_timeline`, `remove_event_from_sheet`) have no `force` option.
 
 Parameter names differ between tools. This only matters if you write tool calls yourself: `get_object_details` takes `name`, `get_object_dependencies` takes `object`, `get_eventsheet_outline` takes `sheet`, `add_event_block` takes `sheetName`. Every tool and parameter is described in the [API Reference](API.md). More request-to-tool examples are in [EXAMPLES.md](EXAMPLES.md).
 
@@ -595,7 +633,7 @@ The runtime bridge is a script (`scripts/c3-runtime-bridge.js`) that the server 
    { "success": true, "useWorker": "dom", "checks": [{ "check": "workerMode", "status": "ok" }], "nextSteps": [ ... ] }
    ```
 
-   If the project uses a worker you get `{"check": "workerMode", "status": "warning", "detail": "useWorker is \"auto\" — should be \"dom\" for runtime bridge access. Set to \"dom\" in project settings."}`. The tool only reports, it does not change the setting. Older projects that store `"useWorker": false` get this warning too, although `false` means no worker.
+   If `useWorker` is anything other than `"dom"` (for example `"auto"`) you get `{"check": "workerMode", "status": "warning", "detail": "useWorker is \"auto\" — should be \"dom\" for runtime bridge access. Set to \"dom\" in project settings."}`. The tool only reports, it does not change the setting. According to the manual, Auto already runs without a worker once the project uses scripting, and the bridge is a script, so with Auto the warning may be a false alarm; setting **Use worker** to **No** (step 4) makes it certain. Older projects that store `"useWorker": false` get this warning too.
 3. **Add the bridge**: ask for `inject_runtime_bridge`.
 
    ```json
@@ -603,7 +641,7 @@ The runtime bridge is a script (`scripts/c3-runtime-bridge.js`) that the server 
    ```
 
    This adds `scripts/c3-runtime-bridge.js` and one entry in `project.c3proj`. No `.bak` is written.
-4. **Reopen the project in Construct 3 and turn off the worker.** Click the project name in the Project Bar, then in the Properties Bar under **Advanced** set **Use worker** to **No**. In `project.c3proj` this is stored as `"useWorker": "dom"` (Auto is `"auto"`, Yes is `"worker"`). With the worker on, the game runs in a Web Worker named "Runtime" and `globalThis.__c3bridge` is not in the page's default console context.
+4. **Reopen the project in Construct 3 and turn off the worker.** Click the project name in the Project Bar, then in the Properties Bar under **Advanced** set **Use worker** to **No**. In project files saved by Construct 3 we found `"useWorker": "dom"` for this, `"auto"` and `"worker"` for the other values (we did not find the stored values in the manual). With the worker on, the game runs in a Web Worker named "Runtime" and `globalThis.__c3bridge` is not in the page's default console context.
 5. **Make sure Construct runs the bridge.** In the Project Bar under **Scripts**, either add this line at the top of your main script (the main script is shown in bold):
 
    ```js
@@ -658,7 +696,10 @@ That is normal when you start it in a terminal. It waits for an AI tool on stdin
 The server comes from a `.mcp.json`. Start `claude` in that folder, trust the folder and approve the server.
 
 **`claude mcp list` says `No MCP servers configured` in another folder.**
-The server was added with the default `local` scope, which only applies to the folder you ran `claude mcp add` in. Use `--scope user` or start `claude` in that folder.
+The server was added with the default `local` scope. Outside git it only applies to the exact folder you ran `claude mcp add` in; inside a git repository it applies to the whole repository. Use `--scope user` or start `claude` in that folder (see [Which scope?](#which-scope)).
+
+**`MCP server construct3 already exists in local config`**
+You ran `claude mcp add` for a second game in the same git repository, where the first game's `local` entry already applies. See [Which scope?](#which-scope) for setups with several games.
 
 **`error: missing required argument 'commandOrUrl'`** (PowerShell) and **`Invalid environment variable format: ...`**
 See [Windows shell pitfalls](#windows-shell-pitfalls).
@@ -667,22 +708,25 @@ See [Windows shell pitfalls](#windows-shell-pitfalls).
 Single backslashes or a trailing comma in a hand-written `.mcp.json`. See [Writing .mcp.json by hand](#writing-mcpjson-by-hand).
 
 **The AI's changes are gone after I saved in Construct 3.**
-The editor still had the old project open and saved it over the changes. Use git to get them back if you committed, and follow [the safe editing workflow](#the-safe-editing-workflow) next time.
+The editor still had the old project open and saved its older state over some or all of the changes. Use git to get them back if you committed, and follow [the safe editing workflow](#the-safe-editing-workflow) next time.
 
-**The AI doesn't see a change I made in Construct 3.**
+**The AI doesn't see a change I made in Construct 3 or with git.**
 Reconnect the server (Claude Code: `/mcp` > `construct3` > **Reconnect**). The lists of objects, sheets and layouts are read once at start.
+
+**`Object "Player" already exists` right after I undid the session with git.**
+The server still has the lists from before the undo. Reconnect it, see [Undoing a session](#undoing-a-session).
 
 **`validate_project` says valid, but the event is wrong or Construct 3 complains.**
 `valid: true` is not a guarantee. Action and condition ids, parameter keys and most expression syntax are not checked. Open the project and look at the new events. Read the `warnings` too.
 
 **npm reports vulnerabilities after installing.**
-See [Install](#install). They come from HTTP parts of the MCP SDK and from test tools; the server only uses stdio.
+See [Install](#install). Most come from test tools and from HTTP parts of the MCP SDK that this stdio server never loads; `npm audit fix` is not needed.
 
 **Can the AI read the Construct 3 manual?**
 Only links. Paste the relevant text into the chat, or rely on `construct3://docs/pitfalls`.
 
 **How do I use a third-party addon?**
-Add one object that uses the addon in the Construct 3 editor, save, close, and reconnect the server. Global objects (Mouse, Keyboard, Audio, AJAX and similar) exist once per project and are never placed on a layout.
+Install it and add one object that uses the addon in the Construct 3 editor, save, close, and reconnect the server. Don't let the AI use `register_addon` for it: that only adds the name to the project's addon list and installs nothing. Global objects (Mouse, Keyboard, Audio, AJAX and similar) exist once per project and are never placed on a layout.
 
 ## Limits
 
@@ -690,12 +734,13 @@ Add one object that uses the addon in the Construct 3 editor, save, close, and r
 - One project per server process.
 - Construct 3 does not see changes while the project is open. Close it before, or close without saving and reopen after.
 - No check of condition and action ids, parameter names or full expression syntax. Only the editor load-time rules listed under [`validate_project`](API.md#validate_project) are checked.
-- No rename refactoring: renaming does not update references elsewhere. For example, renaming a layer does not update the events that name it (issue #38).
+- Renames do not update event sheets. A layer renamed with `update_layer` (issue #38) or an event variable renamed with `update_event_variable` is still named by its old name wherever events use it. `rename_animation` does rename the frame image files and the layout instances' start animation, like the editor, but not text in events that names the animation. Objects, families, event sheets, layouts and timelines cannot be renamed by the server.
 - Functions cannot be made async or given a return type yet; change that in the editor (issue #49).
+- Files whose new JSON would be larger than 5 MB (very large layouts or event sheets) cannot be written; the write is refused with `Generated JSON for "..." is too large`.
 - Layout files larger than 10 MB are skipped when the server scans the whole project: `validate_project` then reports them as missing or invalid, and `add_instance_to_layout` can hand out a UID that already exists in them (issue #49). Do not let the server place instances in such projects.
 - Do not insert or delete sprite frames by index on frames with real artwork; use the editor for that (issue #36).
 - New instances get sequential UIDs. The server ignores the project setting *UID numbering: Random*, which Scirra recommends for teams, so avoid placing instances with the server on two branches at the same time.
-- Third-party addons must be added in the editor first.
+- Third-party addons must be installed and added in the editor; `register_addon` only edits the addon list.
 - The documentation resources only return links to the Construct 3 manual.
 - The runtime bridge must be driven from the browser console or an automation tool, and must be removed before you ship.
 - Windsurf / Devin Desktop allows 100 tools in total; this server uses 71 of them.

@@ -1007,7 +1007,7 @@ At least one parameter must be provided.
 
 ### `register_addon`
 
-Add an addon to the project's `usedAddons`. Known Scirra plugins and behaviors are registered automatically by `create_object` and `update_object_properties`; effects are not, so register them with this tool.
+Add an addon to the project's `usedAddons`. Known Scirra plugins and behaviors are registered automatically by `create_object` and `update_object_properties`; effects are not, so register them with this tool. The ID is not checked: any ID is written, and afterwards `create_object` accepts objects of that plugin. Registering a third-party addon does not install it; add third-party addons in the editor.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1021,7 +1021,7 @@ An addon that is already registered returns `action: "already_registered"` and n
 
 ### `unregister_addon`
 
-Remove an addon from `usedAddons`. Construct 3 errors on load if objects or behaviors still use it.
+Remove an addon from `usedAddons`. Construct 3 errors on load if objects or behaviors still use it, and the server does not check for such uses (`force` only concerns built-ins); it only adds a warning. Afterwards `validate_project` reports leftover uses as `missing-addon` warnings.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1222,7 +1222,7 @@ Generate a Python script and manual console steps that submit a bridge command a
 
 ### `export_for_preview`
 
-Pre-flight check for preview testing: reports the project's worker mode (`useWorker` should be `"dom"` so the bridge can reach `globalThis`) and, by default, injects the bridge into the project folder. It does not change `useWorker`. In the editor the setting is *Use worker* (Project Properties, Advanced) with Auto, Yes and No; No is stored as `"dom"`. With `injectBridge: false` nothing is written.
+Pre-flight check for preview testing: reports the project's worker mode (`useWorker` should be `"dom"` so the bridge can reach `globalThis`) and, by default, injects the bridge into the project folder. It does not change `useWorker`. In the editor the setting is *Use worker* (Project Properties, Advanced) with Auto, Yes and No; in project files saved by Construct 3, No appears as `"dom"` (we did not find the stored values in the manual). Every value other than `"dom"` or `"no"` gets a `workerMode` warning, also `"auto"`, although according to the manual Auto already runs without a worker once the project uses scripting. With `injectBridge: false` nothing is written.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
