@@ -80,6 +80,26 @@ describe('add_event_to_sheet', () => {
     expect(server.hasTool('add_event_to_sheet')).toBe(true);
   });
 
+  it('reads each other sheet once for the name checks of a function with parameters', async () => {
+    const { server, reader } = setup({
+      eventSheets: new Map([
+        ['MainSheet', { name: 'MainSheet', events: [], sid: 1 }],
+        ['Other', { name: 'Other', events: [], sid: 2 }],
+      ]),
+    });
+    const reads: string[] = [];
+    const readEventSheet = reader.readEventSheet.bind(reader);
+    reader.readEventSheet = async (name: string) => {
+      reads.push(name);
+      return readEventSheet(name);
+    };
+    const result = await server.callTool('add_event_to_sheet', {
+      sheetName: 'MainSheet', eventType: 'function', functionName: 'Heal', functionParams: [{ name: 'amount', type: 'number' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(reads.filter(name => name === 'Other')).toHaveLength(1);
+  });
+
   it('adds a group event', async () => {
     const { server, writer } = setup({
       eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 1 }]]),

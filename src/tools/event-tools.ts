@@ -85,6 +85,7 @@ import {
   mapCopiedAces,
   definesFunctionsOrVariables,
   countDeleteReferences,
+  globalVariableNames,
   REFERENCE_CHECK_MAX_EVENTS,
   namesVisibleToOtherSheets,
   type DeleteReference,
@@ -335,8 +336,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             if (nameProblem) return toolError(functionNameMessage(nameProblem, args.functionName, args.functionReturnType ?? 'none'));
             // Parameter names are checked like in the editor's Function parameter dialog
             if (args.functionParams && args.functionParams.length > 0) {
-              const sheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
-              const paramError = functionParameterNamesError(sheets, args.sheetName, args.functionParams.map(p => p.name));
+              const paramError = functionParameterNamesError(allSheets, args.sheetName, args.functionParams.map(p => p.name));
               if (paramError) return toolError(paramError);
             }
             const sid = await idGen.generateSid(reader);
@@ -1220,7 +1220,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         ]);
         const movedVariables = variablesDeclaredIn(eventsToMove);
         const scopesBefore = recordVariableScopes(otherSheets, movedVariables);
-        const globalsBefore = topLevelVariableNames(otherSheets);
+        const globalsBefore = globalVariableNames(otherSheets);
 
         // Determine target insertion array
         let insertTarget: Record<string, unknown>[];
@@ -1294,7 +1294,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const lost = findVariableReferencesLostByChange(scopesBefore, sheetsAfter, ace => copiedAces.get(ace) ?? ace);
         const lostCount = countDeleteReferences(lost);
         // Global variables that are global no longer: sheets that could not be parsed may use them
-        const globalsAfter = topLevelVariableNames(sheetsAfter);
+        const globalsAfter = globalVariableNames(sheetsAfter);
         const noLongerGlobal = [...movedVariables]
           .filter(([key]) => globalsBefore.has(key) && !globalsAfter.has(key))
           .map(([, name]) => name);
@@ -2065,18 +2065,6 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       }
     }
   );
-}
-
-/** Lower-cased names of the variables at the top level of the sheets (the global variables). */
-function topLevelVariableNames(sheets: ReadonlyMap<string, readonly C3Event[]>): Set<string> {
-  const names = new Set<string>();
-  for (const events of sheets.values()) {
-    for (const event of events) {
-      const name = (event as { name?: unknown }).name;
-      if (event.eventType === 'variable' && typeof name === 'string') names.add(name.toLowerCase());
-    }
-  }
-  return names;
 }
 
 /**

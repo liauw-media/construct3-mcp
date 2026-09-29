@@ -263,7 +263,7 @@ function variableInScope(
 }
 
 /** Lower-cased names of the variables at the top level of `sheets` (the global variables), except those in `skip`. */
-function globalVariableNames(sheets: ReadonlyMap<string, unknown>, skip: ReadonlySet<object> = new Set()): Set<string> {
+export function globalVariableNames(sheets: ReadonlyMap<string, unknown>, skip: ReadonlySet<object> = new Set()): Set<string> {
   const names = new Set<string>();
   for (const events of sheets.values()) {
     if (!Array.isArray(events)) continue;
