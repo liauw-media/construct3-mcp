@@ -115,7 +115,7 @@ class Construct3ProjectReader {
 - **Fuzzy matching**: `findNearestName()` provides "Did you mean?" suggestions
 - **Bounded reads**: Entity and script files over 10MB are refused; a leading BOM is stripped before parsing
 - **Typed read failures**: The per-entity readers throw a `ProjectReadError` with a code (`E_FILE_TOO_LARGE`, `E_FILE_NOT_FOUND`, `E_INVALID_JSON`, `E_READ_ERROR`); the bulk `readAll*()` reads skip such files and record the code per name (`getReadFailures()`), so the ID generator and `validate_project` branch on the code, never on message text. A bulk read stores its failures together with its cached map when it finishes, and callers take them right after the read: a project reload by a concurrent tool call (`invalidateCaches()`) can then drop both, but never leave a cached map without the failures that go with it
-- **Raw ID scan**: `scanEntityIdsRaw()` reads a skipped layout or object type whole, without the size limit and without parsing, and collects its `"uid"` and `"sid"` values with a linear regex; the path goes through the same path map and `resolveProjectPath()` check as the parsed readers
+- **Raw ID scan**: `scanEntityIdsRaw()` streams a skipped layout or object type without the size limit and without parsing (`scanFileIds` in `raw-text-search.ts`, read like the raw text search: 1MB chunks, UTF-8 or UTF-16LE after its byte order mark, UTF-16BE and NUL characters rejected) and collects its `"uid"` and `"sid"` values with a linear regex, keeping between chunks only the start of an entry a chunk boundary cut off; the path goes through the same path map and `resolveProjectPath()` check as the parsed readers
 - **Raw text search**: `searchEntityTextRaw()` searches a skipped file for names (whole words, ignoring case), numbers and bounded patterns (`raw-text-search.ts`), through the same path check. It streams the file in 1MB chunks with an overlap, so memory does not grow with the file, and stops once every term was found; fs errors propagate unwrapped (ENOENT: no file, so no uses). The reference checks use it for the files the index could not parse (`unscanned-uses.ts`)
 
 ### 3. Project Writer (`src/construct3/project-writer.ts`)
@@ -218,7 +218,7 @@ Supporting modules next to the templates:
 | `construct3/layers.ts` | The layer tree of a layout: walks every layer and nested sub-layer and their instances (non-world instances included), finds layers and instances, compares layer names ignoring case; every walk over layers or layout instances goes through it |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
 | `construct3/png-generator.ts` | Zero-dependency placeholder PNGs and C3 image file names (all lowercase) |
-| `construct3/raw-text-search.ts` | Streamed text search in files the reader skips: whole-word names ignoring case (as JSON writes them in a string), whole numbers, bounded patterns; one alternation of literals, word boundaries checked where a literal matched |
+| `construct3/raw-text-search.ts` | Streamed text search in files the reader skips: whole-word names ignoring case (as JSON writes them in a string), whole numbers, bounded patterns; one alternation of literals, word boundaries checked where a literal matched. Also the streamed UID/SID scan of the ID generator (`RawIdScan`, `scanFileIds`) |
 | `construct3/timeline-folders.ts` | The editor's Transitions folder in the timelines container (first nameless first-level folder, files in `timelines/transitions/`), shared by the timeline tools and `validate_project` |
 | `construct3/types.ts` | TypeScript types for project files and analysis results |
 | `runtime/bridge.ts` | Generates the injectable runtime bridge script (`globalThis.__c3bridge`) |
@@ -352,7 +352,7 @@ The mutation tools provide extra context:
 - **Input validation**: Zod schemas on all tool parameters with length limits
 - **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
 - **Load-time gate**: The five event-editing tools listed under Write Flow reject writes that add an error the editor would refuse at load
-- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole, again for the first ID after each write, up to the about 512MB a JavaScript string can hold; a larger file refuses new UIDs). The name search of the reference checks streams skipped files without a limit
+- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read. The UID/SID text scan of skipped layouts and object types (again for the first ID after each write) and the name search of the reference checks stream skipped files without a limit
 
 ---
 

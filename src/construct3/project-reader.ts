@@ -13,7 +13,15 @@ import type {
 } from './types.js';
 import { resolveProjectPath } from './path-utils.js';
 import { parseJsonText, stripBom } from './json-format.js';
-import { searchFileText, type RawTextTerm } from './raw-text-search.js';
+import { scanFileIds, searchFileText, type RawTextTerm } from './raw-text-search.js';
+
+/**
+ * Scan raw JSON text for "uid"/"sid" values without parsing it (the scan
+ * scanEntityIdsRaw streams a file through). Over-approximation (a value
+ * inside a string literal) is harmless for high-water and collision
+ * purposes. Exported so the test mock shares this exact implementation.
+ */
+export { scanIdsInText } from './raw-text-search.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 /** Limits for listing flowcharts/ and timelines/ */
@@ -107,25 +115,6 @@ function toReadFailure(error: unknown): ReadFailure {
     code: classifyReadError(error),
     message: error instanceof Error ? error.message : String(error),
   };
-}
-
-/**
- * Regex-scan raw JSON text for "uid"/"sid" values without parsing it.
- * Over-approximation (a value inside a string literal) is harmless for
- * high-water and collision purposes. Exported so the test mock shares this
- * exact implementation instead of re-implementing it.
- */
-export function scanIdsInText(content: string): { highestUid: number; sids: number[] } {
-  let highestUid = 0;
-  for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
-    const uid = Number(match[1]);
-    if (uid > highestUid) highestUid = uid;
-  }
-  const sids: number[] = [];
-  for (const match of content.matchAll(/"sid"\s*:\s*(\d+)/g)) {
-    sids.push(Number(match[1]));
-  }
-  return { highestUid, sids };
 }
 
 export class Construct3ProjectReader {
@@ -528,12 +517,14 @@ export class Construct3ProjectReader {
    * reader refuses (over 10MB) or cannot parse: layout instances and
    * objectTypes' singleglobal-inst carry UIDs. Recovers uid/sid only;
    * imageSpriteIds are not recovered (random 7-digit, collision-negligible).
-   * fs errors propagate unwrapped so callers can test `.code` (ENOENT means
-   * there is nothing to recover).
+   * The file is streamed (scanFileIds in raw-text-search.ts), so its size is
+   * not limited by the length of a string. fs errors propagate unwrapped so
+   * callers can test `.code` (ENOENT means there is nothing to recover); a
+   * file that cannot be read as text (UTF-16BE, NUL characters) rejects with
+   * a RawTextEncodingError, so the ID generator treats it as unscannable.
    */
   async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
-    const content = await readFile(this.resolveEntityPath(category, name), 'utf-8');
-    return scanIdsInText(content);
+    return scanFileIds(this.resolveEntityPath(category, name));
   }
 
   /**

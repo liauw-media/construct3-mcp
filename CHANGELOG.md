@@ -4,6 +4,10 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- The UID/SID text scan of layouts and object types the reader skips (over the 10MB read limit, invalid JSON) streams the file instead of reading it into memory whole, as the text search of the reference checks does: memory no longer grows with the file (a peak of about 120MB instead of about 290MB of process memory for a 50MB layout), and a file over about 512MB, the most a JavaScript string can hold, no longer refuses new UIDs in `add_instance_to_layout` and `create_object` (a 608MB layout scans in about 1.5 seconds). The scan reads a file with a UTF-16LE byte order mark as UTF-16LE, and treats a file in UTF-16BE or with NUL characters (e.g. UTF-16 without a byte order mark) as unreadable, so new UIDs are refused with its name; before, such files were read as UTF-8, their UIDs were missed and a new UID could repeat one of them (#59).
+
 ### Fixed
 
 - `get_function_map` lists each function's parameters (`params`). It read them from `parameters`, a key neither the editor nor `add_event_to_sheet` writes, instead of `functionParameters`, so every function came out with `params: []`; a function block that has only `parameters` is still read (#38).

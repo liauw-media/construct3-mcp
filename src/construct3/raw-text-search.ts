@@ -36,6 +36,11 @@
  * all). The start of the word, and a continuation outside ASCII, are checked
  * where a literal matched, looking up the literals of each length there
  * (not every name). docs/TROUBLESHOOTING.md has the measured times.
+ *
+ * The UID/SID scan of the ID generator (issue #49) reads such files the same
+ * way (scanFileIds, issue #59): streamed, so a file of any size costs memory
+ * for one chunk (and the SIDs found), not a string as long as the file, which
+ * JavaScript cannot hold beyond about 512MB.
  */
 
 import { createReadStream } from 'fs';
@@ -386,6 +391,28 @@ async function textEncodingOf(path: string): Promise<BufferEncoding> {
 }
 
 /**
+ * Stream a file as text, one chunk of CHUNK_SIZE bytes at a time, to
+ * `onPiece`, until it returns true (nothing more needed). The file is read
+ * as UTF-8, or as UTF-16LE after that byte order mark; a file in UTF-16BE or
+ * with a NUL character rejects with a RawTextEncodingError. fs errors
+ * propagate unwrapped.
+ */
+async function streamFileText(path: string, onPiece: (piece: string) => boolean): Promise<void> {
+  const encoding = await textEncodingOf(path);
+  const stream = createReadStream(path, { encoding, highWaterMark: CHUNK_SIZE });
+  try {
+    for await (const piece of stream) {
+      if ((piece as string).includes('\u0000')) {
+        throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
+      }
+      if (onPiece(piece as string)) break;
+    }
+  } finally {
+    stream.destroy();
+  }
+}
+
+/**
  * Search a file for the terms, streaming it (no size limit, memory for one
  * chunk). Returns the keys of the terms found. fs errors propagate
  * unwrapped, so callers can test `.code` (ENOENT: no file, so nothing in
@@ -395,18 +422,121 @@ async function textEncodingOf(path: string): Promise<BufferEncoding> {
 export async function searchFileText(path: string, terms: readonly RawTextTerm[]): Promise<Set<string>> {
   const search = new RawTextSearch(terms);
   if (search.done) return search.finish();
-  const encoding = await textEncodingOf(path);
-  const stream = createReadStream(path, { encoding, highWaterMark: CHUNK_SIZE });
-  try {
-    for await (const piece of stream) {
-      if ((piece as string).includes('\u0000')) {
-        throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
-      }
-      search.push(piece as string);
-      if (search.done) break;
-    }
-  } finally {
-    stream.destroy();
-  }
+  await streamFileText(path, piece => {
+    search.push(piece);
+    return search.done;
+  });
   return search.finish();
+}
+
+// ─── UID and SID scan ────────────────────────────────────────
+
+/** `"uid": <digits>` or `"sid": <digits>`, whitespace allowed around the colon; group 1 is "u" or "s", group 2 the digits */
+const ID_ENTRY = /"([us])id"\s*:\s*(\d+)/g;
+/** "uid" or "sid" with its quotes, at the end of a text */
+const ID_KEY_AT_END = /"[us]id"$/;
+/** The start of such a key at the end of a text: `"`, `"u`, `"ui` or `"uid` (or with "s") */
+const ID_KEY_START_AT_END = /"(?:[us](?:id?)?)?$/;
+/**
+ * Digits of a number that a piece boundary cuts off that are kept, leading
+ * zeros dropped: more than any finite double has, so Number() of the kept
+ * digits is Number() of all of them (Infinity beyond about 309 digits).
+ */
+const MAX_KEPT_DIGITS = 400;
+
+/** The digits of a number cut off by a piece boundary, as kept: leading zeros dropped, at most MAX_KEPT_DIGITS. */
+function keptDigits(digits: string): string {
+  return digits.replace(/^0+(?=\d)/, '').slice(0, MAX_KEPT_DIGITS);
+}
+
+/**
+ * The start of an ID entry at the end of `text` that the next piece may
+ * complete, in the shortest form that matches the same way: the key or part
+ * of it (`"`, `"u`, `"ui`, `"uid`, `"uid"`), `"uid"` followed by whitespace
+ * (kept as one space), or `"uid"` and the colon (whitespace around it
+ * dropped). '' when the text does not end with one.
+ */
+function cutOffIdEntry(text: string): string {
+  const trimmed = text.trimEnd();
+  if (trimmed.endsWith(':')) {
+    const key = trimmed.slice(0, -1).trimEnd().slice(-5);
+    return ID_KEY_AT_END.test(key) ? `${key}:` : '';
+  }
+  const key = trimmed.slice(-5);
+  if (ID_KEY_AT_END.test(key)) return trimmed.length < text.length ? `${key} ` : key;
+  if (trimmed.length < text.length) return '';
+  return ID_KEY_START_AT_END.exec(text.slice(-4))?.[0] ?? '';
+}
+
+/**
+ * Incremental scan for the UIDs and SIDs in the text of a layout or object
+ * type file the reader skipped (issue #49): every `"uid": <n>` and
+ * `"sid": <n>`, wherever it is, without parsing the JSON. push() each piece
+ * in order, then finish(): the highest UID and every SID, in text order.
+ * Between pieces only the start of an entry that the boundary cut off is
+ * kept (a few characters, and the digits of a number cut in two), so the
+ * scan finds what a scan of the whole text finds while its memory does not
+ * grow with the text (the SIDs aside).
+ */
+export class RawIdScan {
+  private highestUid = 0;
+  private readonly sids: number[] = [];
+  private carry = '';
+  private finished = false;
+
+  push(piece: string): void {
+    if (this.finished || piece.length === 0) return;
+    this.carry = this.scan(this.carry + piece, false);
+  }
+
+  finish(): { highestUid: number; sids: number[] } {
+    if (!this.finished && this.carry.length > 0) this.scan(this.carry, true);
+    this.carry = '';
+    this.finished = true;
+    return { highestUid: this.highestUid, sids: this.sids };
+  }
+
+  /**
+   * Record the entries in `text`. Unless it is the end of the file, an
+   * entry whose number reaches the end of `text` may go on in the next
+   * piece: it is returned (the carry for the next piece) instead, as is the
+   * start of an entry at the end.
+   */
+  private scan(text: string, last: boolean): string {
+    for (const match of text.matchAll(ID_ENTRY)) {
+      if (!last && match.index + match[0].length === text.length) {
+        return `"${match[1]}id":${keptDigits(match[2])}`;
+      }
+      const value = Number(match[2]);
+      if (match[1] === 'u') {
+        if (value > this.highestUid) this.highestUid = value;
+      } else {
+        this.sids.push(value);
+      }
+    }
+    return last ? '' : cutOffIdEntry(text);
+  }
+}
+
+/** The UIDs and SIDs in a whole text (see RawIdScan). */
+export function scanIdsInText(content: string): { highestUid: number; sids: number[] } {
+  const scan = new RawIdScan();
+  scan.push(content);
+  return scan.finish();
+}
+
+/**
+ * Scan a file for its UIDs and SIDs (see RawIdScan), streaming it: no size
+ * limit, memory for one chunk and the SIDs found. Read as searchFileText
+ * reads: UTF-8, or UTF-16LE after its byte order mark; a file in UTF-16BE or
+ * with a NUL character rejects with a RawTextEncodingError. fs errors
+ * propagate unwrapped (ENOENT: no file).
+ */
+export async function scanFileIds(path: string): Promise<{ highestUid: number; sids: number[] }> {
+  const scan = new RawIdScan();
+  await streamFileText(path, piece => {
+    scan.push(piece);
+    return false;
+  });
+  return scan.finish();
 }
