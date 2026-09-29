@@ -359,6 +359,23 @@ export class MockReader {
     // no-op for mock
   }
 
+  // The mock holds no files: nothing on disk can change under it
+  async syncWithDisk(): Promise<boolean> {
+    return false;
+  }
+
+  async checkProjectFile(): Promise<boolean> {
+    return false;
+  }
+
+  async ensureCachesFresh(): Promise<void> {
+    // nothing to check
+  }
+
+  getDiskEpoch(): number {
+    return 0;
+  }
+
   // Helper: add an object at runtime (for tests that build state incrementally)
   addObject(name: string, data: Record<string, unknown>): void {
     this.objects.set(name, data);

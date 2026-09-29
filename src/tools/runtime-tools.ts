@@ -20,6 +20,7 @@ import { existsSync } from 'node:fs';
 import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
+import { withProjectSync } from './project-sync.js';
 
 const BRIDGE_FILENAME = 'c3-runtime-bridge.js';
 
@@ -71,7 +72,8 @@ function removeBridgeFromScripts(c3proj: Record<string, unknown>): void {
   }
 }
 
-export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps) {
+export function registerRuntimeTools({ server: mcpServer, reader, writer }: RuntimeToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
 
   // ── inject_runtime_bridge ─────────────────────────────────
 
@@ -95,6 +97,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
         // Register in project.c3proj (rootFileFolders.script.items)
         const c3projPath = reader.getProjectPath();
+        await writer.assertProjectFileCurrent();
         const c3projRaw = await readFile(c3projPath, 'utf-8');
         const c3proj = parseJsonText(c3projRaw);
 
@@ -148,6 +151,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
         // Remove from project.c3proj
         const c3projPath = reader.getProjectPath();
+        await writer.assertProjectFileCurrent();
         const c3projRaw = await readFile(c3projPath, 'utf-8');
         const c3proj = parseJsonText(c3projRaw);
 
@@ -335,6 +339,7 @@ print(json.dumps({
 
           // Register in c3proj if needed
           const c3projPath = reader.getProjectPath();
+          await writer.assertProjectFileCurrent();
           const c3projRaw = await readFile(c3projPath, 'utf-8');
           const c3proj = parseJsonText(c3projRaw);
 
@@ -445,6 +450,8 @@ print(json.dumps({
           await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
 
           const c3projPath = reader.getProjectPath();
+
+          await writer.assertProjectFileCurrent();
           const c3projRaw = await readFile(c3projPath, 'utf-8');
           const c3proj = parseJsonText(c3projRaw);
           if (!findBridgeInScripts(c3proj)) {
