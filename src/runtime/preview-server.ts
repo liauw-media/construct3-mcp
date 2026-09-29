@@ -14,8 +14,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { createReadStream, existsSync } from 'node:fs';
+import { mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -209,7 +209,15 @@ export class PreviewServer {
     const isolated = options.crossOriginIsolated === true;
     let instance: PreviewServer | undefined;
     const server = createServer((request, response) => {
-      void serve(root, request, response, isolated).then(() => { if (instance) instance.requests++; });
+      // Nothing a request meets may escape as an unhandled rejection: that
+      // would end the whole MCP server.
+      serve(root, request, response, isolated)
+        .catch((error: unknown) => {
+          console.error('[serve_preview] request failed:', error);
+          if (!response.headersSent) response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }).end('Internal error');
+          else response.destroy();
+        })
+        .finally(() => { if (instance) instance.requests++; });
     });
     await new Promise<void>((done, fail) => {
       server.once('error', fail);
@@ -275,23 +283,44 @@ async function serve(root: string, request: IncomingMessage, response: ServerRes
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not found');
     return;
   }
-  const info = await stat(file);
-  response.writeHead(200, {
-    'content-type': MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream',
-    'content-length': info.size,
-    'cache-control': 'no-store',
-    ...(isolated ? ISOLATION_HEADERS : {}),
-  });
-  if (request.method === 'HEAD') {
-    response.end();
+  // Opened once, and size and content read through that one handle: a file
+  // replaced or deleted after the path check (a new export into the served
+  // folder) is either the file that was opened or a 404, never a failure.
+  let handle;
+  try {
+    handle = await open(file, 'r');
+  } catch {
+    response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not found');
     return;
   }
-  await new Promise<void>((done) => {
-    const stream = createReadStream(file);
-    stream.on('error', () => { response.destroy(); done(); });
-    stream.on('end', done);
-    stream.pipe(response);
-  });
+  let streaming = false;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not found');
+      return;
+    }
+    response.writeHead(200, {
+      'content-type': MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream',
+      'content-length': info.size,
+      'cache-control': 'no-store',
+      ...(isolated ? ISOLATION_HEADERS : {}),
+    });
+    if (request.method === 'HEAD') {
+      response.end();
+      return;
+    }
+    streaming = true;
+    const stream = handle.createReadStream();
+    await new Promise<void>((done) => {
+      stream.on('error', () => { response.destroy(); done(); });
+      stream.on('end', done);
+      stream.pipe(response);
+    });
+  } finally {
+    // The read stream closes the handle it was given; otherwise close it here.
+    if (!streaming) await handle.close().catch(() => undefined);
+  }
 }
 
 /** Candidate Chrome executables for this platform, in the order tried. */
