@@ -9,10 +9,12 @@
  *   object property) matches as a whole word, ignoring case the way the
  *   editor compares names: not preceded or followed by a letter, digit or
  *   underscore. "Enemy" matches "Enemy", "Enemy.X", "enemy(0)",
- *   runtime.objects.Enemy and "\nEnemy" in JSON-escaped script text, but not
- *   "EnemyBullet" or "BigEnemy". The name is searched as JSON writes it
- *   inside a string (JSON.stringify without the quotes); a name that a file
- *   spells with \u escapes is not found.
+ *   runtime.objects.Enemy and "\nEnemy" or "\u000bEnemy" in JSON-escaped
+ *   script text, but not "EnemyBullet" or "BigEnemy". The name is searched as
+ *   JSON writes it inside a string (JSON.stringify without the quotes) and,
+ *   for a name with characters outside ASCII, also with those characters as
+ *   \u escapes (as Python's json.dump writes them by default). A name whose
+ *   ASCII characters a file spells with \u escapes is not found.
  * - A pattern term is a regular expression with a bounded match length
  *   (`maxLength`), such as `"uid": <digits>` for layout instances.
  * A match is only a possible use: the text may hold the same name in another
@@ -20,20 +22,37 @@
  * report it as "possible".
  *
  * The file is streamed in chunks of CHUNK_SIZE with an overlap longer than
- * any match, so the search reads files of any size in linear time without
- * holding them in memory, and stops as soon as every term was found. The
- * word terms are one alternation of literals (no lookbehind, no "u" flag, so
- * the regular expression engine can skip ahead) and the word boundaries are
- * checked only where a literal matched: about 50ms for 50MB, with one name or
- * two hundred, plus reading the file.
+ * any match and its context, so the search reads files of any size in linear
+ * time without holding them in memory, and stops as soon as every term was
+ * found. It is read as UTF-8, or as UTF-16LE when it starts with that byte
+ * order mark; a file in UTF-16BE, or with a NUL character (which JSON text
+ * never holds unescaped: another encoding, or not text), cannot be searched
+ * and rejects, so callers treat it as unreadable.
+ *
+ * The word terms are one alternation of literals, longest first, followed by
+ * a lookahead that rejects an ASCII word character (no lookbehind, no "u"
+ * flag, so the regular expression engine can skip ahead, and a name that
+ * only starts a longer word, "Enemy" in "EnemyBullet", is not returned at
+ * all). The start of the word, and a continuation outside ASCII, are checked
+ * where a literal matched, looking up the literals of each length there
+ * (not every name). docs/TROUBLESHOOTING.md has the measured times.
  */
 
 import { createReadStream } from 'fs';
+import { open } from 'fs/promises';
 
 /** Characters read per step of the stream */
 const CHUNK_SIZE = 1024 * 1024;
-/** Characters of context a match needs beyond its own length (the characters before and after it) */
-const CONTEXT = 16;
+/**
+ * Characters of context a match needs beyond its own length: before it (a
+ * \uXXXX escape, or two of them for a character outside the BMP) and after
+ * it (a \uXXXX escape), with room to spare. See RawTextSearch.scan.
+ */
+const CONTEXT = 32;
+/** Characters at the start of a text a search skips once text before it was dropped: the context before a match */
+const SKIP_AFTER_DROP = 12;
+/** Length of a \uXXXX escape */
+const ESCAPE_LENGTH = 6;
 
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
 
@@ -44,6 +63,8 @@ export type RawTextTerm =
     kind: 'word';
     /** The literal text searched, ignoring case */
     text: string;
+    /** Other spellings of the same text, searched the same way (e.g. with \u escapes) */
+    alternatives?: string[];
     /** Upper bound of a match's length in UTF-16 code units */
     maxLength: number;
   }
@@ -57,15 +78,32 @@ export type RawTextTerm =
 
 type WordTerm = Extract<RawTextTerm, { kind: 'word' }>;
 type PatternTerm = Extract<RawTextTerm, { kind: 'pattern' }>;
+/** One spelling of a word term, as searched */
+interface Literal {
+  term: WordTerm;
+  text: string;
+  lower: string;
+}
 
 function escapeRegExp(text: string): string {
   return text.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 }
 
-/** A name, as a whole word ignoring case, spelled as JSON writes it inside a string. */
+/** `text` with every UTF-16 code unit outside ASCII as a \uXXXX escape (lower-case hex digits, as Python writes them). */
+function asciiEscaped(text: string): string {
+  return text.replace(/[^\x00-\x7f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/**
+ * A name, as a whole word ignoring case, spelled as JSON writes it inside a
+ * string; a name with characters outside ASCII also with those as \u escapes.
+ */
 export function nameTerm(name: string, key = name): RawTextTerm {
   const text = JSON.stringify(name).slice(1, -1);
-  return { key, kind: 'word', text, maxLength: text.length };
+  const escaped = asciiEscaped(text);
+  return escaped === text
+    ? { key, kind: 'word', text, maxLength: text.length }
+    : { key, kind: 'word', text, alternatives: [escaped], maxLength: Math.max(text.length, escaped.length) };
 }
 
 /** A non-negative integer, as a whole word (an object type's SID in an object property). */
@@ -94,14 +132,68 @@ function isWordCode(code: number | undefined): boolean {
   return code !== undefined && WORD_CHAR.test(String.fromCodePoint(code));
 }
 
+/** The code unit of the \uXXXX escape that starts at `index`, if one does. */
+function escapeAt(text: string, index: number): number | undefined {
+  if (index < 0 || text[index] !== '\\' || text[index + 1] !== 'u') return undefined;
+  const hex = text.slice(index + 2, index + ESCAPE_LENGTH);
+  return /^[0-9a-fA-F]{4}$/.test(hex) ? parseInt(hex, 16) : undefined;
+}
+
+function isHighSurrogate(code: number | undefined): code is number {
+  return code !== undefined && code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number | undefined): code is number {
+  return code !== undefined && code >= 0xdc00 && code <= 0xdfff;
+}
+
+function combineSurrogates(high: number, low: number): number {
+  return ((high - 0xd800) << 10) + (low - 0xdc00) + 0x10000;
+}
+
+/** The character that a \uXXXX escape (or a pair of them, for a surrogate pair) ending at `index` stands for. */
+function escapedCodePointBefore(text: string, index: number): number | undefined {
+  const code = escapeAt(text, index - ESCAPE_LENGTH);
+  if (!isLowSurrogate(code)) return code;
+  const high = escapeAt(text, index - 2 * ESCAPE_LENGTH);
+  return isHighSurrogate(high) ? combineSurrogates(high, code) : code;
+}
+
+/** The character that a \uXXXX escape (or a pair of them) starting at `index` stands for. */
+function escapedCodePointAt(text: string, index: number): number | undefined {
+  const code = escapeAt(text, index);
+  if (!isHighSurrogate(code)) return code;
+  const low = escapeAt(text, index + ESCAPE_LENGTH);
+  return isLowSurrogate(low) ? combineSurrogates(code, low) : code;
+}
+
 /**
  * Whether a word starts at `index`: the text starts there, the character
- * before is not part of a word, or it ends a JSON escape (\n, \t, ...).
+ * before is not part of a word, or it ends a JSON escape (\n, \t, ..., or a
+ * \uXXXX escape of a character that is not part of a word).
  */
 function wordStartsAt(text: string, index: number): boolean {
   const before = codePointBefore(text, index);
   if (!isWordCode(before)) return true;
-  return 'nrtbf'.includes(text[index - 1]) && text[index - 2] === '\\';
+  if ('nrtbf'.includes(text[index - 1]) && text[index - 2] === '\\') return true;
+  const escaped = escapedCodePointBefore(text, index);
+  return escaped !== undefined && !isWordCode(escaped);
+}
+
+/**
+ * Whether wordGoesOnAt(text, index) needs text after the end of `text`: at
+ * the end, half a surrogate pair, or a backslash that may start an escape
+ * (a pair of them, for a character outside the BMP).
+ */
+function undecidedAt(text: string, index: number): boolean {
+  if (index >= text.length) return true;
+  if (isHighSurrogate(text.charCodeAt(index))) return index + 1 >= text.length;
+  return text[index] === '\\' && index + 2 * ESCAPE_LENGTH > text.length;
+}
+
+/** Whether a word goes on at `index`: a character that is part of a word there, or a \uXXXX escape of one. */
+function wordGoesOnAt(text: string, index: number): boolean {
+  return isWordCode(text.codePointAt(index)) || isWordCode(escapedCodePointAt(text, index));
 }
 
 /**
@@ -111,10 +203,12 @@ function wordStartsAt(text: string, index: number): boolean {
 export class RawTextSearch {
   private words: WordTerm[] = [];
   private patterns: PatternTerm[] = [];
-  /** Lower-cased literal → the word terms with that literal */
-  private wordsByText = new Map<string, WordTerm[]>();
-  /** Some pending literal starts another one (ignoring case): a failed match is retried with the shorter ones */
-  private prefixes = false;
+  /** Lower-cased literal (a term's text or alternative) → the pending literals with that lower-cased text */
+  private literalsByLower = new Map<string, Literal[]>();
+  /** The pending literals, longest first */
+  private literals: Literal[] = [];
+  /** The distinct lengths of the pending literals, longest first */
+  private literalLengths: number[] = [];
   private wordRegex: RegExp | null = null;
   private patternRegex: RegExp | null = null;
   private readonly found = new Set<string>();
@@ -155,22 +249,27 @@ export class RawTextSearch {
   }
 
   /**
-   * One regular expression for the pending word terms (their literals,
-   * longest first, so the longest literal matching at a place is tried
-   * first) and one for the patterns (one capturing group each).
+   * One regular expression for the pending word terms (all their literals,
+   * longest first, so the longest literal matching at a place is tried first,
+   * then a shorter one where the longer one goes on with an ASCII word
+   * character) and one for the patterns (one capturing group each).
    */
   private compile(terms: readonly RawTextTerm[]): void {
-    this.words = terms.filter((t): t is WordTerm => t.kind === 'word' && t.text.length > 0)
-      .sort((a, b) => b.text.length - a.text.length);
+    this.words = terms.filter((t): t is WordTerm => t.kind === 'word' && t.text.length > 0);
     this.patterns = terms.filter((t): t is PatternTerm => t.kind === 'pattern');
-    this.wordsByText = new Map();
-    for (const term of this.words) {
-      const lower = term.text.toLowerCase();
-      this.wordsByText.set(lower, [...(this.wordsByText.get(lower) ?? []), term]);
+    this.literals = this.words
+      .flatMap(term => [...new Set([term.text, ...(term.alternatives ?? [])])]
+        .filter(text => text.length > 0)
+        .map(text => ({ term, text, lower: text.toLowerCase() })))
+      .sort((a, b) => b.text.length - a.text.length);
+    this.literalsByLower = new Map();
+    for (const literal of this.literals) {
+      this.literalsByLower.set(literal.lower, [...(this.literalsByLower.get(literal.lower) ?? []), literal]);
     }
-    const lowers = [...this.wordsByText.keys()];
-    this.prefixes = lowers.some(a => lowers.some(b => b !== a && b.startsWith(a)));
-    this.wordRegex = this.words.length > 0 ? new RegExp(this.words.map(t => escapeRegExp(t.text)).join('|'), 'gi') : null;
+    this.literalLengths = [...new Set(this.literals.map(l => l.text.length))];
+    this.wordRegex = this.literals.length > 0
+      ? new RegExp(`(?:${this.literals.map(l => escapeRegExp(l.text)).join('|')})(?![A-Za-z0-9_])`, 'gi')
+      : null;
     this.patternRegex = this.patterns.length > 0 ? new RegExp(this.patterns.map(t => `(${t.source})`).join('|'), 'gi') : null;
   }
 
@@ -180,14 +279,17 @@ export class RawTextSearch {
   }
 
   /**
-   * Search `text`. Unless it is the end of the file, a match that reaches the
-   * end of `text` may go on in the next piece (a longer word): it is left for
-   * the next search, which starts with the end of this text. Once text before
-   * it was dropped, matches in its first two characters are skipped: they
-   * were decided with their real context in the previous search.
+   * Search `text`. Unless it is the end of the file, a match that reaches
+   * close to the end of `text` may go on in the next piece (a longer word,
+   * or an escape after it): it is left for the next search, which starts
+   * with the end of this text (the overlap: the longest match plus CONTEXT).
+   * Once text before it was dropped, matches in its first SKIP_AFTER_DROP
+   * characters are skipped: their context before them is cut off, and they
+   * were decided with it in the previous search (they end well before the
+   * end of the previous text).
    */
   private scan(text: string, last: boolean): void {
-    const minStart = this.dropped ? 2 : 0;
+    const minStart = this.dropped ? SKIP_AFTER_DROP : 0;
     this.scanWords(text, last, minStart);
     this.scanPatterns(text, last, minStart);
   }
@@ -212,23 +314,27 @@ export class RawTextSearch {
 
   /**
    * The pending word term that matches as a whole word at `index`, where the
-   * regular expression matched `matched`: its term, or, when that is not a
-   * whole word there, a shorter literal that starts it.
+   * regular expression matched `matched`: the literal matched or, when that
+   * is not a whole word there (a word character outside ASCII, or an escape
+   * of one, follows), a shorter literal that starts it. Each length is one
+   * lookup, whatever the number of names.
    */
   private wordAt(text: string, index: number, matched: string, last: boolean): WordTerm | undefined {
     if (!wordStartsAt(text, index)) return undefined;
-    const lower = matched.toLowerCase();
-    let candidates = this.wordsByText.get(lower)
-      // The regular expression folds case in its own way: compare its match ignoring case
-      ?? this.words.filter(t => t.text.length === matched.length && new RegExp(`^(?:${escapeRegExp(t.text)})$`, 'i').test(matched));
-    if (this.prefixes) {
-      candidates = [...candidates, ...this.words.filter(t =>
-        t.text.length < matched.length && text.slice(index, index + t.text.length).toLowerCase() === t.text.toLowerCase())];
-    }
-    for (const term of candidates) {
-      const end = index + term.text.length;
-      if (end >= text.length && !last) continue;
-      if (!isWordCode(text.codePointAt(end))) return term;
+    for (const length of this.literalLengths) {
+      if (length > matched.length) continue;
+      let candidates = this.literalsByLower.get(text.slice(index, index + length).toLowerCase())
+        ?.filter(l => l.text.length === length);
+      if (length === matched.length && !candidates?.length) {
+        // The regular expression folds case in its own way: compare its match ignoring case
+        candidates = this.literals.filter(l =>
+          l.text.length === length && new RegExp(`^(?:${escapeRegExp(l.text)})$`, 'i').test(matched));
+      }
+      for (const literal of candidates ?? []) {
+        const end = index + length;
+        if (!last && undecidedAt(text, end)) continue;
+        if (!wordGoesOnAt(text, end)) return literal.term;
+      }
     }
     return undefined;
   }
@@ -259,17 +365,43 @@ export function searchText(text: string, terms: readonly RawTextTerm[]): Set<str
   return search.finish();
 }
 
+/** Why a file cannot be searched as text (its encoding): a rejection that is not ENOENT, so callers treat the file as unreadable. */
+export class RawTextEncodingError extends Error {
+  readonly code = 'E_TEXT_ENCODING';
+}
+
+/** The encoding to stream a file in, from its first bytes: UTF-16LE after its byte order mark, otherwise UTF-8. */
+async function textEncodingOf(path: string): Promise<BufferEncoding> {
+  const handle = await open(path, 'r');
+  try {
+    const { buffer, bytesRead } = await handle.read(Buffer.alloc(2), 0, 2, 0);
+    if (bytesRead === 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return 'utf16le';
+    if (bytesRead === 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+      throw new RawTextEncodingError('The file is UTF-16BE text, which the text search does not read');
+    }
+    return 'utf8';
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Search a file for the terms, streaming it (no size limit, memory for one
  * chunk). Returns the keys of the terms found. fs errors propagate
- * unwrapped, so callers can test `.code` (ENOENT: no file, so nothing in it).
+ * unwrapped, so callers can test `.code` (ENOENT: no file, so nothing in
+ * it); a file that is not UTF-8 or UTF-16LE text rejects with a
+ * RawTextEncodingError.
  */
 export async function searchFileText(path: string, terms: readonly RawTextTerm[]): Promise<Set<string>> {
   const search = new RawTextSearch(terms);
   if (search.done) return search.finish();
-  const stream = createReadStream(path, { encoding: 'utf8', highWaterMark: CHUNK_SIZE });
+  const encoding = await textEncodingOf(path);
+  const stream = createReadStream(path, { encoding, highWaterMark: CHUNK_SIZE });
   try {
     for await (const piece of stream) {
+      if ((piece as string).includes('\u0000')) {
+        throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
+      }
       search.push(piece as string);
       if (search.done) break;
     }
