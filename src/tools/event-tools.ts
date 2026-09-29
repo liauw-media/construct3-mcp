@@ -246,6 +246,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         name: z.string().describe('Parameter name'),
         type: z.enum(['number', 'string', 'boolean']).describe('Parameter type'),
       })).optional().describe('For functions: parameter definitions. Names are refused like in the editor: a name that matches, ignoring case, a global variable of the project, another parameter of the function or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
+      functionReturnType: z.enum(['none', 'number', 'string', 'any']).optional()
+        .describe('For functions: the editor\'s "Return type" (default "none"); a function with a return type sets its value with the Functions "Set return value" action'),
+      functionIsAsync: z.boolean().optional().describe('For functions: the editor\'s "Asynchronous" option, so a call can be waited for with "Wait for previous actions to complete" (default false)'),
+      functionCopyPicked: z.boolean().optional().describe('For functions: the editor\'s "Copy picked" option, which passes the instances picked where the function is called into the function (default false)'),
       variableName: z.string().max(200).optional().describe('For variables: name of the new global variable. Refused like in the editor: a name that matches, ignoring case, any event variable or function parameter in the project or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
       variableType: z.enum(['number', 'string', 'boolean']).optional().describe('For variables: variable type'),
       initialValue: z.string().max(500).optional().default('').describe('For variables: initial value'),
@@ -291,7 +295,11 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
                   }))
                 )
               : undefined;
-            event = createFunctionEvent(args.functionName, sid, paramsWithSids);
+            event = createFunctionEvent(args.functionName, sid, paramsWithSids, {
+              returnType: args.functionReturnType,
+              isAsync: args.functionIsAsync,
+              copyPicked: args.functionCopyPicked,
+            });
             break;
           }
           case 'variable': {

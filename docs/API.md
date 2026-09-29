@@ -555,6 +555,9 @@ Add a structural event to an existing event sheet.
 | `title` | string | For groups | Group title |
 | `functionName` | string | For functions | Function name |
 | `functionParams` | array | For functions | `[{ name, type }]` (names checked, see below) |
+| `functionReturnType` | enum | No | For functions: `"none"` \| `"number"` \| `"string"` \| `"any"`, the editor's *Return type* (default: `"none"`). The function sets its value with the Functions *Set return value* action |
+| `functionIsAsync` | boolean | No | For functions: the editor's *Asynchronous* option, so a call can be waited for with *Wait for previous actions to complete* (default: false) |
+| `functionCopyPicked` | boolean | No | For functions: the editor's *Copy picked* option, which passes the instances picked where the function is called into the function (default: false) |
 | `variableName` | string | For variables | Variable name (checked, see below) |
 | `variableType` | enum | For variables | `"number"` \| `"string"` \| `"boolean"` |
 | `initialValue` | string | For variables | Initial value |

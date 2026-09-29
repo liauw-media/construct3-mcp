@@ -140,7 +140,7 @@ node dist/index.js /path/to/your/project.c3proj
 | Tool | Description |
 |------|-------------|
 | `create_event_sheet` | Create a new event sheet with optional includes; refuses names that differ from an existing sheet only in case |
-| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); the names of a new (global) variable and of function parameters are checked like in the editor |
+| `add_event_to_sheet` | Add a group, function, variable, include, or comment to a sheet (load-time checked); functions take the editor's return type, *Asynchronous* and *Copy picked* options; the names of a new (global) variable and of function parameters are checked like in the editor |
 | `add_event_block` | Add a block event with conditions + actions (gameplay logic), written in the editor's own shapes: sub-events (also without conditions), else/else-if blocks, OR blocks, function calls, script actions, comment rows; refuses writes that break the checked editor load-time rules (expression syntax, empty expressions, trigger placement) and warns where Else cannot stand (after a triggered event) |
 | `update_event_block` | Update an existing block: modify/add/remove actions and conditions, make it an else or OR block (load-time checked) |
 | `update_event_block_action` | Replace the parameters of one action in a block (by block SID and action index; function call arguments as an array; load-time checked) |

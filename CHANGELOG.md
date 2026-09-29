@@ -6,6 +6,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ### Added
 
+- `add_event_to_sheet` takes the function options `functionReturnType` (`none`, `number`, `string`, `any`), `functionIsAsync` and `functionCopyPicked`, the editor's *Return type*, *Asynchronous* and *Copy picked*, instead of always writing `none`/`false`/`false` (#49).
 - `validate_project` returns `complete` and `unscannedFiles`: `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable), and `unscannedFiles` names those files. `valid` keeps its meaning: no errors in the files that were checked (#49).
 
 ### Fixed
