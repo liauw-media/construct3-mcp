@@ -74,6 +74,10 @@ import {
 } from '../construct3/event-shapes.js';
 import {
   findReferencesLeftByDelete,
+  findVariableReferencesLostByChange,
+  recordVariableScopes,
+  variablesDeclaredIn,
+  mapCopiedAces,
   definesFunctionsOrVariables,
   countDeleteReferences,
   namesVisibleToOtherSheets,
@@ -125,6 +129,13 @@ const DANGLING_KIND_LABELS: Record<DeleteReferenceKind, string> = {
   'event-variable': 'condition(s)/action(s) reading or setting it',
   'variable-expression': 'expression(s) using it by name',
 };
+
+/** What happens to the uses a move takes out of their variable's scope (see findVariableReferencesLostByChange). */
+const SCOPE_LOSS_CONSEQUENCE =
+  'A variable that is not at the top level of a sheet is local: only the events beside it and below them see it. ' +
+  'After loading a project, Construct 3 resolves these names and throws "cannot find event variable" when one is ' +
+  'not in scope (loader code; whether the project then fails to open has not been confirmed in the editor), and an ' +
+  'expression that uses it by name would name a variable that is not there.';
 
 /**
  * One sentence per deleted function or variable that is still referenced
@@ -1032,7 +1043,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'move_events_between_sheets',
-    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet.',
+    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet. Refuses (unless force=true) a move that takes an event variable out of the scope of events that use it, e.g. a used global variable moved into a group (targetGroupPath), where it is a local variable; the uses are listed. Other event sheets that could not be parsed are searched as text for such a global variable.',
     {
       sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
       targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
@@ -1044,6 +1055,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       deleteSource: z.boolean().optional().default(false).describe('If true, remove the events from the source sheet after copying (move semantics). A copy or move that would leave two event variables or function parameters whose names match ignoring case in one scope is refused, e.g. a copy of a global variable (its original keeps the name)'),
       targetGroupPath: z.string().max(500).optional().describe('Insert into a group in the target sheet by title path (e.g. "Movement > Collision"), matched like groupPath of add_event_block'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert events in the target sheet or group'),
+      force: z.boolean().optional().default(false).describe('If true, move even when events still use an event variable the move takes out of their scope (the uses are listed in "references" and a warning, and left dangling)'),
     },
     async (args) => {
       try {
@@ -1144,6 +1156,16 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Source events are only replaced (never mutated), the target is edited in place
         const targetBefore = snapshotEvents(targetSheetData.events);
 
+        // Where the uses of the variables the events declare resolve now, per
+        // condition/action (compared by identity), for the scope check below
+        const otherSheets = await readEventSheetsFresh(reader, [
+          [args.sourceSheet, sourceEvents as unknown as C3Event[]],
+          [args.targetSheet, targetEvents as unknown as C3Event[]],
+        ]);
+        const movedVariables = variablesDeclaredIn(eventsToMove);
+        const scopesBefore = recordVariableScopes(otherSheets, movedVariables);
+        const globalsBefore = topLevelVariableNames(otherSheets);
+
         // Determine target insertion array
         let insertTarget: Record<string, unknown>[];
         if (args.targetGroupPath) {
@@ -1175,11 +1197,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Event variable names: copies keep their names (the editor renames a
         // pasted variable whose name is taken), so refuse a copy or move that
         // would leave two names in one scope that the editor treats as the same
-        const sheetsBefore = await readEventSheetsFresh(reader, [
-          [args.sourceSheet, sourceEvents as unknown as C3Event[]],
-          [args.targetSheet, targetBefore],
-        ]);
-        const sheetsAfter = new Map(sheetsBefore);
+        const sheetsBefore = new Map(otherSheets);
+        sheetsBefore.set(args.targetSheet, targetBefore);
+        const sheetsAfter = new Map(otherSheets);
         sheetsAfter.set(args.sourceSheet, sourceSheetData.events);
         sheetsAfter.set(args.targetSheet, targetSheetData.events);
         const nameClashes = findNewEventVariableNameClashes(
@@ -1204,10 +1224,59 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           return toolError(loadRuleErrorMessage(loadCheck.errors));
         }
 
+        // Uses of an event variable that the move takes out of their scope,
+        // e.g. a used global variable moved into a group, where it is local
+        // (issue #38). Copies are compared with the events they were copied from.
+        const copiedAces = mapCopiedAces(eventsToMove, copiedEvents);
+        const lost = findVariableReferencesLostByChange(scopesBefore, sheetsAfter, ace => copiedAces.get(ace) ?? ace);
+        const lostCount = countDeleteReferences(lost);
+        // Global variables that are global no longer: sheets that could not be parsed may use them
+        const globalsAfter = topLevelVariableNames(sheetsAfter);
+        const noLongerGlobal = [...movedVariables]
+          .filter(([key]) => globalsBefore.has(key) && !globalsAfter.has(key))
+          .map(([, name]) => name);
+        let unscanned: UnscannedFileReport[] = [];
+        if (noLongerGlobal.length > 0) {
+          const allSheets = await reader.readAllEventSheets();
+          const skipped = unscannedFilesOf('eventSheets', await reader.listEventSheets(), allSheets, reader.getReadFailures('eventSheets'))
+            .filter(f => f.name !== args.sourceSheet && f.name !== args.targetSheet);
+          unscanned = await checkUnscannedFiles(reader, skipped, [
+            { categories: ['eventSheets'], allOf: [noLongerGlobal.map(n => nameTerm(n))] },
+          ]);
+        }
+        const unscannedBlock = blocksWithoutForce(unscanned);
+        const whereLost = 'where it is no longer in scope after the move';
+        if ((lostCount > 0 || unscannedBlock) && !args.force) {
+          sourceSheetData.events = sourceEvents as unknown as C3Event[];
+          targetSheetData.events = targetBefore;
+          const reasons = [
+            ...(lostCount > 0 ? [`${describeDanglingReferences(lost, whereLost)} ${SCOPE_LOSS_CONSEQUENCE}`] : []),
+            ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+          ];
+          return toolResult({
+            success: false,
+            sourceSheet: args.sourceSheet,
+            targetSheet: args.targetSheet,
+            category: 'eventsheet',
+            action: 'move_blocked',
+            message: `${reasons.join(' ')} Move the events that use it along, pick another place (a global variable stays global at the top level of a sheet), or use force=true to move anyway. Nothing was written.`,
+            references: danglingReferenceList(lost),
+            ...unscannedFields(unscanned),
+          });
+        }
+
         // Copies keep their SIDs, so a copied event whose SID the target already
         // has leaves several events with that SID there. The editor opens such
         // sheets, so this is a warning, not a refusal.
         const warnings = [...loadCheck.warnings];
+        if (lostCount > 0) {
+          warnings.push(`Moved with force=true: ${describeDanglingReferences(lost, whereLost)} ` +
+            `${SCOPE_LOSS_CONSEQUENCE} Fix them before opening the project in Construct 3.`);
+        }
+        if (!lost.complete) {
+          warnings.push('The check for uses of the moved event variables stopped at its traversal limit; uses further on were not checked.');
+        }
+        warnings.push(...unscannedWarnings(unscanned, 'Moved'));
         const sharedSids = copiedSidsWarning(args.targetSheet, targetSheetData.events as unknown as Record<string, unknown>[], copiedEvents);
         if (sharedSids) warnings.push(sharedSids);
 
@@ -1232,6 +1301,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           deleteSource: args.deleteSource,
           backupFiles: [targetBackup, ...(sourceBackup ? [sourceBackup] : [])].filter(Boolean),
           warnings: warnings.length > 0 ? warnings : undefined,
+          ...(lostCount > 0 ? { references: danglingReferenceList(lost) } : {}),
+          ...unscannedFields(unscanned),
         });
       } catch (error) {
         console.error('[move_events_between_sheets] failed:', error);
@@ -1916,6 +1987,18 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       }
     }
   );
+}
+
+/** Lower-cased names of the variables at the top level of the sheets (the global variables). */
+function topLevelVariableNames(sheets: ReadonlyMap<string, readonly C3Event[]>): Set<string> {
+  const names = new Set<string>();
+  for (const events of sheets.values()) {
+    for (const event of events) {
+      const name = (event as { name?: unknown }).name;
+      if (event.eventType === 'variable' && typeof name === 'string') names.add(name.toLowerCase());
+    }
+  }
+  return names;
 }
 
 /** SIDs listed in the copied-SIDs warning; the rest are counted. */

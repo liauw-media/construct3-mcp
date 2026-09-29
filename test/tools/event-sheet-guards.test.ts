@@ -214,3 +214,88 @@ describe('delete_event_sheet and the functions and global variables the sheet de
     expect(await sheetExists('Corrupt')).toBe(false);
   });
 });
+
+// ─── move_events_between_sheets and variable scope (#38) ────
+
+describe('move_events_between_sheets and event variables taken out of scope (#38)', () => {
+  const SCORE_SID = 782000000000001;
+  const USER_SID = 782000000000002;
+
+  /** MainSheet: global Score (first) used by the fixture block's sibling; Other: group G. */
+  async function setUp(otherEvents: unknown[] = [group('G', 782000000000010, [])]): Promise<void> {
+    const main = await readSheet('MainSheet');
+    main.events.unshift(variable('Score', SCORE_SID));
+    main.events.push(block(USER_SID, [
+      { id: 'add-to-eventvar', objectClass: 'System', sid: 782000000000003, parameters: { variable: 'Score', value: '1' } },
+      setX('Score * 2', 782000000000004),
+    ], [compareVar('score', 782000000000005)]));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await addSheet('Other', otherEvents);
+  }
+
+  it('refuses to move a used global variable into a group, lists the uses, and moves it with force (the #38 repro)', async () => {
+    await setUp();
+    await startServer();
+    const before = await readFile(join(tmpDir, 'eventSheets', 'Other.json'), 'utf-8');
+
+    const blocked = await call('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [SCORE_SID], deleteSource: true, targetGroupPath: 'G',
+    });
+    expect(blocked.success).toBe(false);
+    expect(blocked.action).toBe('move_blocked');
+    expect(blocked.message).toContain('Event variable "Score" is still used 3 time(s) where it is no longer in scope after the move');
+    expect(blocked.message).toContain('cannot find event variable');
+    expect(blocked.references.variableReferences.map((r: any) => [r.variable, r.via, r.sheet, r.path, r.sid])).toEqual([
+      ['Score', 'event-variable', 'MainSheet', 'block > condition:0', USER_SID],
+      ['Score', 'event-variable', 'MainSheet', 'block > action:0', USER_SID],
+      ['Score', 'expression', 'MainSheet', 'block > action:1', USER_SID],
+    ]);
+    expect(await readFile(join(tmpDir, 'eventSheets', 'Other.json'), 'utf-8')).toBe(before);
+    expect((await readSheet('MainSheet')).events[0].name).toBe('Score');
+
+    const forced = await call('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [SCORE_SID], deleteSource: true, targetGroupPath: 'G', force: true,
+    });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toContain('Moved with force=true: Event variable "Score" is still used 3 time(s)');
+    expect(forced.references.variableReferences).toHaveLength(3);
+    expect((await readSheet('Other')).events[0].children.map((e: any) => e.name)).toEqual(['Score']);
+  });
+
+  it('moves a used global variable to the top level of another sheet, where it stays global', async () => {
+    await setUp();
+    await startServer();
+    const result = await call('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [SCORE_SID], deleteSource: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.references).toBeUndefined();
+  });
+
+  it('moves a global variable into a group together with the events that use it', async () => {
+    await setUp();
+    await startServer();
+    const result = await call('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [SCORE_SID, USER_SID], deleteSource: true, targetGroupPath: 'G',
+    });
+    expect(result.success).toBe(true);
+    expect(result.warnings ?? []).not.toContainEqual(expect.stringContaining('no longer in scope'));
+  });
+
+  it('refuses when an event sheet that could not be parsed names the global variable', async () => {
+    const main = await readSheet('MainSheet');
+    main.events.unshift(variable('Score', SCORE_SID));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await addSheet('Other', [group('G', 782000000000010, [])]);
+    await addBrokenSheet('Broken', [block(782000000000020, [setX('Score + 1', 782000000000021)])]);
+    await startServer();
+
+    const blocked = await call('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [SCORE_SID], deleteSource: true, targetGroupPath: 'G',
+    });
+    expect(blocked.action).toBe('move_blocked');
+    expect(blocked.unscannedFiles).toEqual([
+      { file: 'eventSheets/Broken', reason: 'not valid JSON', textSearch: 'possible-use', names: ['Score'] },
+    ]);
+  });
+});

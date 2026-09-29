@@ -4,6 +4,10 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `move_events_between_sheets` has `force`, to move an event variable out of the scope of events that use it anyway (see Fixed) (#38).
+
 ### Changed
 
 - `delete_event_sheet` returns `references.callers` and `references.variableReferences` (as `delete_event_from_sheet` does) when other sheets use the functions or global variables of the sheet, next to `includedBy` and `boundLayouts`; with `force` it returns them in `references` as well (#58).
@@ -11,6 +15,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 ### Fixed
 
 - `delete_event_sheet` refuses without `force` while other event sheets call a function the sheet defines (*Call function* actions, function map registrations, `Functions.Name(...)` expression calls) or use one of its global variables (System conditions and actions on the variable, expressions that use it by name), and lists these uses; with `force` it deletes and names the uses it leaves behind. Before, it checked only includes and layout bindings and left such calls and variable references dangling without a word, which the editor's loader answers with *invalid function name*, *cannot find function* or *cannot find event variable*. The check is the one `delete_event_from_sheet` runs, with the whole sheet deleted: a use that a function or global of the same name in another sheet still resolves does not count, nor do local variables. Event sheets that could not be parsed are searched as text for these functions and globals too, and a sheet to delete that could not be parsed itself refuses without `force`, since what it defines is unknown (#58).
+
+- `move_events_between_sheets` refuses without `force` a move that takes an event variable out of the scope of events that use it. Before, a used global variable moved into a group (`targetGroupPath`) became a local variable of that group without a warning, and every event elsewhere that used it was left naming a variable the editor's loader cannot find (*cannot find event variable*); the documentation even called moving a global variable fine. The refusal (`move_blocked`) lists the uses in `references.variableReferences` (the checks of `delete_event_from_sheet`, comparing where each use resolves before and after the move), and with `force` the move goes ahead and names them. Event sheets that could not be parsed are searched as text for a global variable the move makes local (#38).
 
 ## [1.9.2] - 2026-09-29
 

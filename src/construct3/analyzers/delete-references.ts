@@ -394,6 +394,121 @@ export function findReferencesLeftByDelete(
   return report;
 }
 
+// ─── Moves ───────────────────────────────────────────────────
+
+/**
+ * Where the uses of some event variables resolve before a change, per
+ * condition/action (compared by identity): recorded by recordVariableScopes()
+ * before the change, checked by findVariableReferencesLostByChange() after it.
+ */
+export interface VariableScopeRecord {
+  /** Lower-cased name → the name as declared */
+  variables: ReadonlyMap<string, string>;
+  /** Condition/action → the lower-cased names it uses that resolved there */
+  resolved: Map<object, Set<string>>;
+  complete: boolean;
+}
+
+/** Lower-cased name → name of the event variables declared in `events` or below them. */
+export function variablesDeclaredIn(events: readonly object[]): Map<string, string> {
+  const names = new Map<string, string>();
+  const stack: Array<{ ev: unknown; depth: number }> = events.map(ev => ({ ev, depth: 0 }));
+  let nodes = 0;
+  while (stack.length > 0) {
+    const { ev, depth } = stack.pop()!;
+    if (!isRecord(ev) || depth > MAX_DEPTH || ++nodes > MAX_NODES) continue;
+    if (ev.eventType === 'variable' && typeof ev.name === 'string' && !names.has(ev.name.toLowerCase())) {
+      names.set(ev.name.toLowerCase(), ev.name);
+    }
+    for (const child of childList(ev)) stack.push({ ev: child, depth: depth + 1 });
+  }
+  return names;
+}
+
+/**
+ * Record, before a change, which uses of `variables` (lower-cased name →
+ * name) in `sheets` resolve: the System event variable ACEs and expressions
+ * that findReferencesLeftByDelete looks at, with the same scope rules.
+ */
+export function recordVariableScopes(
+  sheets: ReadonlyMap<string, unknown>,
+  variables: ReadonlyMap<string, string>,
+): VariableScopeRecord {
+  const record: VariableScopeRecord = { variables, resolved: new Map(), complete: true };
+  if (variables.size === 0) return record;
+  const globals = globalVariableNames(sheets);
+  const mentions = mentionsAny([...variables.keys()]);
+  record.complete = walkAces(sheets, new Set(), site => {
+    for (const use of variableNamesUsedBy(site.ace, site.kind, mentions)) {
+      const key = use.name.toLowerCase();
+      if (!variables.has(key) || !variableInScope(key, site, globals)) continue;
+      const names = record.resolved.get(site.ace) ?? new Set<string>();
+      names.add(key);
+      record.resolved.set(site.ace, names);
+    }
+  });
+  return record;
+}
+
+/**
+ * The uses of the recorded variables that resolved before a change and no
+ * longer resolve in `sheets` after it, e.g. the users of a global variable
+ * that a move put into a group, where it is a local variable. Conditions and
+ * actions are compared by identity; `originalOf` maps a copied condition or
+ * action (in copied events) to the one it was copied from. Reported like the
+ * variables of findReferencesLeftByDelete; `functions` stays empty, since a
+ * moved or copied function block is still visible in every sheet.
+ */
+export function findVariableReferencesLostByChange(
+  before: VariableScopeRecord,
+  sheets: ReadonlyMap<string, unknown>,
+  originalOf: (ace: object) => object = ace => ace,
+): DeleteReferenceReport {
+  const report: DeleteReferenceReport = { functions: [], variables: [], complete: before.complete };
+  if (before.resolved.size === 0) return report;
+  const globals = globalVariableNames(sheets);
+  const mentions = mentionsAny([...before.variables.keys()]);
+  const refs = new Map<string, DeleteReference[]>();
+  const complete = walkAces(sheets, new Set(), site => {
+    const resolvedBefore = before.resolved.get(originalOf(site.ace));
+    if (!resolvedBefore) return;
+    for (const use of variableNamesUsedBy(site.ace, site.kind, mentions)) {
+      const key = use.name.toLowerCase();
+      if (!resolvedBefore.has(key) || variableInScope(key, site, globals)) continue;
+      addReference(refs, key, referenceAt(site, use.kind));
+    }
+  });
+  if (!complete) report.complete = false;
+  for (const [key, references] of refs) report.variables.push({ name: before.variables.get(key)!, references });
+  return report;
+}
+
+/**
+ * Map each condition and action of `copies[i]` (and of its sub-events) to
+ * the one at the same place in `originals[i]`, for events copied as a deep
+ * clone.
+ */
+export function mapCopiedAces(originals: readonly object[], copies: readonly object[]): Map<object, object> {
+  const map = new Map<object, object>();
+  const stack: Array<{ a: unknown; b: unknown; depth: number }> = copies.map((b, i) => ({ a: originals[i], b, depth: 0 }));
+  let nodes = 0;
+  while (stack.length > 0) {
+    const { a, b, depth } = stack.pop()!;
+    if (!isRecord(a) || !isRecord(b) || depth > MAX_DEPTH || ++nodes > MAX_NODES) continue;
+    for (const key of ['conditions', 'actions'] as const) {
+      const listA = a[key];
+      const listB = b[key];
+      if (!Array.isArray(listA) || !Array.isArray(listB)) continue;
+      listB.forEach((ace, i) => {
+        if (isRecord(ace) && isRecord(listA[i])) map.set(ace, listA[i] as object);
+      });
+    }
+    const childrenA = childList(a);
+    childList(b).forEach((child, i) => stack.push({ a: childrenA[i], b: child, depth: depth + 1 }));
+  }
+  return map;
+}
+
 /**
  * The names other event sheets can use of what deleting `event` removes: the
  * functions it holds (function blocks are visible in every sheet) and, when
