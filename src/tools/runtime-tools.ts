@@ -947,17 +947,18 @@ print(json.dumps({
         // setting is required. "Auto" turns the worker off when the project
         // uses scripts (manual, "Projects" > "Use worker"), which it does
         // once the bridge is injected.
-        const useWorker = projectData.useWorker ?? 'auto';
-        const runsInWorker = useWorker === 'worker' || useWorker === 'yes';
-        const runsOnPage = useWorker === 'dom' || useWorker === 'no';
+        // Stored as "auto", "dom" (No) or "worker" (Yes); older files hold a boolean.
+        const useWorker: unknown = projectData.useWorker ?? 'auto';
+        const runsInWorker = useWorker === 'worker' || useWorker === 'yes' || useWorker === true;
+        const runsOnPage = useWorker === 'dom' || useWorker === 'no' || useWorker === false;
         checks.push({
           check: 'workerMode',
           status: 'ok',
           detail: runsOnPage
-            ? `useWorker is "${useWorker}": the runtime and the bridge run on the page.`
+            ? `useWorker is ${JSON.stringify(useWorker)}: the runtime and the bridge run on the page.`
             : runsInWorker
-              ? `useWorker is "${useWorker}": the runtime and the bridge run in a worker; connect_to_game reaches the bridge there (bridgeContext "worker"), input and screenshots go to the page.`
-              : `useWorker is "${useWorker}": Construct turns the worker off when the project uses scripts, which it does with the bridge injected, so the runtime runs on the page; without scripts it would run in a worker, which connect_to_game reaches as well.`,
+              ? `useWorker is ${JSON.stringify(useWorker)}: the runtime and the bridge run in a worker; connect_to_game reaches the bridge there (bridgeContext "worker"), input and screenshots go to the page.`
+              : `useWorker is ${JSON.stringify(useWorker)}: Construct turns the worker off when the project uses scripts, which it does with the bridge injected, so the runtime runs on the page; without scripts it would run in a worker, which connect_to_game reaches as well.`,
         });
 
         // Inject bridge if requested

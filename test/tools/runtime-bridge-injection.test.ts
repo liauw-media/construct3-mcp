@@ -260,7 +260,7 @@ describe('pack_project', () => {
 });
 
 describe('export_for_preview', () => {
-  async function withUseWorker(value: string): Promise<string> {
+  async function withUseWorker(value: string | boolean): Promise<string> {
     const dir = await copyFixture('minimal-project');
     const project = await readProject(dir);
     project.useWorker = value;
@@ -269,12 +269,13 @@ describe('export_for_preview', () => {
   }
 
   it('does not warn about "Use worker": auto runs on the page with the bridge, worker is reached there', async () => {
-    for (const [useWorker, detail] of [['auto', /scripts/u], ['dom', /page/u], ['worker', /worker/u]] as const) {
+    for (const [useWorker, detail] of [['auto', /scripts/u], ['dom', /page/u], ['worker', /worker/u], [false, /run on the page/u], [true, /in a worker/u]] as const) {
       const server = await tools(await withUseWorker(useWorker));
       const result = payload(await server.callTool('export_for_preview', { injectBridge: true }));
       const check = result.checks.find((c: { check: string }) => c.check === 'workerMode');
-      expect(check.status, useWorker).toBe('ok');
-      expect(check.detail, useWorker).toMatch(detail);
+      expect(check.status, String(useWorker)).toBe('ok');
+      expect(check.detail, String(useWorker)).toMatch(detail);
+      if (typeof useWorker === 'boolean') expect(check.detail).not.toMatch(/would run in a worker/u);
       expect(result.nextSteps.join(' ')).toContain('serve_preview');
     }
   });
