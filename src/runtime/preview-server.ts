@@ -17,7 +17,7 @@ import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import WebSocket from 'ws';
+import { webSocketClass } from './cdp-client.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -302,13 +302,19 @@ async function waitForDebugger(port: number, timeoutMs: number, child: ChildProc
 /** Ask a running browser to close through its CDP endpoint; resolves false when it could not be reached. */
 async function browserClose(webSocketDebuggerUrl: string): Promise<boolean> {
   return new Promise(done => {
-    const socket = new WebSocket(webSocketDebuggerUrl);
-    const timer = setTimeout(() => { socket.terminate(); done(false); }, 2000);
-    socket.once('open', () => {
+    let socket: InstanceType<typeof globalThis.WebSocket>;
+    try {
+      socket = new (webSocketClass())(webSocketDebuggerUrl);
+    } catch {
+      done(false);
+      return;
+    }
+    const timer = setTimeout(() => { socket.close(); done(false); }, 2000);
+    socket.addEventListener('open', () => {
       socket.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
-      setTimeout(() => { clearTimeout(timer); socket.terminate(); done(true); }, 300);
-    });
-    socket.once('error', () => { clearTimeout(timer); done(false); });
+      setTimeout(() => { clearTimeout(timer); socket.close(); done(true); }, 300);
+    }, { once: true });
+    socket.addEventListener('error', () => { clearTimeout(timer); done(false); }, { once: true });
   });
 }
 

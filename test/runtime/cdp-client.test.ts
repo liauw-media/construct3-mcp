@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { WebSocketServer, type WebSocket } from "ws";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { TestWebSocketServer, type TestWebSocket } from "../helpers/ws-server.js";
 import { RuntimeConnectionManager } from "../../src/runtime/cdp-client.js";
 import { registerRuntimeTools, type RuntimeToolController } from "../../src/tools/runtime-tools.js";
 import { MockServer } from "../mocks/mock-server.js";
@@ -18,6 +18,8 @@ interface FakeCdpOptions {
   includePageTarget?: boolean;
   canvasGeometry?: Record<string, number> | null;
   resultResponseDelayMs?: number;
+  /** Answer Page.captureScreenshot with this many image bytes instead of the echoed parameters. */
+  screenshotBytes?: number;
 }
 
 interface FakeCdp {
@@ -40,8 +42,8 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
   const commandCounts = new Map<string, number>();
   const cdpCommands: Array<{ method: string; params: Record<string, unknown> }> = [];
   let connectionCount = 0;
-  const sockets = new Set<WebSocket>();
-  const webSockets = new WebSocketServer({ noServer: true });
+  const sockets = new Set<TestWebSocket>();
+  const webSockets = new TestWebSocketServer();
   const httpServer = createServer((request, response) => {
     if (request.url !== "/json/list") {
       response.writeHead(404).end();
@@ -70,11 +72,11 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     });
   });
 
-  webSockets.on("connection", (socket) => {
+  webSockets.on("connection", (socket: TestWebSocket) => {
     connectionCount++;
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
-    socket.on("message", (raw) => {
+    socket.on("message", (raw: Buffer) => {
       const request = JSON.parse(raw.toString()) as {
         id: number;
         method: string;
@@ -84,9 +86,11 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
         cdpCommands.push({ method: request.method, params: request.params ?? {} });
         // A screenshot answers with the parameters it was given, so a test can
         // read the format and clip back out of the "image" file.
-        const result = request.method === "Page.captureScreenshot"
-          ? { data: Buffer.from(`image:${JSON.stringify(request.params ?? {})}`).toString("base64") }
-          : {};
+        const result = request.method !== "Page.captureScreenshot"
+          ? {}
+          : options.screenshotBytes !== undefined
+            ? { data: Buffer.alloc(options.screenshotBytes, 0x5a).toString("base64") }
+            : { data: Buffer.from(`image:${JSON.stringify(request.params ?? {})}`).toString("base64") };
         socket.send(JSON.stringify({ id: request.id, result }));
         return;
       }
@@ -320,6 +324,22 @@ describe("connect_to_game", () => {
     await controller.close();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fake.activeConnectionCount()).toBe(0);
+  });
+
+  it("names the Node.js version it needs when there is no built-in WebSocket client", async () => {
+    const fake = await startFakeCdp();
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    vi.stubGlobal("WebSocket", undefined);
+    try {
+      const result = await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Node.js 22");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(fake.connectionCount()).toBe(0);
   });
 
   it("rejects mixed direct and discovery connection inputs", async () => {
@@ -765,6 +785,28 @@ describe("screenshot_game", () => {
       expect(canvas.clip).toEqual({ x: 40, y: 25.5, width: 320, height: 240 });
       expect(await readFile(canvas.path, "utf8")).toBe('image:{"format":"jpeg","quality":80,"clip":{"x":40,"y":25.5,"width":320,"height":240,"scale":1}}');
       expect(canvas.bytes).toBeGreaterThan(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+  it("keeps the connection when a screenshot message is larger than 4 MiB", async () => {
+    // 5 MiB of image data is about 6.7 MiB of base64 in one CDP message.
+    const fake = await startFakeCdp({ screenshotBytes: 5 * 1024 * 1024 });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+    const dir = await mkdtemp(join(tmpdir(), "c3-shot-"));
+    try {
+      const shot = await server.callTool("screenshot_game", {
+        connectionId: connected.connectionId, outputPath: join(dir, "big.png"),
+      });
+      expect(shot.content[0].text).not.toMatch(/payload|closed/iu);
+      expect(parseToolResult(shot).bytes).toBe(5 * 1024 * 1024);
+      const called = parseToolResult(await server.callTool("call_bridge", {
+        connectionId: connected.connectionId, command: "ping", pollIntervalMs: 10, timeoutMs: 500,
+      }));
+      expect(called.result).toEqual({ pong: true });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -4,10 +4,12 @@
  * The client intentionally implements only the CDP methods the runtime tools
  * need. Keeping the protocol surface small avoids a heavyweight browser
  * automation dependency while still supporting persistent game connections.
+ * It talks to the browser through the WebSocket client Node.js has built in
+ * from version 22, which puts no limit on the size of a message (a
+ * screenshot arrives as one base64 message of several MiB).
  */
 
 import { randomUUID } from "node:crypto";
-import WebSocket, { type RawData } from "ws";
 
 const BRIDGE_POLL_INTERVAL_MS = 100;
 const CDP_CALL_TIMEOUT_MS = 5_000;
@@ -214,10 +216,31 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function rawDataToString(data: RawData): string {
-  if (Buffer.isBuffer(data)) return data.toString("utf8");
-  if (Array.isArray(data)) return Buffer.concat(data).toString("utf8");
-  return Buffer.from(data).toString("utf8");
+type WebSocketClient = InstanceType<typeof globalThis.WebSocket>;
+
+/** The WebSocket class Node.js provides from version 22, or an error naming the version needed. */
+export function webSocketClass(): typeof globalThis.WebSocket {
+  const constructor = (globalThis as { WebSocket?: typeof globalThis.WebSocket }).WebSocket;
+  if (typeof constructor !== "function") {
+    throw new Error(
+      `The runtime connection needs the WebSocket client built into Node.js 22 and later; this server runs on Node.js ${process.version}. Start it with Node.js 22 or later.`,
+    );
+  }
+  return constructor;
+}
+
+function messageText(data: unknown): string | undefined {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+  return undefined;
+}
+
+function eventMessage(event: unknown): string {
+  const candidate = event as { message?: unknown; error?: { message?: unknown } } | null;
+  if (candidate && typeof candidate.message === "string" && candidate.message) return candidate.message;
+  if (candidate?.error && typeof candidate.error.message === "string") return candidate.error.message;
+  return "unknown WebSocket error";
 }
 
 function scriptLiteral(value: unknown): string {
@@ -427,7 +450,7 @@ async function discoverPageTarget(
 }
 
 class CdpConnection {
-  private readonly socket: WebSocket;
+  private readonly socket: WebSocketClient;
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private opened = false;
@@ -435,10 +458,9 @@ class CdpConnection {
   private onDisconnect?: () => void;
 
   constructor(endpoint: string) {
-    this.socket = new WebSocket(endpoint, {
-      maxPayload: 4 * 1024 * 1024,
-      perMessageDeflate: false,
-    });
+    const WebSocketImpl = webSocketClass();
+    this.socket = new WebSocketImpl(endpoint);
+    this.socket.binaryType = "arraybuffer";
   }
 
   setDisconnectHandler(handler: () => void): void {
@@ -449,41 +471,42 @@ class CdpConnection {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
-        this.socket.terminate();
+        this.terminate();
         reject(new Error(`CDP WebSocket connection timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
       const cleanup = () => {
         clearTimeout(timer);
-        this.socket.off("open", handleOpen);
-        this.socket.off("error", handleError);
-        this.socket.off("close", handleEarlyClose);
+        this.socket.removeEventListener("open", handleOpen);
+        this.socket.removeEventListener("error", handleError);
+        this.socket.removeEventListener("close", handleEarlyClose);
       };
       const handleOpen = () => {
         cleanup();
         this.opened = true;
-        this.socket.on("message", this.handleMessage);
-        this.socket.on("close", this.handleClose);
-        this.socket.on("error", this.handleSocketError);
+        this.socket.addEventListener("message", this.handleMessage);
+        this.socket.addEventListener("close", this.handleClose);
+        this.socket.addEventListener("error", this.handleSocketError);
         resolve();
       };
-      const handleError = (error: Error) => {
+      const handleError = (event: unknown) => {
         cleanup();
-        reject(new Error(`CDP WebSocket connection failed: ${error.message}`));
+        this.terminate();
+        reject(new Error(`CDP WebSocket connection failed: ${eventMessage(event)}`));
       };
       const handleEarlyClose = () => {
         cleanup();
         reject(new Error("CDP WebSocket closed before the connection was established"));
       };
 
-      this.socket.once("open", handleOpen);
-      this.socket.once("error", handleError);
-      this.socket.once("close", handleEarlyClose);
+      this.socket.addEventListener("open", handleOpen);
+      this.socket.addEventListener("error", handleError);
+      this.socket.addEventListener("close", handleEarlyClose);
     });
   }
 
   isOpen(): boolean {
-    return this.opened && !this.disconnected && this.socket.readyState === WebSocket.OPEN;
+    return this.opened && !this.disconnected && this.socket.readyState === this.socket.OPEN;
   }
 
   async evaluateJson<T>(expression: string, timeoutMs = CDP_CALL_TIMEOUT_MS): Promise<T> {
@@ -527,23 +550,27 @@ class CdpConnection {
   }
 
   async close(): Promise<void> {
-    if (this.disconnected || this.socket.readyState === WebSocket.CLOSED) return;
+    if (this.disconnected || this.socket.readyState === this.socket.CLOSED) return;
 
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.socket.terminate();
-        resolve();
-      }, 250);
-      this.socket.once("close", () => {
+      const timer = setTimeout(resolve, 250);
+      this.socket.addEventListener("close", () => {
         clearTimeout(timer);
         resolve();
-      });
-      this.socket.close(1000, "disconnect_from_game");
+      }, { once: true });
+      this.terminate();
     });
   }
 
+  /** Start closing the socket without waiting for the browser's answer. */
   terminate(): void {
-    if (this.socket.readyState !== WebSocket.CLOSED) this.socket.terminate();
+    const state = this.socket.readyState;
+    if (state === this.socket.CLOSED || state === this.socket.CLOSING) return;
+    try {
+      this.socket.close(1000, "disconnect_from_game");
+    } catch {
+      // closing an unopened socket can throw; it is going away either way
+    }
   }
 
   private async request<T>(
@@ -566,21 +593,22 @@ class CdpConnection {
         timer,
       });
 
-      this.socket.send(JSON.stringify({ id, method, params }), (error) => {
-        if (!error) return;
-        const pending = this.pending.get(id);
-        if (!pending) return;
-        clearTimeout(pending.timer);
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        clearTimeout(timer);
         this.pending.delete(id);
-        pending.reject(new Error(`Failed to send CDP ${method}: ${error.message}`));
-      });
+        reject(new Error(`Failed to send CDP ${method}: ${error instanceof Error ? error.message : String(error)}`));
+      }
     });
   }
 
-  private readonly handleMessage = (data: RawData): void => {
+  private readonly handleMessage = (event: { data: unknown }): void => {
+    const text = messageText(event.data);
+    if (text === undefined) return;
     let message: CdpResponse;
     try {
-      message = JSON.parse(rawDataToString(data)) as CdpResponse;
+      message = JSON.parse(text) as CdpResponse;
     } catch {
       return;
     }
@@ -603,9 +631,9 @@ class CdpConnection {
     this.disconnect(new Error("CDP WebSocket connection closed"));
   };
 
-  private readonly handleSocketError = (error: Error): void => {
-    this.disconnect(new Error(`CDP WebSocket error: ${error.message}`));
-    if (this.socket.readyState !== WebSocket.CLOSED) this.socket.terminate();
+  private readonly handleSocketError = (event: unknown): void => {
+    this.disconnect(new Error(`CDP WebSocket error: ${eventMessage(event)}`));
+    this.terminate();
   };
 
   private disconnect(reason: Error): void {
