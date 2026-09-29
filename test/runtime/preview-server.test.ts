@@ -5,7 +5,8 @@
  * only the executable discovery rules are.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -87,6 +88,54 @@ describe('PreviewServer', () => {
     await server.stop();
     cleanups.pop();
     await expect(fetch(server.url)).rejects.toThrow();
+  });
+});
+
+/** GET `path` from 127.0.0.1:`port` with the given Host header (fetch cannot set one). */
+function getWithHost(port: number, path: string, host: string): Promise<number> {
+  return new Promise((done, fail) => {
+    const req = request({ host: '127.0.0.1', port, path, headers: { host } }, (response) => {
+      response.resume();
+      done(response.statusCode ?? 0);
+    });
+    req.on('error', fail);
+    req.end();
+  });
+}
+
+describe('PreviewServer boundaries', () => {
+  it('answers only requests addressed to this machine by name (DNS rebinding)', async () => {
+    const { game } = await makeExport();
+    const server = await PreviewServer.start({ folder: game });
+    cleanups.push(() => server.stop());
+    for (const host of [`127.0.0.1:${server.port}`, `localhost:${server.port}`, `LOCALHOST:${server.port}`, `[::1]:${server.port}`, '127.0.0.1']) {
+      expect(await getWithHost(server.port, '/', host)).toBe(200);
+    }
+    for (const host of [`attacker.example:${server.port}`, 'attacker.example', `127.0.0.1.nip.io:${server.port}`, `localhost.attacker.example:${server.port}`, `10.0.0.5:${server.port}`]) {
+      expect(await getWithHost(server.port, '/', host)).toBe(403);
+    }
+  });
+
+  it('does not follow a junction or symbolic link out of the export folder', async () => {
+    const { root, game } = await makeExport();
+    const outside = join(root, 'outside');
+    await mkdir(outside);
+    await writeFile(join(outside, 'secret2.txt'), 'not served either', 'utf8');
+    const inside = join(game, 'assets');
+    await mkdir(inside);
+    await writeFile(join(inside, 'a.txt'), 'served', 'utf8');
+    // A junction needs no privilege on Windows; elsewhere a directory symlink.
+    const type = process.platform === 'win32' ? 'junction' : 'dir';
+    await symlink(outside, join(game, 'linked'), type);
+    await symlink(inside, join(game, 'alias'), type);
+    const server = await PreviewServer.start({ folder: game });
+    cleanups.push(() => server.stop());
+
+    expect((await fetch(server.url + 'linked/secret2.txt')).status).toBe(404);
+    // A link that stays inside the export is fine.
+    const alias = await fetch(server.url + 'alias/a.txt');
+    expect(alias.status).toBe(200);
+    expect(await alias.text()).toBe('served');
   });
 });
 

@@ -14,7 +14,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
@@ -132,7 +132,26 @@ export function isLoopbackHost(host: string): boolean {
   return bare === 'localhost' || bare === '::1' || /^127\.\d+\.\d+\.\d+$/.test(bare);
 }
 
-/** Map a request path onto a file under `root`, or undefined when it escapes or is missing. */
+/**
+ * True when a request's Host header names this machine (127.0.0.1, localhost
+ * or [::1], any port). Anything else is refused, so a page on another site
+ * that points its own host name at 127.0.0.1 (DNS rebinding) cannot read the
+ * export through the browser.
+ */
+export function isAllowedHostHeader(host: string | undefined): boolean {
+  if (!host) return false;
+  const match = /^(\[[^\]]*\]|[^:]+)(?::\d{1,5})?$/u.exec(host.trim());
+  if (!match) return false;
+  const name = match[1].toLowerCase();
+  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]';
+}
+
+/**
+ * Map a request path onto a file under `root`, or undefined when it escapes
+ * or is missing. `root` is the export folder's real path; the file's real
+ * path must lie under it too, so a junction or symbolic link in the export
+ * that leads out of it is not followed.
+ */
 async function resolveFile(root: string, requestPath: string): Promise<string | undefined> {
   let decoded: string;
   try {
@@ -149,7 +168,9 @@ async function resolveFile(root: string, requestPath: string): Promise<string | 
       file = join(file, 'index.html');
       info = await stat(file);
     }
-    return info.isFile() ? file : undefined;
+    if (!info.isFile()) return undefined;
+    const real = await realpath(file);
+    return real.startsWith(root + sep) ? real : undefined;
   } catch {
     return undefined;
   }
@@ -173,7 +194,7 @@ export class PreviewServer {
   }
 
   static async start(options: ServePreviewOptions): Promise<PreviewServer> {
-    const root = await checkExportFolder(options.folder);
+    const root = await realpath(await checkExportFolder(options.folder));
     const host = PREVIEW_HOST;
     let instance: PreviewServer | undefined;
     const server = createServer((request, response) => {
@@ -223,6 +244,10 @@ export class PreviewServer {
 }
 
 async function serve(root: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!isAllowedHostHeader(request.headers.host)) {
+    response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('Host not allowed');
+    return;
+  }
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     response.writeHead(405, { allow: 'GET, HEAD' }).end();
     return;
