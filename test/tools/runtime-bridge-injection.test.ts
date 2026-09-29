@@ -235,6 +235,30 @@ describe('inject_runtime_bridge and remove_runtime_bridge on script files as use
   });
 });
 
+describe('pack_project', () => {
+  it('says, like export_for_preview, that the packed project carries an active bridge and that the main script got an import line', async () => {
+    const dir = await copyFixture('minimal-project');
+    const project = await readProject(dir);
+    project.rootFileFolders.script.items.push({ name: 'main.js', type: 'application/javascript', sid: 402118576391205, 'script-info': { purpose: 'main' } });
+    await writeFile(join(dir, 'project.c3proj'), JSON.stringify(project, null, '\t'), 'utf8');
+    await mkdir(join(dir, 'scripts'), { recursive: true });
+    await writeFile(join(dir, 'scripts', 'main.js'), 'runOnStartup(async (runtime) => {});\n', 'utf8');
+    const server = await tools(dir);
+    const out = join(dir, '..', `${dir.split(/[\\/]/u).pop()}.c3p`);
+    dirs.push(out);
+
+    const packed = payload(await server.callTool('pack_project', { outputPath: out }));
+    expect(packed).toMatchObject({ bridgeInjected: true, loadedAs: 'import', mainScript: 'main.js', importAdded: true });
+    expect(packed.warning).toMatch(/remove_runtime_bridge/u);
+
+    expect(payload(await server.callTool('export_for_preview', {}))).toMatchObject({ loadedAs: 'import', mainScript: 'main.js', importAdded: false });
+
+    const plain = payload(await server.callTool('pack_project', { outputPath: out, injectBridge: false }));
+    expect(plain.loadedAs).toBeUndefined();
+    expect(plain.warning).toBeUndefined();
+  });
+});
+
 describe('export_for_preview', () => {
   async function withUseWorker(value: string): Promise<string> {
     const dir = await copyFixture('minimal-project');

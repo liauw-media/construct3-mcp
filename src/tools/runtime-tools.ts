@@ -368,6 +368,14 @@ async function uninstallBridge(projectDir: string, c3projPath: string): Promise<
   return { entries, importRemoved: imports.length > 0, scriptsChanged: imports.map(change => change.path) };
 }
 
+/** The result fields that say how the bridge was installed, as inject_runtime_bridge reports them. */
+function installFields(install: BridgeInstall): Record<string, unknown> {
+  return {
+    loadedAs: install.loadedAs,
+    ...(install.mainScript ? { mainScript: install.mainScript, importAdded: install.importAdded } : {}),
+  };
+}
+
 function loadingMessage(install: BridgeInstall): string {
   if (install.loadedAs === 'main') {
     return 'The bridge is registered as the project\'s main script (it had none), so Construct loads it on startup.';
@@ -398,8 +406,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           injected: true,
           path: join(projectDir, getBridgeScriptPath()),
           registered: install.registered,
-          loadedAs: install.loadedAs,
-          ...(install.mainScript ? { mainScript: install.mainScript, importAdded: install.importAdded } : {}),
+          ...installFields(install),
           message: loadingMessage(install),
         }, { projectWritten: true });
       } catch (error) {
@@ -954,8 +961,9 @@ print(json.dumps({
         });
 
         // Inject bridge if requested
+        let install: BridgeInstall | undefined;
         if (injectBridge) {
-          const install = await installBridge(projectDir, reader.getProjectPath());
+          install = await installBridge(projectDir, reader.getProjectPath());
           await reader.loadProject();
           checks.push({ check: 'runtimeBridge', status: install.loadedAs === 'classic' ? 'warning' : 'ok', detail: loadingMessage(install) });
         }
@@ -966,6 +974,7 @@ print(json.dumps({
           projectDir,
           runtime: projectData.runtime ?? 'c3',
           useWorker,
+          ...(install ? installFields(install) : {}),
           checks,
           nextSteps: [
             'Reload the project in the Construct editor, then either preview it in a browser started with --remote-debugging-port, or export it (Menu > Project > Export > Web (HTML5)) and serve the exported folder with serve_preview (launchBrowser: true)',
@@ -1024,18 +1033,19 @@ print(json.dumps({
 
   server.tool(
     'pack_project',
-    'Pack the C3 project folder into a .c3p file (zip archive). The .c3p can be opened directly in the Construct 3 editor. Optionally injects the runtime bridge before packing.',
+    'Pack the C3 project folder into a .c3p file (zip archive) that the Construct 3 editor opens. Unless injectBridge is false, it first adds the runtime bridge to the project itself, as inject_runtime_bridge does (the bridge file, its entry and a marked import line in the main script), so the game in the .c3p loads the bridge; the result says how (loadedAs) and warns. Pass injectBridge false to pack the project as it is, for instance to ship it.',
     {
       outputPath: z.string().describe('Output path for the .c3p file (e.g. "/tmp/game.c3p")'),
-      injectBridge: z.boolean().optional().default(true).describe('Inject the runtime bridge before packing'),
+      injectBridge: z.boolean().optional().default(true).describe('Add the runtime bridge to the project before packing (default true; it changes the project folder too, see inject_runtime_bridge)'),
     },
     async ({ outputPath, injectBridge }) => {
       try {
         const projectDir = reader.getProjectDir();
 
         // Optionally inject bridge first
+        let install: BridgeInstall | undefined;
         if (injectBridge) {
-          await installBridge(projectDir, reader.getProjectPath());
+          install = await installBridge(projectDir, reader.getProjectPath());
           await reader.loadProject();
         }
 
@@ -1057,6 +1067,10 @@ print(json.dumps({
           sizeBytes: outputStat.size,
           sizeMB: (outputStat.size / 1024 / 1024).toFixed(2),
           bridgeInjected: injectBridge,
+          ...(install ? {
+            ...installFields(install),
+            warning: `The packed game loads the runtime bridge (${loadingMessage(install)}) and exposes globalThis.__c3bridge. The project folder has the bridge now as well${install.importAdded ? `, and scripts/${install.mainScript} starts with its import line` : ''}. Before shipping, call remove_runtime_bridge and pack again with injectBridge false.`,
+          } : {}),
         }, { projectWritten: injectBridge });
       } catch (error) {
         console.error('[pack_project] failed:', error);
