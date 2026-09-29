@@ -3,7 +3,12 @@
  * Scans existing project IDs on first use, then generates unique new ones.
  */
 
-import { isFileNotFoundError, type Construct3ProjectReader } from './project-reader.js';
+import {
+  entityFolderPaths,
+  isFileNotFoundError,
+  type Construct3ProjectReader,
+  type ReadFailure,
+} from './project-reader.js';
 import type { AnimationsContainer, C3Event, Layout, RootFileFolders } from './types.js';
 import { forEachLayoutInstance, layerEntries } from './layers.js';
 
@@ -38,8 +43,10 @@ export class IdGenerator {
     const project = reader.getProject();
     this.scanContainerSids(project.rootFileFolders);
 
-    // Scan all object types
+    // Scan all object types. The read failures are taken right away: they
+    // belong to this result, and a reload by a concurrent call clears them.
     const objects = await reader.readAllObjectTypes();
+    const objectTypeFailures = reader.getReadFailures('objectTypes');
     for (const [, obj] of objects) {
       this.collectSid(obj.sid);
       // Also check behaviorTypes (C3 uses this key)
@@ -75,35 +82,16 @@ export class IdGenerator {
 
     // Scan all layouts
     const layouts = await reader.readAllLayouts();
+    const layoutFailures = reader.getReadFailures('layouts');
     for (const [, layout] of layouts) {
       this.collectSid(layout.sid);
       this.scanLayoutSids(layout);
     }
 
-    // Files the bulk readers skipped (over the size cap, unparsable, ...) still
-    // hold live UIDs: layout instances and objectTypes' singleglobal-inst.
-    // Recover them with a raw text scan so the UID high-water mark stays
-    // correct; if even the raw scan fails for a file that exists, remember it
-    // so generateUid() can refuse instead of minting a duplicate.
-    this.unscannedEntities = [];
-    for (const category of ['objectTypes', 'layouts'] as const) {
-      for (const [name, failure] of reader.getReadFailures(category)) {
-        // A registered file that does not exist provably holds no UIDs or
-        // SIDs: nothing to recover, nothing to distrust.
-        if (failure.code === 'E_FILE_NOT_FOUND') continue;
-        try {
-          const scan = await reader.scanEntityIdsRaw(category, name);
-          this.trackUid(scan.highestUid);
-          for (const sid of scan.sids) {
-            this.collectSid(sid);
-          }
-        } catch (error) {
-          // Vanished between the bulk read and this scan: same as above.
-          if (isFileNotFoundError(error)) continue;
-          this.unscannedEntities.push(`${category}/${name}`);
-        }
-      }
-    }
+    const unscanned = await this.recoverSkippedIds(reader, [
+      { category: 'objectTypes', loaded: objects, failures: objectTypeFailures },
+      { category: 'layouts', loaded: layouts, failures: layoutFailures },
+    ]);
 
     // Scan all families
     const families = await reader.readAllFamilies();
@@ -111,7 +99,54 @@ export class IdGenerator {
       this.collectSid(family.sid as number);
     }
 
+    // Assigned only now: a concurrent first call runs its own scan and must
+    // not empty this list between the scan and this call's check.
+    this.unscannedEntities = unscanned;
     this.initialized = true;
+  }
+
+  /**
+   * Registered layouts and object types that the bulk reads skipped (over the
+   * size cap, unparsable, ...) still hold live UIDs: layout instances and
+   * objectTypes' singleglobal-inst. Recover their UIDs and SIDs with a raw
+   * text scan so the UID high-water mark stays correct.
+   *
+   * Driven by the registered names, not by the failure records alone, so a
+   * skipped file is scanned even if its record went missing. Returns the
+   * files ("category/name") that exist but could not be scanned either;
+   * generateUid() refuses while there are any, instead of risking a
+   * duplicate UID.
+   */
+  private async recoverSkippedIds(
+    reader: Construct3ProjectReader,
+    sources: Array<{
+      category: 'objectTypes' | 'layouts';
+      loaded: Map<string, unknown>;
+      failures: Map<string, ReadFailure>;
+    }>,
+  ): Promise<string[]> {
+    const project = reader.getProject();
+    const unscanned: string[] = [];
+    for (const { category, loaded, failures } of sources) {
+      for (const name of entityFolderPaths(project[category]).keys()) {
+        if (loaded.has(name)) continue;
+        // A registered file that does not exist provably holds no UIDs or
+        // SIDs: nothing to recover, nothing to distrust.
+        if (failures.get(name)?.code === 'E_FILE_NOT_FOUND') continue;
+        try {
+          const scan = await reader.scanEntityIdsRaw(category, name);
+          this.trackUid(scan.highestUid);
+          for (const sid of scan.sids) {
+            this.collectSid(sid);
+          }
+        } catch (error) {
+          // No file (or it vanished since the bulk read): same as above.
+          if (isFileNotFoundError(error)) continue;
+          unscanned.push(`${category}/${name}`);
+        }
+      }
+    }
+    return unscanned;
   }
 
   /**

@@ -100,6 +100,14 @@ export function classifyReadError(error: unknown): ReadFailureCode {
   return 'E_READ_ERROR';
 }
 
+/** The record a bulk read keeps for an entity it skipped. */
+function toReadFailure(error: unknown): ReadFailure {
+  return {
+    code: classifyReadError(error),
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
 /**
  * Regex-scan raw JSON text for "uid"/"sid" values without parsing it.
  * Over-approximation (a value inside a string literal) is harmless for
@@ -136,7 +144,9 @@ export class Construct3ProjectReader {
   private familyCache: Map<string, Record<string, unknown>> | null = null;
 
   // Entities the bulk readers could not read/parse (e.g. over the size cap),
-  // keyed by category → name → typed failure. Rebuilt with each bulk read.
+  // keyed by category → name → typed failure. Each bulk read collects its own
+  // and stores them with its cached map at the end, so a reload in the middle
+  // of a read (invalidateCaches) cannot leave a cached map without them.
   private readFailures: Map<EntityCategory, Map<string, ReadFailure>> = new Map();
 
   constructor(projectPath: string) {
@@ -422,16 +432,17 @@ export class Construct3ProjectReader {
     if (this.eventSheetCache) return this.eventSheetCache;
     const names = await this.listEventSheets();
     const map = new Map<string, EventSheet>();
-    this.readFailures.delete('eventSheets');
+    const failures = new Map<string, ReadFailure>();
     for (const name of names) {
       try {
         map.set(name, await this.readEventSheet(name));
       } catch (error) {
         // Skip unreadable sheets, but record why so callers can report/recover
-        this.recordReadFailure('eventSheets', name, error);
+        failures.set(name, toReadFailure(error));
       }
     }
     this.eventSheetCache = map;
+    this.readFailures.set('eventSheets', failures);
     return map;
   }
 
@@ -442,16 +453,17 @@ export class Construct3ProjectReader {
     if (this.objectTypeCache) return this.objectTypeCache;
     const names = await this.listObjectTypes();
     const map = new Map<string, ObjectType>();
-    this.readFailures.delete('objectTypes');
+    const failures = new Map<string, ReadFailure>();
     for (const name of names) {
       try {
         map.set(name, await this.readObjectType(name));
       } catch (error) {
         // Skip unreadable objects, but record why so callers can report/recover
-        this.recordReadFailure('objectTypes', name, error);
+        failures.set(name, toReadFailure(error));
       }
     }
     this.objectTypeCache = map;
+    this.readFailures.set('objectTypes', failures);
     return map;
   }
 
@@ -462,16 +474,17 @@ export class Construct3ProjectReader {
     if (this.layoutCache) return this.layoutCache;
     const names = await this.listLayouts();
     const map = new Map<string, Layout>();
-    this.readFailures.delete('layouts');
+    const failures = new Map<string, ReadFailure>();
     for (const name of names) {
       try {
         map.set(name, await this.readLayout(name));
       } catch (error) {
         // Skip unreadable layouts, but record why so callers can report/recover
-        this.recordReadFailure('layouts', name, error);
+        failures.set(name, toReadFailure(error));
       }
     }
     this.layoutCache = map;
+    this.readFailures.set('layouts', failures);
     return map;
   }
 
@@ -482,35 +495,27 @@ export class Construct3ProjectReader {
     if (this.familyCache) return this.familyCache;
     const names = await this.listFamilies();
     const map = new Map<string, Record<string, unknown>>();
-    this.readFailures.delete('families');
+    const failures = new Map<string, ReadFailure>();
     for (const name of names) {
       try {
         map.set(name, await this.readFamily(name));
       } catch (error) {
         // Skip unreadable families, but record why so callers can report/recover
-        this.recordReadFailure('families', name, error);
+        failures.set(name, toReadFailure(error));
       }
     }
     this.familyCache = map;
+    this.readFailures.set('families', failures);
     return map;
   }
 
-  private recordReadFailure(category: EntityCategory, name: string, error: unknown): void {
-    let map = this.readFailures.get(category);
-    if (!map) {
-      map = new Map<string, ReadFailure>();
-      this.readFailures.set(category, map);
-    }
-    map.set(name, {
-      code: classifyReadError(error),
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
-
   /**
-   * Entities the last bulk read of a category could not read/parse
+   * Entities the cached bulk read of a category could not read/parse
    * (name → typed failure with a stable code and the original message).
-   * Empty until the category's readAll* has run.
+   * Empty until the category's readAll* has run, and again after
+   * invalidateCaches(). A bulk read stores its failures together with its
+   * result, so they always describe the cached map; take them right after
+   * awaiting readAll*, before a concurrent reload can clear both.
    */
   getReadFailures(category: EntityCategory): Map<string, ReadFailure> {
     return this.readFailures.get(category) ?? new Map();

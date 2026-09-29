@@ -6,7 +6,13 @@
 
 import { readdir } from 'fs/promises';
 import { join } from 'path';
-import { entityFolderPaths, entityFilePath, type Construct3ProjectReader, type EntityCategory } from '../project-reader.js';
+import {
+  entityFolderPaths,
+  entityFilePath,
+  type Construct3ProjectReader,
+  type EntityCategory,
+  type ReadFailure,
+} from '../project-reader.js';
 import type { C3Event, Construct3Project, Layout, ObjectType, EventSheet } from '../types.js';
 import { getProjectIndex, OBJECT_SID_PROPERTIES, type MemberReference, type MemberReferenceForm } from './index-builder.js';
 import { isNamelessFolder, transitionsFolderIndex } from '../timeline-folders.js';
@@ -88,12 +94,17 @@ export async function validateProjectIntegrity(
   const warnings: IntegrityIssue[] = [];
   const info: IntegrityIssue[] = [];
 
-  // Load all data once
+  // Load all data once. Each bulk read's failures are taken right away: they
+  // belong to that result, and a reload by a concurrent call clears them.
   const project = reader.getProject();
   const objects = await reader.readAllObjectTypes();
+  const objectFailures = reader.getReadFailures('objectTypes');
   const eventSheets = await reader.readAllEventSheets();
+  const sheetFailures = reader.getReadFailures('eventSheets');
   const layouts = await reader.readAllLayouts();
+  const layoutFailures = reader.getReadFailures('layouts');
   const families = await reader.readAllFamilies();
+  const familyFailures = reader.getReadFailures('families');
 
   const registeredObjects = flattenContainer(project.objectTypes);
   const registeredSheets = flattenContainer(project.eventSheets);
@@ -106,10 +117,10 @@ export async function validateProjectIntegrity(
   const unscannedFiles: string[] = [];
 
   // Error checks
-  checkFileExistence(registeredObjects, objects, 'objectTypes', reader, errors, warnings, unscannedFiles);
-  checkFileExistence(registeredSheets, eventSheets, 'eventSheets', reader, errors, warnings, unscannedFiles);
-  checkFileExistence(registeredLayouts, layouts, 'layouts', reader, errors, warnings, unscannedFiles);
-  checkFileExistence(registeredFamilies, families, 'families', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredObjects, objects, objectFailures, 'objectTypes', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredSheets, eventSheets, sheetFailures, 'eventSheets', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredLayouts, layouts, layoutFailures, 'layouts', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredFamilies, families, familyFailures, 'families', reader, errors, warnings, unscannedFiles);
   checkRequiredFieldsObjects(objects, errors);
   checkRequiredFieldsSheets(eventSheets, errors);
   checkRequiredFieldsLayouts(layouts, errors);
@@ -219,13 +230,13 @@ function withoutFsPath(message: string): string {
 function checkFileExistence(
   registered: string[],
   loaded: Map<string, unknown>,
+  readFailures: Map<string, ReadFailure>,
   category: EntityCategory,
   reader: Construct3ProjectReader,
   errors: IntegrityIssue[],
   warnings: IntegrityIssue[],
   unscannedFiles: string[]
 ): void {
-  const readFailures = reader.getReadFailures(category);
   for (const name of registered) {
     if (loaded.has(name)) continue;
     const entity = `${category}/${name}`;

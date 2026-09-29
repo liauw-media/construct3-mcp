@@ -352,3 +352,115 @@ describe('validateProjectIntegrity — real files', () => {
     expect(result.complete).toBe(false);
   });
 });
+
+// ─── Read failures under concurrent calls ────────────────────
+//
+// Tool calls run concurrently, and several (update_project_metadata,
+// register_addon, create_object's addon registration, ...) reload the project,
+// which drops the reader's caches while another call may be in the middle of a
+// bulk read. The failures a bulk read found must stay with the result it
+// returns and caches, or the ID generator and validate_project lose a skipped
+// file and treat it as absent.
+
+/**
+ * Make the next read of `name` reload the project first, as a concurrent
+ * tool call that rewrites project.c3proj would, mid bulk read.
+ */
+function reloadWhenReadingLayout(reader: Construct3ProjectReader, name: string): void {
+  const readLayout = reader.readLayout.bind(reader);
+  let reloaded = false;
+  reader.readLayout = async (layoutName: string) => {
+    if (!reloaded && layoutName === name) {
+      reloaded = true;
+      await reader.reloadProject();
+    }
+    return readLayout(layoutName);
+  };
+}
+
+describe('Read failures survive a project reload during the bulk read (real files)', () => {
+  /** Big (over the cap) is read before After, whose read triggers the reload. */
+  async function projectWithBigThenAfter(): Promise<void> {
+    await registerInProject(tmpDir, 'layouts', 'Big');
+    await writeOversizedLayout(tmpDir, 'Big', 30046);
+    await registerInProject(tmpDir, 'layouts', 'After');
+    await writeFile(join(tmpDir, 'layouts', 'After.json'), smallLayoutJson('After', 3, 540000000000000));
+  }
+
+  it('generateUid still allocates above an oversized layout', async () => {
+    await projectWithBigThenAfter();
+    const reader = await openReader(tmpDir);
+    reloadWhenReadingLayout(reader, 'After');
+
+    expect(await new IdGenerator().generateUid(reader)).toBe(30047);
+  });
+
+  it('generateUid still allocates above the singleglobal-inst UID of an oversized object type', async () => {
+    await registerInProject(tmpDir, 'objectTypes', 'BigGlobal');
+    await writeOversizedObjectType(tmpDir, 'BigGlobal', 30050);
+    const reader = await openReader(tmpDir);
+    // Object types are read first; the reload lands while the layouts are read
+    reloadWhenReadingLayout(reader, 'Layout 1');
+
+    expect(await new IdGenerator().generateUid(reader)).toBe(30051);
+  });
+
+  it('a later validate_project still reports the oversized layout as unscanned', async () => {
+    await projectWithBigThenAfter();
+    const reader = await openReader(tmpDir);
+    reloadWhenReadingLayout(reader, 'After');
+    await reader.readAllLayouts();
+
+    expect(reader.getReadFailures('layouts').get('Big')).toMatchObject({ code: 'E_FILE_TOO_LARGE' });
+    const result = await validateProjectIntegrity(reader);
+    expect(result.errors.find(e => e.entity === 'layouts/Big')).toBeUndefined();
+    expect(result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'layouts/Big')).toBeDefined();
+    expect(result.complete).toBe(false);
+  });
+
+  it('two concurrent first generateUid calls both refuse while a layout cannot be scanned', async () => {
+    await registerInProject(tmpDir, 'layouts', 'Bad');
+    await mkdir(join(tmpDir, 'layouts', 'Bad.json'));
+    const reader = await openReader(tmpDir);
+
+    // Pin the interleaving: call A has scanned Bad and waits in readAllFamilies
+    // until call B has started its own scan of Bad; B's scan waits until A is done.
+    let aInFamilies!: () => void;
+    const aReachedFamilies = new Promise<void>(resolve => { aInFamilies = resolve; });
+    let bInScan!: () => void;
+    const bReachedScan = new Promise<void>(resolve => { bInScan = resolve; });
+    let releaseB!: () => void;
+    const bReleased = new Promise<void>(resolve => { releaseB = resolve; });
+
+    const readAllFamilies = reader.readAllFamilies.bind(reader);
+    let familyReads = 0;
+    reader.readAllFamilies = async () => {
+      if (++familyReads === 1) {
+        aInFamilies();
+        await bReachedScan;
+      }
+      return readAllFamilies();
+    };
+    const scanEntityIdsRaw = reader.scanEntityIdsRaw.bind(reader);
+    let scans = 0;
+    reader.scanEntityIdsRaw = async (category, name) => {
+      if (++scans === 2) {
+        bInScan();
+        await bReleased;
+      }
+      return scanEntityIdsRaw(category, name);
+    };
+
+    const idGen = new IdGenerator();
+    const settle = (p: Promise<number>) => p.then(uid => `uid ${uid}`, (error: Error) => error.message);
+    const a = settle(idGen.generateUid(reader));
+    await aReachedFamilies;
+    const b = settle(idGen.generateUid(reader));
+
+    const resultA = await a;
+    releaseB();
+    const resultB = await b;
+    expect(resultA).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
+    expect(resultB).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
+  });
+});
