@@ -180,7 +180,7 @@ function danglingReferenceList(report: DeleteReferenceReport): Record<string, un
  */
 function parameterlessRowError(action: Record<string, unknown>, index: number): string | null {
   if (action.type === 'comment') {
-    return `Action ${index} is a comment row, which has no parameters. To change its text, remove it and add a new { type: "comment", text } with update_event_block.`;
+    return `Action ${index} is a comment row, which has no parameters. To change its text or colours, use update_event_block with updateActions [{ index: ${index}, text, "text-color", "background-color" }]: the row keeps its place and the keys it has.`;
   }
   if (action.type === 'script') {
     return `Action ${index} is a script action, which has no parameters. To change its code, remove it and add a new { type: "script", script } with update_event_block.`;
@@ -1351,9 +1351,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           parameters: z.union([boundedRecord(), z.array(functionCallArgumentSchema).max(100)]).optional()
             .describe('New parameter values — merged with existing (max 100 keys, depth 6). For a function call: an array replaces the arguments; an object keyed by position ("0", "1", …) or parameter name replaces single arguments'),
           disabled: z.boolean().optional().describe('Enable or disable this action'),
+          text: z.string().max(10_000).optional().describe('Comment rows only: the new text; the row keeps its place and colours'),
+          'text-color': commentColorSchema.nullable().optional().describe('Comment rows only: the new text colour [red, green, blue, alpha], each 0-1; null removes it'),
+          'background-color': commentColorSchema.nullable().optional().describe('Comment rows only: the new background colour [red, green, blue, alpha], each 0-1; null removes it'),
         }, {
-          errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
-        }).strict()).optional().describe('Actions to update by index'),
+          errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled, and for a comment row text, "text-color" and "background-color"; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
+        }).strict()).optional().describe('Actions to update by index. A comment row is edited in place with text, "text-color" and "background-color"'),
         updateConditions: z.array(z.object({
           index: z.number().int().min(0).describe('Condition index (0-based)'),
           parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
@@ -1517,6 +1520,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               return toolError(`Action index ${upd.index} is out of range (block has ${actions.length} action(s), indices 0-${actions.length - 1}).`);
             }
             const act = actions[upd.index];
+            const commentEdit = upd.text !== undefined || upd['text-color'] !== undefined || upd['background-color'] !== undefined;
+            if (commentEdit) {
+              if (act.type !== 'comment') {
+                return toolError(`Action ${upd.index} is not a comment row: text, "text-color" and "background-color" apply to comment rows only.`);
+              }
+              editCommentRowInPlace(act, upd);
+            }
             if (upd.parameters) {
               const rowProblem = parameterlessRowError(act, upd.index);
               if (rowProblem) return toolError(rowProblem);
@@ -2020,6 +2030,36 @@ function topLevelVariableNames(sheets: ReadonlyMap<string, readonly C3Event[]>):
     }
   }
   return names;
+}
+
+/**
+ * Edit a comment row in place: its text and colours keep their place, a new
+ * colour goes where the editor writes it ({ type, text, "text-color",
+ * "background-color" }), and null removes a colour.
+ */
+function editCommentRowInPlace(
+  row: Record<string, unknown>,
+  edit: { text?: string; 'text-color'?: number[] | null; 'background-color'?: number[] | null },
+): void {
+  if (edit.text !== undefined) row.text = edit.text;
+  for (const key of ['text-color', 'background-color'] as const) {
+    const color = edit[key];
+    if (color === undefined) continue;
+    if (color === null) {
+      delete row[key];
+    } else if (key in row) {
+      row[key] = [...color];
+    } else {
+      // After the keys the editor writes before it
+      const before = key === 'text-color' ? ['type', 'text'] : ['type', 'text', 'text-color'];
+      const entries = Object.entries(row);
+      let at = 0;
+      entries.forEach(([k], i) => { if (before.includes(k)) at = i + 1; });
+      entries.splice(at, 0, [key, [...color]]);
+      for (const k of Object.keys(row)) delete row[k];
+      for (const [k, v] of entries) row[k] = v;
+    }
+  }
 }
 
 /** SIDs listed in the copied-SIDs warning; the rest are counted. */

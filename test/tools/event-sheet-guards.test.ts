@@ -340,3 +340,69 @@ describe('add_event_to_sheet returns what it created (#38)', () => {
     });
   });
 });
+
+// ─── comment rows and function calls edited in place (#38) ──
+
+describe('comment rows and function calls edited in place (#38)', () => {
+  const BLOCK_SID = 400000000000003;
+
+  /** MainSheet's block gets `actions` after its set-position; Heal(amount) is defined. */
+  async function setUp(actions: unknown[]): Promise<void> {
+    const main = await readSheet('MainSheet');
+    main.events[0].actions.push(...actions);
+    main.events.unshift(fn('Heal', 783000000000001, {
+      functionParameters: [{ name: 'amount', type: 'number', initialValue: '0', comment: '', sid: 783000000000002 }],
+    }));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await startServer();
+  }
+  const blockActions = async () => (await readSheet('MainSheet')).events[1].actions;
+
+  it('changes the text and colours of a comment row where it stands, keeping its keys', async () => {
+    await setUp([
+      { type: 'comment', text: 'old', 'text-color': [1, 0, 0, 1], 'background-color': [1, 1, 0.5, 1] },
+      callFn('Heal', 783000000000003),
+    ]);
+
+    await call('update_event_block', { sheetName: 'MainSheet', sid: BLOCK_SID, updateActions: [{ index: 1, text: 'new' }] });
+    let actions = await blockActions();
+    expect(actions[1]).toEqual({ type: 'comment', text: 'new', 'text-color': [1, 0, 0, 1], 'background-color': [1, 1, 0.5, 1] });
+    expect(actions[2].callFunction).toBe('Heal');
+
+    await call('update_event_block', {
+      sheetName: 'MainSheet', sid: BLOCK_SID, updateActions: [{ index: 1, 'text-color': null, 'background-color': [0, 0, 1, 1] }],
+    });
+    actions = await blockActions();
+    expect(Object.entries(actions[1])).toEqual([['type', 'comment'], ['text', 'new'], ['background-color', [0, 0, 1, 1]]]);
+
+    await call('update_event_block', { sheetName: 'MainSheet', sid: BLOCK_SID, updateActions: [{ index: 1, 'text-color': [0, 1, 0, 1] }] });
+    expect(Object.keys((await blockActions())[1])).toEqual(['type', 'text', 'text-color', 'background-color']);
+  });
+
+  it('refuses text and colours on an action that is not a comment row, and points update_event_block_action to them', async () => {
+    await setUp([{ type: 'comment', text: 'note' }]);
+    expect(await callError('update_event_block', { sheetName: 'MainSheet', sid: BLOCK_SID, updateActions: [{ index: 0, text: 'x' }] }))
+      .toContain('is not a comment row');
+    expect(await callError('update_event_block_action', { sheetName: 'MainSheet', blockSid: BLOCK_SID, actionIndex: 1, parameters: { text: 'x' } }))
+      .toContain('updateActions [{ index: 1, text, "text-color", "background-color" }]');
+  });
+
+  it('an update with the same arguments leaves a disabled call\'s keys in their order', async () => {
+    const stored = { callFunction: 'Heal', sid: 783000000000003, parameters: ['5'], disabled: true };
+    await setUp([stored]);
+    const text = async () => JSON.stringify((await blockActions())[1]);
+    const before = await text();
+
+    await call('update_event_block', { sheetName: 'MainSheet', sid: BLOCK_SID, updateActions: [{ index: 1, parameters: ['5'] }] });
+    expect(await text()).toBe(before);
+    await call('update_event_block', { sheetName: 'MainSheet', sid: BLOCK_SID, updateActions: [{ index: 1, parameters: {} }] });
+    expect(await text()).toBe(before);
+    await call('update_event_block_action', { sheetName: 'MainSheet', blockSid: BLOCK_SID, actionIndex: 1, parameters: ['5'] });
+    expect(await text()).toBe(before);
+
+    await call('update_event_block_action', { sheetName: 'MainSheet', blockSid: BLOCK_SID, actionIndex: 1, parameters: ['7'] });
+    expect(Object.entries((await blockActions())[1])).toEqual([
+      ['callFunction', 'Heal'], ['sid', 783000000000003], ['parameters', ['7']], ['disabled', true],
+    ]);
+  });
+});

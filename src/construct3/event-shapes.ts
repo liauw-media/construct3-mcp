@@ -512,11 +512,19 @@ export function isLegacyFunctionCall(ace: Readonly<Record<string, unknown>>): bo
 }
 
 /**
- * Rewrite a stored function call in place into the editor's shape: drops the
- * legacy keys and writes `args` as positional parameters, in the order
- * callFunction, sid, disabled, other keys, parameters.
+ * Write `args` as the positional parameters of a stored function call. A call
+ * already in the editor's shape keeps its keys where they are (only the
+ * arguments change, so an update with the same arguments changes nothing); a
+ * call in an older shape is rewritten into the editor's shape: the legacy
+ * keys dropped, in the order callFunction, sid, disabled, other keys,
+ * parameters.
  */
 export function rewriteFunctionCallInPlace(ace: Record<string, unknown>, args: FunctionArgument[]): void {
+  if (!isLegacyFunctionCall(ace)) {
+    if (args.length > 0) ace.parameters = args;
+    else delete ace.parameters;
+    return;
+  }
   const others = Object.entries(ace).filter(([k]) =>
     !['callFunction', 'sid', 'disabled', 'parameters', ...LEGACY_CALL_KEYS].includes(k));
   const { callFunction, sid, disabled } = ace;
