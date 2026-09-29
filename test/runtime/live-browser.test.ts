@@ -100,21 +100,23 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
   }, LIVE_TIMEOUT_MS);
 
   it('removes the browser profile on stop_preview and on shutdown, and shuts down within 2 s', async () => {
+    // Profiles this test made that are still there (an earlier test's leftover may go meanwhile).
     const before = await profileDirs();
+    const newProfileDirs = async () => (await profileDirs()).filter((name) => !before.includes(name));
     const folder = await fakeExport('dom');
     const { server, controller } = register();
 
     const first = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
     parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: first.browser.cdpPort, timeoutMs: 15_000 }));
     parse(await server.callTool('stop_preview', { serverId: first.serverId }));
-    expect(await profileDirs()).toEqual(before);
+    expect(await newProfileDirs()).toEqual([]);
 
     const second = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
     parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: second.browser.cdpPort, timeoutMs: 15_000 }));
     const startedAt = Date.now();
     await controller.close();
     expect(Date.now() - startedAt).toBeLessThan(2_000);
-    expect(await profileDirs()).toEqual(before);
+    expect(await newProfileDirs()).toEqual([]);
   }, LIVE_TIMEOUT_MS);
 
   it('delivers keys with their real codes, typed text as key presses, and a canvas click', async () => {
