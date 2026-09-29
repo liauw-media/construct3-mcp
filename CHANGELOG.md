@@ -6,6 +6,8 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ### Added
 
+- `add_event_to_sheet` returns the SID of the group, function or variable it creates (`generatedSid`), the SIDs of a new function's parameters (`functionParameterSids`, `[{ name, sid }]`), the new event's `eventPath` and `backupFile`, so the next call can address the event without reading the sheet again (#38).
+- `add_event_to_sheet` takes `commentTextColor` and `commentBackgroundColor` for a comment event, written as the editor's `"text-color"` and `"background-color"`; before, a comment event could only get colours as a sub-event of `add_event_block` (#38).
 - `move_events_between_sheets` has `force`, to move an event variable out of the scope of events that use it anyway (see Fixed) (#38).
 
 ### Changed

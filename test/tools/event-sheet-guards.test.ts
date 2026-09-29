@@ -299,3 +299,44 @@ describe('move_events_between_sheets and event variables taken out of scope (#38
     ]);
   });
 });
+
+// ─── add_event_to_sheet results (#38) ───────────────────────
+
+describe('add_event_to_sheet returns what it created (#38)', () => {
+  it('returns the SID of a new group, function (with its parameter SIDs) and variable, the eventPath and backupFile', async () => {
+    await startServer();
+
+    const g = await call('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'group', title: 'Movement' });
+    const f = await call('add_event_to_sheet', {
+      sheetName: 'MainSheet', eventType: 'function', functionName: 'Heal',
+      functionParams: [{ name: 'amount', type: 'number' }, { name: 'source', type: 'string' }],
+    });
+    const v = await call('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'variable', variableName: 'Score', position: 'start' });
+    const c = await call('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'comment', commentText: 'note' });
+
+    const events = (await readSheet('MainSheet')).events;
+    expect(g.generatedSid).toBe(events[2].sid);
+    expect(g.eventPath).toBe('events[1]');
+    expect(f.generatedSid).toBe(events[3].sid);
+    expect(f.functionParameterSids).toEqual([
+      { name: 'amount', sid: events[3].functionParameters[0].sid },
+      { name: 'source', sid: events[3].functionParameters[1].sid },
+    ]);
+    expect(v.generatedSid).toBe(events[0].sid);
+    expect(v.eventPath).toBe('events[0]');
+    expect(c.generatedSid).toBeUndefined();
+    expect(c.eventPath).toBe('events[4]');
+    for (const r of [g, f, v, c]) expect(r.backupFile).toMatch(/MainSheet\.json\.bak$/);
+  });
+
+  it('writes the colours of a comment event in the editor\'s keys', async () => {
+    await startServer();
+    await call('add_event_to_sheet', {
+      sheetName: 'MainSheet', eventType: 'comment', commentText: 'Boss fight',
+      commentTextColor: [1, 0, 0, 1], commentBackgroundColor: [1, 1, 0.5, 1],
+    });
+    expect((await readSheet('MainSheet')).events.at(-1)).toEqual({
+      eventType: 'comment', text: 'Boss fight', 'text-color': [1, 0, 0, 1], 'background-color': [1, 1, 0.5, 1],
+    });
+  });
+});

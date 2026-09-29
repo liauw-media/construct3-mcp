@@ -584,9 +584,13 @@ Add a structural event to an existing event sheet.
 | `initialValue` | string | For variables | Initial value |
 | `includeSheet` | string | For includes | Sheet to include (validated) |
 | `commentText` | string | For comments | Comment text |
+| `commentTextColor` | number[] | No | For comments: the text colour, written as `"text-color"`: `[red, green, blue, alpha]`, each 0-1, as the editor saves it |
+| `commentBackgroundColor` | number[] | No | For comments: the background colour, written as `"background-color"` in the same form |
 | `position` | enum | No | `"start"` \| `"end"` (default: end) |
 
 Runs the same load-time gate as `add_event_block` before writing.
+
+Returns `generatedSid` (the SID of a new group, function or variable; includes and comments have none), `functionParameterSids` (for a function with parameters: `[{ name, sid }]` in parameter order), `eventPath` (the new event's path, e.g. `"events[3]"`, which the SID-based tools accept as `eventPath`) and `backupFile`.
 
 #### Event variable names
 

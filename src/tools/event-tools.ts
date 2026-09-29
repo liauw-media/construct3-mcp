@@ -55,6 +55,8 @@ import {
   functionCallArgumentSchema,
   unknownKeysErrorMap,
   EVENT_INPUT_DESCRIPTIONS,
+  commentColorSchema,
+  buildCommentEvent,
 } from './event-helpers.js';
 import {
   isElseCondition,
@@ -108,7 +110,6 @@ import {
   createGroupEvent,
   createFunctionEvent,
   createIncludeEvent,
-  createCommentEvent,
 } from '../construct3/templates.js';
 
 /** Per-sheet cap on change details returned by fix_legacy_behavior_keys. */
@@ -262,7 +263,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'add_event_to_sheet',
-    'Add an event (group, function, variable, include, or comment) to an event sheet',
+    'Add an event (group, function, variable, include, or comment) to the top level of an event sheet. Returns the SID of a new group, function or variable (generatedSid), the SIDs of the function\'s parameters (functionParameterSids), the new event\'s eventPath and the backupFile.',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       eventType: z.enum(['group', 'function', 'variable', 'include', 'comment']).describe('Type of event to add'),
@@ -281,6 +282,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       initialValue: z.string().max(500).optional().default('').describe('For variables: initial value'),
       includeSheet: z.string().max(200).optional().describe('For includes: sheet name to include'),
       commentText: z.string().max(2000).optional().describe('For comments: comment text'),
+      commentTextColor: commentColorSchema.optional().describe('For comments: the text colour, written as "text-color": [red, green, blue, alpha], each 0-1, as the editor saves it'),
+      commentBackgroundColor: commentColorSchema.optional().describe('For comments: the background colour, written as "background-color": [red, green, blue, alpha], each 0-1'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event'),
     },
     async (args) => {
@@ -295,12 +298,16 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const beforeEvents = snapshotEvents(sheet.events);
 
         let event: C3Event;
+        // SIDs of what is created, for the result (includes and comments have none)
+        let generatedSid: number | undefined;
+        let functionParameterSids: Array<{ name: string; sid: number }> | undefined;
 
         switch (args.eventType) {
           case 'group': {
             if (!args.title) return toolError('title is required for group events');
             const sid = await idGen.generateSid(reader);
             event = createGroupEvent(args.title, sid);
+            generatedSid = sid;
             break;
           }
           case 'function': {
@@ -326,6 +333,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               isAsync: args.functionIsAsync,
               copyPicked: args.functionCopyPicked,
             });
+            generatedSid = sid;
+            functionParameterSids = paramsWithSids?.map(p => ({ name: p.name, sid: p.sid }));
             break;
           }
           case 'variable': {
@@ -338,6 +347,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             const defaultValue = args.initialValue || (varType === 'number' ? '0' : varType === 'boolean' ? 'false' : '');
             const sid = await idGen.generateSid(reader);
             event = createVariableEvent(args.variableName, varType, defaultValue, sid);
+            generatedSid = sid;
             break;
           }
           case 'include': {
@@ -351,7 +361,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
           case 'comment': {
             if (!args.commentText) return toolError('commentText is required for comment events');
-            event = createCommentEvent(args.commentText);
+            event = buildCommentEvent({
+              eventType: 'comment',
+              text: args.commentText,
+              'text-color': args.commentTextColor,
+              'background-color': args.commentBackgroundColor,
+            });
             break;
           }
         }
@@ -370,7 +385,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
-        await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
         resetProjectIndex(reader);
 
         const result: WriteResult = {
@@ -378,9 +393,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           entity: args.sheetName,
           category: 'eventsheet',
           action: 'updated',
+          ...(generatedSid !== undefined ? { generatedSid } : {}),
           warnings: loadCheck.warnings.length > 0 ? loadCheck.warnings : undefined,
+          backupFile: backupPath,
         };
-        return toolResult(result);
+        return toolResult({
+          ...result,
+          ...(functionParameterSids && functionParameterSids.length > 0 ? { functionParameterSids } : {}),
+          eventPath: `events[${sheet.events.indexOf(event)}]`,
+        });
       } catch (error) {
         console.error('[add_event_to_sheet] failed:', error);
         return toolError(`Error adding event: ${error instanceof Error ? error.message : String(error)}`);
