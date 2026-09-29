@@ -838,6 +838,20 @@ interface StoredConnection {
   cdp: CdpConnection;
   /** The attached worker session the bridge answers in; undefined when it runs on the page. */
   bridgeSessionId?: string;
+  /**
+   * The token this connection left in the bridge's global scope
+   * (globalThis.__c3mcpConnections); gone after a reload or navigation, which
+   * starts the game over. Undefined when it could not be left.
+   */
+  pageMark?: string;
+}
+
+const RELOADED_MESSAGE = "The game page reloaded or navigated since connect_to_game: the game started over, its state and event subscriptions are gone, and this connection is closed. Call connect_to_game again.";
+
+/** A check, for the start of a bridge expression, that returns `answer` as JSON when the page no longer holds `mark`. */
+function markCheck(mark: string | undefined, answer: Record<string, unknown>): string {
+  if (mark === undefined) return "";
+  return `if (!(globalThis.__c3mcpConnections && globalThis.__c3mcpConnections.has(${scriptLiteral(mark)}))) return ${scriptLiteral(JSON.stringify(answer))};`;
 }
 
 interface FoundBridge {
@@ -849,6 +863,8 @@ const HIDDEN_PAGE_WARNING = "The game page is hidden (a background tab or a mini
 
 export class RuntimeConnectionManager {
   private readonly connections = new Map<string, StoredConnection>();
+  /** Connections closed because the page reloaded, so a later call can say so. */
+  private readonly reloaded = new Set<string>();
 
   async connect(options: ConnectToGameOptions): Promise<ConnectedGame> {
     if (options.cdpEndpoint && (options.host !== undefined || options.port !== undefined || options.urlContains !== undefined || options.pageUrl !== undefined)) {
@@ -942,12 +958,15 @@ export class RuntimeConnectionManager {
       // A worker that ends (the page reloaded or closed) takes the bridge with it.
       connection.onEvent((method, params) => {
         if (method === "Target.detachedFromTarget" && params.sessionId === found.sessionId) {
-          this.connections.delete(connectionId);
-          connection.terminate();
+          this.endAfterReload(connectionId, connection);
         }
       });
     }
-    this.connections.set(connectionId, { cdp: connection, bridgeSessionId: found.sessionId });
+    this.connections.set(connectionId, {
+      cdp: connection,
+      bridgeSessionId: found.sessionId,
+      pageMark: await this.markPage(connection, found.sessionId),
+    });
     const pageVisible = await this.bringToFront(connection);
     return {
       connectionId,
@@ -958,6 +977,33 @@ export class RuntimeConnectionManager {
       gameState: found.state,
       target: candidate.target,
     };
+  }
+
+  /**
+   * Leave a token in the global scope the bridge runs in. A reload or
+   * navigation replaces that scope, and with it the game: bridge calls check
+   * the token and report the restart instead of driving a new game as if it
+   * were the old one. Undefined when the token could not be left.
+   */
+  private async markPage(connection: CdpConnection, sessionId: string | undefined): Promise<string | undefined> {
+    const mark = randomUUID();
+    try {
+      await connection.evaluateJson<unknown>(
+        `(() => { (globalThis.__c3mcpConnections ??= new Set()).add(${scriptLiteral(mark)}); return JSON.stringify(true); })()`,
+        2_000,
+        sessionId,
+      );
+      return mark;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Close a connection whose page reloaded; later calls with its ID say so. */
+  private endAfterReload(connectionId: string, connection: CdpConnection): void {
+    this.connections.delete(connectionId);
+    this.reloaded.add(connectionId);
+    connection.terminate();
   }
 
   /**
@@ -980,6 +1026,7 @@ export class RuntimeConnectionManager {
   }
 
   async disconnect(connectionId: string): Promise<boolean> {
+    if (this.reloaded.delete(connectionId)) return true;
     const stored = this.connections.get(connectionId);
     if (!stored) return false;
     this.connections.delete(connectionId);
@@ -988,9 +1035,10 @@ export class RuntimeConnectionManager {
   }
 
   async callBridge(options: BridgeCallOptions): Promise<BridgeCallResult> {
-    const { cdp: connection, bridgeSessionId } = this.getStored(options.connectionId);
+    const { cdp: connection, bridgeSessionId, pageMark } = this.getStored(options.connectionId);
     const startedAt = Date.now();
     const submitExpression = `(() => {
+      ${markCheck(pageMark, { reloaded: true })}
       const bridge = globalThis.__c3bridge;
       if (!bridge || typeof bridge.submit !== "function") {
         return JSON.stringify({ error: "Runtime bridge is not ready" });
@@ -998,11 +1046,15 @@ export class RuntimeConnectionManager {
       const id = bridge.submit(${scriptLiteral(options.command)}, ${scriptLiteral(options.args)});
       return JSON.stringify({ id });
     })()`;
-    const submitted = await connection.evaluateJson<{ id?: unknown; error?: string }>(
+    const submitted = await connection.evaluateJson<{ id?: unknown; error?: string; reloaded?: boolean }>(
       submitExpression,
       Math.min(CDP_CALL_TIMEOUT_MS, options.timeoutMs),
       bridgeSessionId,
     );
+    if (submitted.reloaded === true) {
+      this.endAfterReload(options.connectionId, connection);
+      throw new Error(RELOADED_MESSAGE);
+    }
     if (submitted.error) throw new Error(submitted.error);
     if (typeof submitted.id !== "number" || !Number.isSafeInteger(submitted.id)) {
       throw new Error("Runtime bridge returned an invalid command ID");
@@ -1010,6 +1062,7 @@ export class RuntimeConnectionManager {
 
     const commandId = submitted.id;
     const pollExpression = `(() => {
+      ${markCheck(pageMark, { bridgeReloaded: true })}
       const bridge = globalThis.__c3bridge;
       if (!bridge || typeof bridge.getResult !== "function") {
         return JSON.stringify({ bridgeError: "Runtime bridge is not ready" });
@@ -1021,6 +1074,7 @@ export class RuntimeConnectionManager {
       const remaining = options.timeoutMs - (Date.now() - startedAt);
       let polled: {
         bridgeError?: string;
+        bridgeReloaded?: boolean;
         bridgeResult?: { ok?: boolean; value?: unknown; error?: unknown } | null;
       };
       try {
@@ -1043,6 +1097,10 @@ export class RuntimeConnectionManager {
         throw error;
       }
 
+      if (polled.bridgeReloaded === true) {
+        this.endAfterReload(options.connectionId, connection);
+        throw new Error(RELOADED_MESSAGE);
+      }
       if (polled.bridgeError) throw new Error(polled.bridgeError);
       if (polled.bridgeResult !== null && polled.bridgeResult !== undefined) {
         if (polled.bridgeResult.ok !== true) {
@@ -1307,6 +1365,7 @@ export class RuntimeConnectionManager {
   async closeAll(): Promise<void> {
     const connections = [...this.connections.values()];
     this.connections.clear();
+    this.reloaded.clear();
     for (const { cdp } of connections) cdp.terminate();
   }
 
@@ -1315,6 +1374,7 @@ export class RuntimeConnectionManager {
   }
 
   private getStored(connectionId: string): StoredConnection {
+    if (this.reloaded.has(connectionId)) throw new Error(RELOADED_MESSAGE);
     const stored = this.connections.get(connectionId);
     if (!stored || !stored.cdp.isOpen()) {
       this.connections.delete(connectionId);
@@ -1330,12 +1390,17 @@ export class RuntimeConnectionManager {
   ): Promise<unknown> {
     if (condition.type === "expression") {
       // Evaluated where the bridge runs (the page, or the worker hosting the game).
-      const { cdp: connection, bridgeSessionId } = this.getStored(connectionId);
+      const { cdp: connection, bridgeSessionId, pageMark } = this.getStored(connectionId);
       const expression = `(async () => {
+        ${markCheck(pageMark, { reloaded: true })}
         const value = await (0, eval)(${scriptLiteral(condition.expr)});
         return JSON.stringify({ value: value === undefined ? null : value });
       })()`;
-      const evaluated = await connection.evaluateJson<{ value: unknown }>(expression, timeoutMs, bridgeSessionId);
+      const evaluated = await connection.evaluateJson<{ value: unknown; reloaded?: boolean }>(expression, timeoutMs, bridgeSessionId);
+      if (evaluated.reloaded === true) {
+        this.endAfterReload(connectionId, connection);
+        throw new Error(RELOADED_MESSAGE);
+      }
       return evaluated.value;
     }
 

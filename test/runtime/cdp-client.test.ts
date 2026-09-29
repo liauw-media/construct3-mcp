@@ -60,6 +60,8 @@ interface FakeCdp {
   submitSessions: () => string[];
   /** Send the held screenshot answers (holdScreenshot). */
   releaseScreenshot: () => void;
+  /** Play a reload of every page: their globals, and with them what a connection marked there, are gone. */
+  reloadPages: () => void;
   close(): Promise<void>;
 }
 
@@ -71,6 +73,8 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
   const housekeeping: Array<{ page: string; method: string }> = [];
   const submitSessions: string[] = [];
   const heldScreenshots: Array<() => void> = [];
+  // The connection marks a page's globals with a token (globalThis.__c3mcpConnections); a reload clears them.
+  const pageMarks = new Set<string>();
   const pages: FakePage[] = options.pages ?? [{ id: "page-1", url: "http://localhost/game", bridge: "page" }];
   let nextCommandId = 17;
   const resultChecks = new Map<number, number>();
@@ -157,7 +161,15 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
       const context = request.sessionId === "worker-session-1" ? "worker" : "page";
       const bridgeHere = (page.bridge ?? "page") === context;
       let value: string;
-      if (expression.includes("document.visibilityState")) {
+      const addedMark = expression.includes("__c3mcpConnections ??=") ? expression.match(/\.add\(("[^"]+")\)/u)?.[1] : undefined;
+      const checkedMark = expression.match(/__c3mcpConnections\.has\(("[^"]+")\)/u)?.[1];
+      if (addedMark) {
+        pageMarks.add(JSON.parse(addedMark) as string);
+        value = JSON.stringify(true);
+      } else if (checkedMark && !pageMarks.has(JSON.parse(checkedMark) as string)) {
+        // What the check returns when the mark is gone: the JSON string literal after it.
+        value = JSON.parse(expression.match(/__c3mcpConnections\.has\("[^"]+"\)\)\) return ("(?:\\.|[^"\\])*");/u)![1]) as string;
+      } else if (expression.includes("document.visibilityState")) {
         value = JSON.stringify(visible ? "visible" : "hidden");
       } else if (!bridgeHere && expression.includes("__c3bridge")) {
         value = JSON.stringify(null);
@@ -252,6 +264,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     housekeeping: () => [...housekeeping],
     submitSessions: () => [...submitSessions],
     releaseScreenshot: () => { for (const send of heldScreenshots.splice(0)) send(); },
+    reloadPages: () => pageMarks.clear(),
     cdpCommands: () => cdpCommands.map((command) => ({
       method: command.method,
       params: { ...command.params },
@@ -692,6 +705,34 @@ describe("call_bridge", () => {
     expect(result.content[0].text).toMatch(
       /^Failed to call runtime bridge: Runtime bridge command timed out after 120ms; it had not run yet and was withdrawn/u,
     );
+  });
+
+  it("closes the connection with a clear error once the page reloaded, instead of driving a game that started over", async () => {
+    const fake = await startFakeCdp();
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const { connectionId } = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+    const call = () => server.callTool("call_bridge", { connectionId, command: "ping", pollIntervalMs: 10, timeoutMs: 500 });
+    expect(parseToolResult(await call()).result).toEqual({ pong: true });
+
+    fake.reloadPages();
+    const after = await call();
+    expect(after.isError).toBe(true);
+    expect(after.content[0].text).toMatch(/reloaded or navigated.*connect_to_game again/u);
+    // The connection is closed, and says why the next time as well.
+    const again = await server.callTool("wait_for_condition", { connectionId, condition: { type: "globalVar", name: "Score", operator: "eq", value: 1 }, timeoutMs: 300 });
+    expect(again.isError).toBe(true);
+    expect(again.content[0].text).toMatch(/reloaded or navigated/u);
+    await vi.waitFor(() => expect(fake.activeConnectionCount()).toBe(0), { timeout: 1_000 });
+
+    // A page expression notices the reload the same way.
+    vi.stubEnv("C3MCP_ALLOW_EVAL", "1");
+    const second = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+    fake.reloadPages();
+    const expression = await server.callTool("wait_for_condition", { connectionId: second.connectionId, condition: { type: "expression", expr: "1", operator: "eq", value: 1 }, timeoutMs: 300 });
+    expect(expression.isError).toBe(true);
+    expect(expression.content[0].text).toMatch(/reloaded or navigated/u);
   });
 
   it("rejects a closed connection ID", async () => {

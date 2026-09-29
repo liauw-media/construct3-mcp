@@ -84,6 +84,16 @@ async function listenRecorder(port: number): Promise<{ requests: string[]; serve
   return { requests, server: server };
 }
 
+/** Reload a page through a CDP connection of its own, as a user pressing F5 would. */
+async function reloadPage(endpoint: string): Promise<void> {
+  const socket = new WebSocket(endpoint);
+  await new Promise((done, fail) => { socket.onopen = done; socket.onerror = fail; });
+  const answered = new Promise((done) => { socket.onmessage = done; });
+  socket.send(JSON.stringify({ id: 1, method: 'Page.reload', params: {} }));
+  await answered;
+  socket.close();
+}
+
 async function profileDirs(): Promise<string[]> {
   return (await readdir(tmpdir())).filter((name) => name.startsWith('c3mcp-chrome-')).sort();
 }
@@ -183,6 +193,27 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     // Input and the canvas stay on the page.
     expect(parse(await server.callTool('get_canvas_size', { connectionId }))).toMatchObject({ left: 100, top: 50, cssWidth: 640, cssHeight: 360 });
     parse(await server.callTool('simulate_input', { connectionId, action: { type: 'click', x: 10, y: 20 }, coordinateSpace: 'canvas' }));
+  }, LIVE_TIMEOUT_MS);
+
+  it('says the page reloaded and closes the connection, on the page and in a worker, instead of driving a new game', async () => {
+    for (const mode of ['dom', 'worker'] as const) {
+      const folder = await fakeExport(mode);
+      const { server } = register();
+      const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+      const { connectionId, bridgeContext } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+      expect(bridgeContext).toBe(mode === 'dom' ? 'page' : 'worker');
+      const call = (command: string, args: Record<string, unknown> = {}) => server.callTool('call_bridge', { connectionId, command, args });
+      parse(await call('setGlobalVar', { name: 'Score', value: 42 }));
+      expect(parse(await call('getGlobalVar', { name: 'Score' })).result).toBe(42);
+
+      await reloadPage(served.browser.pageEndpoint);
+      await vi.waitFor(async () => {
+        const after = await call('getGlobalVar', { name: 'Score' });
+        expect(after.isError, mode).toBe(true);
+        expect(after.content[0].text, mode).toMatch(/reloaded or navigated/u);
+      }, { timeout: 10_000, interval: 200 });
+      parse(await server.callTool('stop_preview', { serverId: served.serverId }));
+    }
   }, LIVE_TIMEOUT_MS);
 
   it('runs the whole chain against a game on the page, cross-origin isolated, with a screenshot over 4 MiB', async () => {
