@@ -56,7 +56,7 @@ construct3-mcp/
 │   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
-│   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes
+│   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes, frame image moves on frame insert/delete
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
@@ -67,7 +67,7 @@ construct3-mcp/
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/              # Analysis modules
-│   │       ├── index-builder.ts    # Cross-reference index (cached)
+│   │       ├── index-builder.ts    # Cross-reference index (cached per reader)
 │   │       ├── event-flow.ts       # Include hierarchy visualization, function map
 │   │       ├── object-deps.ts      # Object dependency tracking, orphaned objects
 │   │       ├── asset-usage.ts      # Asset tracking
@@ -198,7 +198,7 @@ Key things to know when working with Construct 3 project files:
 - **usedAddons** in c3proj must list every plugin, behavior, and effect used
 - **Global plugins** (Audio, AJAX, Mouse, etc.) use `singleglobal-inst` instead of layout placement
 - **Layout instances** carry a `behaviors` entry (`{ properties: {...} }`) for every behavior of their object type and of its families, family behaviors first (`instance-behaviors.ts`)
-- **Image files** are named `images/<object>-<animation>-<frame, 3 digits>.png` (TiledBg: `images/<object>.png`), the whole name lowercased
+- **Image files** are named `images/<object>-<animation>-<frame, 3 digits>.png` (TiledBg: `images/<object>.png`), the whole name lowercased; `.jpg` for a JPEG frame. The number is the frame's index, so inserting or deleting a frame renames the image files of the frames after it (`planFrameImageShift` in `animation-rename.ts`)
 - **Event shapes** follow editor-saved sheets (`event-shapes.ts`): Else is a System `else` condition at index 0 (conditions after it make an else-if), an OR block has `"isOrBlock": true` on the event, a function call is `{ callFunction, sid, parameters: [positional arguments] }` without `id`/`objectClass`, and a script action is `{ type: "script", language: "javascript", script: [lines] }`. Never write the block-level `isElse` or per-condition `isOr` keys older versions wrote
 - **Behavior conditions/actions** name their behavior under `behaviorType`; a condition or action that names its behavior only under the legacy `behavior-type` key makes the editor refuse to open the project (a leftover `behavior-type` next to a valid `behaviorType` is ignored)
 - **Timelines** are stored under `timelines/`, in folders that mirror their project-bar folders. The first nameless first-level subfolder of the container is the editor's Transitions folder: its items are transitions, stored in `timelines/transitions/` (`timeline-folders.ts`); a nameless folder anywhere else is malformed
@@ -210,10 +210,12 @@ Key things to know when working with Construct 3 project files:
 After any write operation, three caches must be cleared:
 
 1. **Reader caches** — `reader.invalidateCaches()` clears entity caches
-2. **Project index** — `resetProjectIndex()` clears the cross-reference index
+2. **Project index** — `resetProjectIndex(reader)` clears the cross-reference index of that reader's project
 3. **ID generator** — `idGen.reset()` forces re-scan of existing IDs
 
 The `ProjectWriter.invalidateAll()` method handles all three. The `addToProject()` and `removeFromProject()` methods also call `reader.reloadProject()` which re-reads the c3proj file.
+
+`getProjectIndex(reader)` caches one index per reader, so a script, test or embedding can open several projects in one process: give each project its own reader, writer and `IdGenerator` (a generator scans the project of the reader it is first called with), and open each project with one reader only: a second reader on the same project sees the other's writes neither in its caches nor in its index. A write through the writer or the event tools resets only its own project's index; `resetProjectIndex()` without a reader resets every project's index, which tests use between cases. The MCP server opens one project per process.
 
 ## Testing
 
@@ -282,6 +284,7 @@ Tests prove what the files look like, not that Construct 3 accepts them. Before 
 - [ ] Duplicate name: `create_object` with existing name — must reject
 - [ ] Case-only clash: `create_object` with an existing family's name in other case — must reject
 - [ ] Load-time gate: `add_event_block` with an unterminated string in an expression — must reject
+- [ ] Layout over 10MB: `add_instance_to_layout` on another layout allocates a UID above the big layout's, `validate_project` returns `complete: false` with the file in `unscannedFiles`
 
 ## Contributing
 

@@ -74,6 +74,17 @@ There is no usage message. Without an argument and without `C3_PROJECT_PATH`, th
 
 Same as above — use the corresponding `list_` tool to find the correct name.
 
+### "File too large (... exceeds 10MB limit)"
+
+**Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the analysis tools leave it out. `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, even when `valid` is true.
+
+New UIDs are still allocated above the UIDs in the file, so `add_instance_to_layout` and `create_object` keep working: the file is scanned as text for its UIDs and SIDs. That scan reads the whole file, again for the first new UID or SID after each write, so it costs time and memory in proportion to the file's size (for a 150MB layout, one to two seconds per call). A file too large to read into memory as text (about 512MB) cannot be scanned, and new UIDs are refused (see "Cannot generate a safe UID" below).
+
+Known gap: tools that edit the large file itself, such as `add_instance_to_layout` on that layout, report it as not found and suggest its own name.
+
+**Solutions**:
+- Check that file in the Construct 3 editor, or split a very large layout
+
 ### Stale data after editing in C3 editor
 
 **Cause**: The reader loads `project.c3proj` at startup and keeps it, so the lists of objects, event sheets and layouts (e.g. `list_objects`) stay as they were. Single entity files (an event sheet, an object type) are read from disk again, so the data can be a mix of old and new. The server reloads `project.c3proj` itself only after its own writes.
@@ -141,11 +152,25 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 - Change or delete those conditions, actions and expressions first, then remove it
 - Use `force: true` to remove it anyway (the uses are NOT changed; `validate_project` then reports them as `missing-behavior-or-variable`, except `Object.name` and `Self.name` in expressions, which the force warning lists)
 
+### "Cannot generate a safe UID: project file(s) could not be scanned"
+
+**Cause**: `add_instance_to_layout` or `create_object` (for a global plugin) needs a new UID, which must be above every UID in the project. A layout or object type named in the error is registered in `project.c3proj` and exists, but could not be read at all, not even as text (e.g. a folder where the file should be, no read access, or a file too large to read into memory as text, about 512MB), so its UIDs are unknown. Nothing was written. Files over the 10MB read limit (up to that size) and files with invalid JSON do not cause this: they are scanned as text. A registered name whose file does not exist does not cause it either.
+
+**Solutions**:
+- Fix the file named in the error (`validate_project` lists it in `unscannedFiles` and gives the reason), or remove its name from `project.c3proj` if it is not needed
+- Then restart the MCP server, so the project is scanned again (a completed write through the tools also starts a new scan)
+
 ### "... not found: names are matched with their letter case"
 
 **Cause**: `update_object_properties` or `update_family` was given a name that differs from the registered object type or family name only in letter case. On Windows and macOS such a name would open the file too, but the checks and the layout updates know the entity by its registered name only, so the call is refused.
 
 **Solution**: Use the registered name the error suggests (`list_objects`, `list_families`).
+
+### Sprite frames show the wrong image, or `validate_project` reports `frame-image`
+
+**Cause**: The editor loads a frame's image from `images/<object>-<animation>-NNN.<ext>`, NNN being the frame's index. In construct3-mcp 1.9.0 and earlier, `add_frame_to_animation` with an `index` wrote its placeholder over the image at that index (without a backup) and did not move the later images, and `delete_frame_from_animation` did not move them either: the frames after the change show their neighbour's image, the last frame after an insert has no image file (`frame-image` warning), and the last file after a delete is left over (`frame-image` info), where a later append wrote its placeholder over it.
+
+**Solution**: Later versions move the image files with their frames and keep replaced or deleted images as `<file>.bak`. For frames changed by an older version, restore the images from version control or a copy of the project, or rename the files in `images/` by hand so that each frame's file carries its index (all lowercase, `.jpg` for a JPEG frame), then run `validate_project` again. An image the old insert wrote over cannot be recovered from the project folder.
 
 ### Backup files (.bak)
 
@@ -157,6 +182,8 @@ For undo across several steps, keep the project under git and commit before each
 2. Delete or rename the corrupted file
 3. Rename the `.bak` file to remove the `.bak` extension
 4. Restart the MCP server
+
+In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files, and `validate_project` lists them as `backup-file` info.
 
 ## Build Issues
 

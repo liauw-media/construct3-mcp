@@ -82,6 +82,11 @@ class Construct3ProjectReader {
   readAllLayouts(): Promise<Map<string, Layout>>
   readAllFamilies(): Promise<Map<string, Record<string, unknown>>>
 
+  // Files the bulk reads skipped
+  getReadFailures(category): Map<string, ReadFailure>          // name → { code, message }
+  scanEntityIdsRaw(category, name): Promise<{ highestUid, sids }> // text scan, no size limit
+  getEntityRelativePath(category, name): string                 // e.g. "layouts/Levels/Title.json"
+
   // Query
   listObjectTypes(): Promise<string[]>
   listEventSheets(): Promise<string[]>
@@ -108,6 +113,8 @@ class Construct3ProjectReader {
 - **Path mapping**: Built at load time from c3proj container structures (handles subfolders)
 - **Fuzzy matching**: `findNearestName()` provides "Did you mean?" suggestions
 - **Bounded reads**: Entity and script files over 10MB are refused; a leading BOM is stripped before parsing
+- **Typed read failures**: The per-entity readers throw a `ProjectReadError` with a code (`E_FILE_TOO_LARGE`, `E_FILE_NOT_FOUND`, `E_INVALID_JSON`, `E_READ_ERROR`); the bulk `readAll*()` reads skip such files and record the code per name (`getReadFailures()`), so the ID generator and `validate_project` branch on the code, never on message text. A bulk read stores its failures together with its cached map when it finishes, and callers take them right after the read: a project reload by a concurrent tool call (`invalidateCaches()`) can then drop both, but never leave a cached map without the failures that go with it
+- **Raw ID scan**: `scanEntityIdsRaw()` reads a skipped layout or object type whole, without the size limit and without parsing, and collects its `"uid"` and `"sid"` values with a linear regex; the path goes through the same path map and `resolveProjectPath()` check as the parsed readers
 
 ### 3. Project Writer (`src/construct3/project-writer.ts`)
 
@@ -130,9 +137,15 @@ class Construct3ProjectWriter {
   // Addon management
   ensureAddonRegistered(type, id): Promise<string | undefined>
 
-  // Placeholder images
+  // Placeholder images and frame image files in images/
   writeImageFile(objectName, animationName, frameIndex, pluginId?, width?, height?): Promise<string>
   writeImageFiles(files): Promise<string[]>
+  listImageFiles(): Promise<string[]>
+  renameImageFiles(renames): Promise<void>
+  deleteImageFile(name): Promise<boolean>
+
+  // Runs the animation tools one at a time
+  withAnimationLock(fn): Promise<T>
 
   // Helpers
   getSubfolderForEntity(category, name): string | undefined
@@ -145,11 +158,12 @@ class Construct3ProjectWriter {
 - **Backup**: `.bak` file created before every overwrite or delete
 - **Atomic write**: Content goes to a `.tmp` file that is then renamed into place; an existing file keeps its name on disk, including its case (`atomic-write.ts`)
 - **No overwrite on create**: Create tools pass `createOnly`, so a new entity is never written over a file that already exists, also one whose name differs only in case
-- **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write. A failure once the backup exists (while or after replacing the file) throws an `EntityWriteError` carrying the backup path, so a change that spans several files can restore this one too (`restoreEntityFile`)
+- **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write. A failure once the backup exists (while or after replacing the file) throws an `EntityWriteError` carrying the backup path, so a change that spans several files can restore this one too (`restoreEntityFile`); its `changedByOtherWrite` tells a concurrent write (a `ConcurrentWriteError` cause) from other failures, so the caller does not restore an old backup over another write's content
 - **Project lock**: The writer's read-modify-writes of `project.c3proj` (`addToProject`, `removeFromProject`, `updateProjectProperties`, addon auto-registration) share one lock, so parallel writer calls cannot lose each other's updates
+- **Animation lock**: The animation tools run each call under `withAnimationLock()` and read the object inside it, so parallel calls cannot move each other's frame image files or write a Sprite's object file without each other's frames. Other tools that write an object file do not take it
 - **Text style**: An existing file keeps its line endings, trailing whitespace and BOM; a new file follows `project.c3proj` (`json-format.ts`)
-- **Cache invalidation**: Reader caches, project index, and ID generator all reset
-- **Image rollback**: `writeImageFiles()` deletes the images it already wrote when a later one fails
+- **Cache invalidation**: Reader caches, project index, and ID generator all reset (for the written project only)
+- **Image rollback**: `writeImageFiles()` deletes the images it already wrote when a later one fails; `renameImageFiles()` renames files in order (a name an earlier rename freed can be reused, so frame images can move along a chain), refuses to replace a file, and renames everything back when one rename fails
 
 Timelines, `register_addon` / `unregister_addon` and the runtime tools write outside the writer, with fewer of these steps; the README's Safety Model lists the differences. None of them takes the project lock, and the timeline and addon tools use the same `project.c3proj.tmp` file as the writer, so running them in parallel with other writes can lose or fail a `project.c3proj` update. Run them one at a time.
 
@@ -171,7 +185,7 @@ class IdGenerator {
 
 **SID strategy**: Random 15-digit integer (100,000,000,000,000 – 999,999,999,999,999), checked against a set of all existing SIDs scanned from the entire project. Retry up to 100 times on collision.
 
-**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment.
+**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment. Registered layouts and object types that are missing from the bulk reads (over the 10MB cap, invalid JSON) are scanned as text (`scanEntityIdsRaw`) for their UIDs and SIDs; the generator goes by the registered names, so a skipped file is scanned even when its failure record is gone. A registered file that does not exist holds no IDs and is ignored; when a file exists but even the text scan fails, `generateUid()` throws with the file names instead of risking a duplicate UID (SIDs, being random, are still generated).
 
 **imageSpriteId strategy**: Random 7-digit integer, checked against the IDs of all existing animation frames. Links an animation frame to its image file.
 
@@ -197,7 +211,7 @@ Supporting modules next to the templates:
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
 | `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
 | `construct3/instance-behaviors.ts` | The behavior entries every layout instance carries (object and family behaviors, with default property values) |
-| `construct3/animation-rename.ts` | Sprite animations in animation folders, and what renaming one changes: frame image file names, `initial-animation` of layout instances, event sheet strings naming it (counted for a warning) |
+| `construct3/animation-rename.ts` | Sprite animations in animation folders, and what renaming one changes: frame image file names, `initial-animation` of layout instances, event sheet strings naming it (counted for a warning); the frame image files that move one index up or down when a frame is inserted or deleted |
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
 | `construct3/layers.ts` | The layer tree of a layout: walks every layer and nested sub-layer and their instances (non-world instances included), finds layers and instances, compares layer names ignoring case; every walk over layers or layout instances goes through it |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
@@ -213,7 +227,7 @@ A shared cross-reference index and fifteen analysis modules, several of which bu
 
 | Module | Purpose |
 |--------|---------|
-| `index-builder.ts` | Builds and caches the project-wide cross-reference index |
+| `index-builder.ts` | Builds the project-wide cross-reference index and caches it per reader |
 | `event-flow.ts` | Include hierarchy and layout bindings (Mermaid output); function definitions and call sites |
 | `object-deps.ts` | Object usage across event sheets, layouts, families; objects not referenced anywhere |
 | `asset-usage.ts` | Sound, music, image, font, video, icon and project file usage (used, unused or not analysed); images follow the index's object usage |
@@ -230,7 +244,7 @@ A shared cross-reference index and fifteen analysis modules, several of which bu
 | `runtime-traps.ts` | Signal pairing and order, script/function-parameter traps (`find_runtime_traps`) |
 | `script-scan.ts` | Lightweight JS/TS scanner for script actions, used by the runtime trap checks |
 
-The cross-reference index (`ProjectIndex`) is cached and reset when writes occur via `resetProjectIndex()`.
+The cross-reference index (`ProjectIndex`) is cached per reader, so projects opened side by side in one process (scripts, tests, embeddings) each keep their own; a write through the writer or the event tools resets the index of its project only, via `resetProjectIndex(reader)`.
 
 ### 7. MCP Layers
 
@@ -290,7 +304,7 @@ Event sheet writes (`add_event_block`, `update_event_block`, `add_event_to_sheet
 
 ```
 Claude → get_object_dependencies({ object: "Player" })
-  → getProjectIndex(reader) (builds or returns cached index)
+  → getProjectIndex(reader) (builds or returns the index cached for this reader)
       → reader.readAllEventSheets()
       → reader.readAllLayouts()
       → reader.readAllFamilies()
@@ -334,7 +348,7 @@ The mutation tools provide extra context:
 - **Input validation**: Zod schemas on all tool parameters with length limits
 - **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
 - **Load-time gate**: The five event-editing tools listed under Write Flow reject writes that add an error the editor would refuse at load
-- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read
+- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole, again for the first ID after each write, up to the about 512MB a JavaScript string can hold; a larger file refuses new UIDs)
 
 ---
 

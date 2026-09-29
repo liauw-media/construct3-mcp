@@ -118,6 +118,16 @@ export class MockWriter {
     this.calls.push({ method: 'restoreEntityFile', args: [backupPath] });
   }
 
+  async deleteImageFile(name: string): Promise<boolean> {
+    this.calls.push({ method: 'deleteImageFile', args: [name] });
+    return false;
+  }
+
+  /** Runs `fn` right away (the real writer runs the calls one at a time) */
+  async withAnimationLock<T>(fn: () => Promise<T>): Promise<T> {
+    return fn();
+  }
+
   // Helper: get calls for a specific method
   callsFor(method: string): WriterCall[] {
     return this.calls.filter(c => c.method === method);

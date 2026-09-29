@@ -2,6 +2,32 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `validate_project` check `frame-image`: a warning for Sprite animation frames without their image file in `images/` (the name follows the frame's index and `fileType`, compared ignoring case and Unicode normalization), and info for files named like frames past an animation's last frame that no frame uses. The `backup-file` info also lists `.bak` files directly in `images/`, where the frame tools keep images (#36).
+- `add_event_to_sheet` takes the function options `functionReturnType` (`none`, `number`, `string`, `any`), `functionIsAsync` and `functionCopyPicked`, the editor's *Return type*, *Asynchronous* and *Copy picked*, instead of always writing `none`/`false`/`false` (#49).
+- `validate_project` returns `complete` and `unscannedFiles`: `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable), and `unscannedFiles` names those files (#49).
+
+### Changed
+
+- `validate_project` reports a file over the 10MB read limit as an `unscanned-file` warning instead of a wrong "missing or contains invalid JSON" error, and `valid` is `false` whenever `complete` is `false`: nothing in such a file was checked, duplicate UIDs and SIDs included, so the project is not vouched for. A project whose only finding is such a file returns `valid: false` with `summary.errors: 0` (before: `valid: false` with a wrong error) (#49).
+- `validate_project` checks the files of registered families too: a registered family whose file is missing, unreadable or not valid JSON is now a `file-existence` error, so `valid` can be `false` for a project that passed before (#49).
+- `add_event_to_sheet` refuses a `functionReturnType` other than `none`, `number`, `string` and `any`; before, the option was unknown and any value was dropped without an error (#49).
+
+### Fixed
+
+- `add_frame_to_animation` with `index` renames the image files of the frames from that index on one index up, so every frame keeps its image, instead of writing the placeholder over the image at the index without a backup and leaving the last frame without one. JPEG, GIF and other frames keep their own extension, file names that differ in case or Unicode normalization (e.g. decomposed, as macOS HFS+ lists them) are found, and the names follow the object's name as stored in its file (#36).
+- `delete_frame_from_animation` keeps the deleted frame's image as `<file>.bak` and renames the image files of the frames after it one index down, instead of leaving every later frame showing its predecessor's image and the last file behind, where the next appended frame's placeholder overwrote it (#36).
+- `add_frame_to_animation` refuses an `index` greater than the frame count before writing anything, instead of appending the frame while writing its image under the index's name (#36).
+- `add_frame_to_animation`, also when appending, no longer writes over an image file that no frame uses (e.g. one left behind by a deleted frame): the file is kept as `<file>.bak` and named in `warnings`. If a later step fails, both frame tools remove the placeholder (also one a failed write left part written), restore the object file and rename the image files back; when another write replaced the object file during theirs, they keep its content instead of restoring an older backup over it, and make the image files match it (#36).
+- The animation tools run one at a time. Two calls on the same Sprite in parallel could write its object file without each other's changes, and a frame insert or delete could rename image files another call was moving (#36).
+- `add_instance_to_layout` and `create_object` no longer allocate a UID that a layout or object type over the 10MB read limit already uses: files the reader skips are scanned as text for their UIDs and SIDs, and when a registered file exists but cannot be read at all, a new UID is refused with the file's name, before anything is written, instead of guessed. A registered name without a file does not block (#49).
+- `validate_project` reports a file over the 10MB read limit as an `unscanned-file` warning instead of a "missing or contains invalid JSON" error, names the path a missing file is read from, and gives the reason for other read failures without the absolute project path (#49).
+- `get_object_details`, `get_eventsheet_details` and `get_layout_details` no longer suggest other names ("Did you mean") when the file was found but could not be read, e.g. over the 10MB limit (#49).
+- The cross-reference index is cached per project (per reader) instead of once per process. With two projects open in one process, the analysis tools (`validate_project`, `find_orphaned_objects`, `get_object_dependencies`, `get_asset_usage`, `get_eventsheet_flow`, `get_function_map`, `analyze_performance`) and the reference checks and warnings of `delete_object`, `delete_family`, `delete_event_sheet`, `delete_layout`, `update_object_properties` and `update_family` used the index of whichever project had built it first: `validate_project` reported the other project's objects as broken references, `delete_object` deleted an object the project still used, and `update_object_properties` removed an instance variable its events still used. A write through the project writer or the event tools now resets only the index of the project it wrote to. The MCP server opens one project per process and was not affected; scripts, tests and embeddings that open several projects in one process were (#38).
+
 ## [1.9.0] - 2026-09-27
 
 ### Highlights

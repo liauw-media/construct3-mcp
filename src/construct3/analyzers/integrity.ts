@@ -6,7 +6,13 @@
 
 import { readdir } from 'fs/promises';
 import { join } from 'path';
-import { entityFolderPaths, entityFilePath, type Construct3ProjectReader } from '../project-reader.js';
+import {
+  entityFolderPaths,
+  entityFilePath,
+  type Construct3ProjectReader,
+  type EntityCategory,
+  type ReadFailure,
+} from '../project-reader.js';
 import type { C3Event, Construct3Project, Layout, ObjectType, EventSheet } from '../types.js';
 import { getProjectIndex, OBJECT_SID_PROPERTIES, type MemberReference, type MemberReferenceForm } from './index-builder.js';
 import { isNamelessFolder, transitionsFolderIndex } from '../timeline-folders.js';
@@ -18,6 +24,8 @@ import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.
 import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
+import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
+import { nameKey } from '../names.js';
 import {
   checkEventLoadRules,
   checkFamilyPlugins,
@@ -39,17 +47,42 @@ export interface IntegrityIssue {
 }
 
 export interface IntegrityResult {
+  /**
+   * No error-level issue was found AND every registered file was checked
+   * (`complete`). A project with a file that could not be checked is never
+   * reported valid, because nothing in that file (duplicate UIDs/SIDs
+   * included) was verified. `summary.errors === 0 && !complete` means: no
+   * errors in the checked files, the rest unknown.
+   */
   valid: boolean;
+  /**
+   * Every object type, family, event sheet and layout file that is registered
+   * in project.c3proj and exists on disk was read and checked. False when one
+   * of them was not (over the reader's 10MB cap, invalid JSON, unreadable):
+   * those files are listed in unscannedFiles, and no check (duplicate
+   * UIDs/SIDs, references, load-time rules) covered their contents. A
+   * registered file that does not exist is a file-existence error but leaves
+   * `complete` true, since nothing on disk escaped the checks.
+   */
+  complete: boolean;
   summary: {
     errors: number;
     warnings: number;
     info: number;
     checksRun: number;
     entitiesScanned: number;
+    /** Number of entries in unscannedFiles */
+    unscanned: number;
   };
   errors: IntegrityIssue[];
   warnings: IntegrityIssue[];
   info: IntegrityIssue[];
+  /**
+   * Registered files ("category/name") that exist but were not checked.
+   * Files over the read cap are `unscanned-file` warnings; files that could
+   * not be read or parsed are also `file-existence` errors.
+   */
+  unscannedFiles: string[];
 }
 
 // ─── Constants ───────────────────────────────────────────────
@@ -66,24 +99,33 @@ export async function validateProjectIntegrity(
   const warnings: IntegrityIssue[] = [];
   const info: IntegrityIssue[] = [];
 
-  // Load all data once
+  // Load all data once. Each bulk read's failures are taken right away: they
+  // belong to that result, and a reload by a concurrent call clears them.
   const project = reader.getProject();
   const objects = await reader.readAllObjectTypes();
+  const objectFailures = reader.getReadFailures('objectTypes');
   const eventSheets = await reader.readAllEventSheets();
+  const sheetFailures = reader.getReadFailures('eventSheets');
   const layouts = await reader.readAllLayouts();
+  const layoutFailures = reader.getReadFailures('layouts');
   const families = await reader.readAllFamilies();
+  const familyFailures = reader.getReadFailures('families');
 
   const registeredObjects = flattenContainer(project.objectTypes);
   const registeredSheets = flattenContainer(project.eventSheets);
   const registeredLayouts = flattenContainer(project.layouts);
+  const registeredFamilies = flattenContainer(project.families);
 
   const entitiesScanned =
     registeredObjects.length + registeredSheets.length + registeredLayouts.length;
 
+  const unscannedFiles: string[] = [];
+
   // Error checks
-  checkFileExistence(registeredObjects, objects, 'objectTypes', errors);
-  checkFileExistence(registeredSheets, eventSheets, 'eventSheets', errors);
-  checkFileExistence(registeredLayouts, layouts, 'layouts', errors);
+  checkFileExistence(registeredObjects, objects, objectFailures, 'objectTypes', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredSheets, eventSheets, sheetFailures, 'eventSheets', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredLayouts, layouts, layoutFailures, 'layouts', reader, errors, warnings, unscannedFiles);
+  checkFileExistence(registeredFamilies, families, familyFailures, 'families', reader, errors, warnings, unscannedFiles);
   checkRequiredFieldsObjects(objects, errors);
   checkRequiredFieldsSheets(eventSheets, errors);
   checkRequiredFieldsLayouts(layouts, errors);
@@ -124,24 +166,31 @@ export async function validateProjectIntegrity(
   await checkBackupFiles(reader, info);
   await checkOrphanedObjects(reader, info);
 
+  // Frame images: warnings for frames without one, info for unused ones
+  await checkFrameImages(reader, objects, warnings, info);
+
   // 13 original checks + legacy-behavior-key + legacy-event-shape +
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
-  // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable
-  const checksRun = 25;
+  // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable,
+  // frame-image
+  const checksRun = 26;
 
   return {
-    valid: errors.length === 0,
+    valid: errors.length === 0 && unscannedFiles.length === 0,
+    complete: unscannedFiles.length === 0,
     summary: {
       errors: errors.length,
       warnings: warnings.length,
       info: info.length,
       checksRun,
       entitiesScanned,
+      unscanned: unscannedFiles.length,
     },
     errors,
     warnings,
     info,
+    unscannedFiles,
   };
 }
 
@@ -177,21 +226,68 @@ function addLoadRuleIssues(
   }
 }
 
+/**
+ * Drop the trailing ", <syscall> '<absolute path>'" Node appends to fs
+ * errors; tool output should not echo the project's absolute path.
+ */
+function withoutFsPath(message: string): string {
+  return message.replace(/, (?:stat|lstat|open|read|access|scandir) '.*'$/, '');
+}
+
 // ─── Check 1: File Existence ─────────────────────────────────
 
 function checkFileExistence(
   registered: string[],
   loaded: Map<string, unknown>,
-  category: string,
-  errors: IntegrityIssue[]
+  readFailures: Map<string, ReadFailure>,
+  category: EntityCategory,
+  reader: Construct3ProjectReader,
+  errors: IntegrityIssue[],
+  warnings: IntegrityIssue[],
+  unscannedFiles: string[]
 ): void {
   for (const name of registered) {
-    if (!loaded.has(name)) {
+    if (loaded.has(name)) continue;
+    const entity = `${category}/${name}`;
+    const relPath = reader.getEntityRelativePath(category, name);
+    const failure = readFailures.get(name);
+    if (failure?.code === 'E_FILE_NOT_FOUND') {
+      // Registered but absent on disk. Say so plainly, with the path the
+      // reader actually looked at (subfolder included), rather than echoing
+      // the raw stat message, which carries the absolute project path.
       errors.push({
         check: 'file-existence',
-        entity: `${category}/${name}`,
+        entity,
+        message: `Registered in c3proj but no file exists at ${relPath}`,
+        suggestion: `Create ${relPath} or remove "${name}" from project.c3proj`,
+      });
+      continue;
+    }
+    // The file is there (or its state is unknown) but was not read, so no
+    // check below covered its contents: the result is not complete.
+    unscannedFiles.push(entity);
+    if (failure?.code === 'E_FILE_TOO_LARGE') {
+      // Over the reader's size cap: report it honestly instead of claiming
+      // the file is missing or invalid.
+      warnings.push({
+        check: 'unscanned-file',
+        entity,
+        message: `UNSCANNED: ${failure.message} — integrity checks (duplicate UIDs/SIDs, references) did not cover this file`,
+        suggestion: `The results are partial (complete: false); check this file another way, e.g. in the Construct 3 editor`,
+      });
+    } else if (failure) {
+      errors.push({
+        check: 'file-existence',
+        entity,
+        message: `Registered in c3proj but could not be read: ${withoutFsPath(failure.message)}`,
+        suggestion: `Check that ${relPath} is a readable file with valid JSON`,
+      });
+    } else {
+      errors.push({
+        check: 'file-existence',
+        entity,
         message: `Registered in c3proj but file is missing or contains invalid JSON`,
-        suggestion: `Check that ${category}/${name}.json exists and is valid JSON`,
+        suggestion: `Check that ${relPath} exists and is valid JSON`,
       });
     }
   }
@@ -1379,9 +1475,10 @@ function classifyEntityFiles(
 // ─── Check 11: Backup Files ─────────────────────────────────
 
 /**
- * .bak files in the entity folders (recursively, including timelines/) and next
- * to project.c3proj. The project root is not scanned recursively, so files/,
- * images/, scripts/ and the like stay out of it.
+ * .bak files in the entity folders (recursively, including timelines/),
+ * directly in images/ (the frame tools keep frame images there as .bak) and
+ * next to project.c3proj. The project root is not scanned recursively, so
+ * files/, scripts/, subfolders of images/ and the like stay out of it.
  */
 async function checkBackupFiles(
   reader: Construct3ProjectReader,
@@ -1393,6 +1490,8 @@ async function checkBackupFiles(
   for (const dirName of dirs) {
     await scanDirForBackups(join(projectDir, dirName), dirName, info, true);
   }
+  // add_frame_to_animation and delete_frame_from_animation keep images there as .bak
+  await scanDirForBackups(join(projectDir, 'images'), 'images', info, false);
   await scanDirForBackups(projectDir, '', info, false);
 }
 
@@ -1443,6 +1542,100 @@ async function checkOrphanedObjects(
         (families.length > 0
           ? ` It is a member of ${families.map(f => `"${f}"`).join(', ')}: remove it from the family first (update_family removeMembers).`
           : ''),
+    });
+  }
+}
+
+// ─── Check 13: Frame Images ──────────────────────────────────
+
+/**
+ * Sprite animation frames and the image files in images/. The editor names a
+ * frame's image lower("<object>-<animation>-NNN.<ext>"), NNN being the frame's
+ * index and ext following its fileType (see animation-rename.ts). images/ is
+ * read once and names are compared by nameKey(), ignoring case and Unicode
+ * normalization, as Windows and macOS do. The check is skipped when the
+ * project has no images/ folder.
+ *
+ * - Warning, one per animation: frames without their image file. Older
+ *   versions of add_frame_to_animation left the frames after an insert index
+ *   without one. What the editor does with a frame whose image file is
+ *   missing is not verified, so this is a warning.
+ * - Info, one per animation: files named like frames of the animation past
+ *   its last frame that no frame uses, e.g. left behind by older versions of
+ *   delete_frame_from_animation.
+ */
+async function checkFrameImages(
+  reader: Construct3ProjectReader,
+  objects: Map<string, ObjectType>,
+  warnings: IntegrityIssue[],
+  info: IntegrityIssue[]
+): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(join(reader.getProjectDir(), 'images'));
+  } catch {
+    return; // No images/ folder
+  }
+  const images = indexImageFiles(files);
+  // nameKey("<object>-<animation>-") → the animations whose frame images start with it
+  const byPrefix = new Map<string, Array<{ entity: string; name: string; frameCount: number }>>();
+  // nameKey() of the names without extension that a frame of any animation uses
+  const usedStems = new Set<string>();
+
+  for (const [objectName, obj] of objects) {
+    if (obj['plugin-id'] !== 'Sprite') continue;
+    for (const anim of everyAnimation<{ name?: unknown; frames?: unknown }>(obj.animations)) {
+      if (typeof anim.name !== 'string') continue;
+      const animationName = anim.name;
+      const frames: unknown[] = Array.isArray(anim.frames) ? anim.frames : [];
+      const entity = `objectTypes/${objectName}/animation:${animationName}`;
+      const missing: string[] = [];
+      frames.forEach((frame, index) => {
+        const base = frameImageBaseName(objectName, animationName, index);
+        usedStems.add(nameKey(base));
+        const fileType = isRecord(frame) ? frame.fileType : undefined;
+        if (images.frameFiles(base, fileType).length === 0) missing.push(`images/${expectedFrameImageName(base, fileType)}`);
+      });
+      if (missing.length > 0) {
+        warnings.push({
+          check: 'frame-image',
+          entity,
+          message: `${missing.length} of ${frames.length} frame(s) of animation "${animationName}" have no image file: ${listFew(missing)}`,
+          suggestion: 'Construct 3 loads a frame\'s image from images/<object>-<animation>-NNN.<ext> (NNN = frame index, .jpg for a JPEG frame, '
+            + '.png otherwise, all lowercase); what it does when the file is missing is not verified. Restore the file (from a .bak copy in '
+            + 'images/ or version control), or give the frame an image with replace_sprite_image. Older versions of construct3-mcp left '
+            + 'the frames after an add_frame_to_animation index without their images.',
+        });
+      }
+      const prefix = nameKey(frameImageBaseName(objectName, animationName, 0).slice(0, -'000'.length));
+      const list = byPrefix.get(prefix);
+      const entry = { entity, name: animationName, frameCount: frames.length };
+      if (list) list.push(entry); else byPrefix.set(prefix, [entry]);
+    }
+  }
+
+  // Files named like a frame past the last one of an animation, which no frame uses
+  const unused = new Map<{ entity: string; name: string; frameCount: number }, string[]>();
+  for (const file of files) {
+    const match = /^(.*-)(\d{3,})\.[^.]+$/.exec(nameKey(file));
+    if (!match) continue;
+    const [, prefix, digits] = match;
+    const frameIndex = Number(digits);
+    if (digits !== String(frameIndex).padStart(3, '0') || usedStems.has(`${prefix}${digits}`)) continue;
+    const anim = byPrefix.get(prefix)?.find(a => frameIndex >= a.frameCount);
+    if (!anim) continue;
+    const list = unused.get(anim);
+    if (list) list.push(`images/${file}`); else unused.set(anim, [`images/${file}`]);
+  }
+  for (const [anim, unusedFiles] of unused) {
+    info.push({
+      check: 'frame-image',
+      entity: anim.entity,
+      message: `${unusedFiles.length} file(s) in images/ are named like frames of animation "${anim.name}" past its last frame `
+        + `(it has ${anim.frameCount}), and no frame uses them: ${listFew(unusedFiles.sort())}`,
+      suggestion: 'They can be images of deleted frames (older versions of delete_frame_from_animation left the last one behind) '
+        + 'or of frames the animation had before. Check them before deleting them; add_frame_to_animation keeps such a file as .bak '
+        + 'instead of writing over it.',
     });
   }
 }
