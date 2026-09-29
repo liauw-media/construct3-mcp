@@ -22,6 +22,8 @@ interface FakeCdpOptions {
   screenshotBytes?: number;
   /** Hold the answer to Page.captureScreenshot until releaseScreenshot() is called. */
   holdScreenshot?: boolean;
+  /** Never answer bridge.submit: a game that is stuck. */
+  holdSubmit?: boolean;
   /** What bridge.cancel(id) answers; "absent" plays a bridge without cancel. */
   cancelAnswer?: "queued" | "result" | false | "absent";
   /**
@@ -234,6 +236,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
         },
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
       });
+      if (expression.includes("bridge.submit") && options.holdSubmit) return;
       if (expression.includes("bridge.getResult") && options.resultResponseDelayMs) {
         setTimeout(() => {
           if (socket.readyState === socket.OPEN) socket.send(response);
@@ -707,6 +710,28 @@ describe("call_bridge", () => {
     );
   });
 
+  it("reports the command timeout when a poll's timer fires before the clock reaches the deadline", async () => {
+    const fake = await startFakeCdp({ resultResponseDelayMs: 60_000 });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const { connectionId } = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+    // Timers run ahead of Date.now() here, as a Node timer can fire up to a millisecond early on a busy machine.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const calling = server.callTool("call_bridge", { connectionId, command: "ping", pollIntervalMs: 10, timeoutMs: 300 });
+      for (let turn = 0; fake.commandCount("ping") === 0 && turn < 100_000; turn++) await new Promise((r) => setImmediate(r));
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(1_000);
+      vi.useRealTimers();
+      const result = await calling;
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/^Failed to call runtime bridge: Runtime bridge command timed out after 300ms/u);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes the connection with a clear error once the page reloaded, instead of driving a game that started over", async () => {
     const fake = await startFakeCdp();
     openFakes.push(fake);
@@ -913,6 +938,27 @@ describe("wait_for_condition", () => {
     expect(result.met).toBe(false);
     expect(result.finalValue).toBe("WAITING");
     expect(result.elapsedMs).toBeGreaterThanOrEqual(100);
+  });
+
+  it("returns met false when a read ran out of the budget, even when the timer fires before the clock says so", async () => {
+    const fake = await startFakeCdp({ holdSubmit: true });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const { connectionId } = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+    // Timers run ahead of Date.now() here, as a Node timer can fire up to a millisecond early on a busy machine.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const waiting = server.callTool("wait_for_condition", {
+        connectionId, condition: { type: "globalVar", name: "State", operator: "eq", value: "READY" }, timeoutMs: 300,
+      });
+      for (let turn = 0; fake.submitSessions().length === 0 && turn < 100_000; turn++) await new Promise((r) => setImmediate(r));
+      await vi.advanceTimersByTimeAsync(300);
+      vi.useRealTimers();
+      expect(parseToolResult(await waiting)).toMatchObject({ met: false, finalValue: null });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports invalid comparisons and missing object properties", async () => {

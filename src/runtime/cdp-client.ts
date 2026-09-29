@@ -1084,11 +1084,12 @@ export class RuntimeConnectionManager {
           bridgeSessionId,
         );
       } catch (error) {
-        // A poll clamped to the remaining budget can expire at the deadline;
-        // report the command timeout rather than the internal CDP timeout.
+        // A poll clamped to the remaining budget expires at the deadline;
+        // report the command timeout rather than the internal CDP timeout,
+        // also when the timer fired a millisecond before Date.now() says so.
         if (
           connection.isOpen()
-          && Date.now() - startedAt >= options.timeoutMs
+          && (Date.now() - startedAt >= options.timeoutMs || remaining <= CDP_CALL_TIMEOUT_MS)
           && error instanceof Error
           && error.message.startsWith("CDP Runtime.evaluate timed out")
         ) {
@@ -1174,7 +1175,15 @@ export class RuntimeConnectionManager {
         );
       } catch (error) {
         const afterReadElapsedMs = Date.now() - startedAt;
-        if (afterReadElapsedMs >= options.timeoutMs && error instanceof Error && /timed out/iu.test(error.message)) {
+        // A read gets the remaining budget, and every CDP call in it is
+        // clamped to that; so when the budget was at most one CDP call long,
+        // a timeout means the budget ran out, even if the timer fired a
+        // millisecond before Date.now() says so (Node's timers can).
+        if (
+          error instanceof Error
+          && /timed out/iu.test(error.message)
+          && (afterReadElapsedMs >= options.timeoutMs || remainingMs <= CDP_CALL_TIMEOUT_MS)
+        ) {
           return { met: false, elapsedMs: afterReadElapsedMs, finalValue };
         }
         throw error;
