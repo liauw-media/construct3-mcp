@@ -856,7 +856,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
       description: 'Serve an exported Construct game (the HTML5 export folder that holds index.html) over HTTP on this machine (127.0.0.1 only), and optionally launch Chrome or Edge on it with a fresh profile and a remote-debugging port the browser picks itself, so connect_to_game can follow (the result names the port and the page endpoint). The browser comes from the CHROME_PATH environment variable or the usual install locations. A source project folder or a .c3p is refused: Construct exports only from its editor.',
       inputSchema: z.object({
         folder: z.string().min(1).max(4096).describe('The exported game folder (contains index.html)'),
-        port: z.number().int().min(0).max(65535).optional().default(0).describe('HTTP port on 127.0.0.1 (default 0: any free port)'),
+        port: z.number().int().min(0).max(65535).optional().default(0).describe('HTTP port on 127.0.0.1 (default 0: any free port; a port another program answers on is refused)'),
         crossOriginIsolated: z.boolean().optional().default(false).describe('Send COOP same-origin and COEP require-corp so the game gets SharedArrayBuffer (default: false; require-corp blocks resources from other origins that do not allow it, such as a CDN script)'),
         launchBrowser: z.boolean().optional().default(false).describe('Launch Chrome (or Edge) on the served URL with a remote-debugging port (default: false)'),
         headless: z.boolean().optional().default(false).describe('Launch the browser headless with software WebGL (default: false, a visible window)'),

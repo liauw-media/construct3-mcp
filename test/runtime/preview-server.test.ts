@@ -6,7 +6,8 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -136,6 +137,20 @@ describe('PreviewServer boundaries', () => {
     const alias = await fetch(server.url + 'alias/a.txt');
     expect(alias.status).toBe(200);
     expect(await alias.text()).toBe('served');
+  });
+});
+
+describe('PreviewServer on a port another program holds', () => {
+  it('refuses a port another program listens on for all interfaces, instead of handing out its URL', async () => {
+    const { game } = await makeExport();
+    // Windows lets 127.0.0.1:<port> be bound beside 0.0.0.0:<port>; connections the other program holds keep reaching it.
+    const other = createServer((_request, response) => response.end('FROM-OTHER-PROGRAM'));
+    await new Promise<void>((done) => other.listen(0, '0.0.0.0', () => done()));
+    cleanups.push(() => new Promise<void>((done) => other.close(() => done())));
+    const port = (other.address() as AddressInfo).port;
+
+    await expect(PreviewServer.start({ folder: game, port })).rejects.toThrow(/another program|EADDRINUSE/u);
+    expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe('FROM-OTHER-PROGRAM');
   });
 });
 

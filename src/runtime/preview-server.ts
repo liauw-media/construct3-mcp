@@ -20,7 +20,7 @@ import { pipeline } from 'node:stream/promises';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -220,6 +220,13 @@ export class PreviewServer {
         })
         .finally(() => { if (instance) instance.requests++; });
     });
+    if (options.port && await answersOn(host, options.port)) {
+      // Windows lets 127.0.0.1:<port> be bound beside another program's
+      // 0.0.0.0:<port>, and connections that program already holds keep
+      // going to it; elsewhere the bind fails anyway. So a port something
+      // answers on is refused, on every platform.
+      throw new Error(`Port ${options.port} on ${host} is in use by another program. Choose another port, or 0 for any free port.`);
+    }
     await new Promise<void>((done, fail) => {
       server.once('error', fail);
       server.listen(options.port ?? 0, host, () => {
@@ -262,6 +269,17 @@ export class PreviewServer {
       this.server.close(() => done());
     });
   }
+}
+
+/** True when something accepts a TCP connection on host:port within 1 s. */
+function answersOn(host: string, port: number): Promise<boolean> {
+  return new Promise(done => {
+    const socket = connect({ host, port });
+    const finish = (answered: boolean) => { socket.destroy(); done(answered); };
+    socket.setTimeout(1_000, () => finish(false));
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
 }
 
 const ISOLATION_HEADERS = {
