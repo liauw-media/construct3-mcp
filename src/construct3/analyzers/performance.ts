@@ -173,17 +173,23 @@ export async function analyzePerformance(
   const possiblyUsedAddons = await addonsPossiblyUsedByUnparsedObjects(reader, candidates.map(a => a.id));
   const unusedAddons = candidates.filter(a => !possiblyUsedAddons.has(a.id));
   const possiblyUsedNames = candidates.filter(a => possiblyUsedAddons.has(a.id)).map(a => a.name);
-  if (unusedAddons.length > 0 || possiblyUsedNames.length > 0) {
+  if (unusedAddons.length > 0) {
     issues.push({
       severity: 'info',
       category: 'cleanup',
       location: 'project',
-      message: `${unusedAddons.length} addon(s) declared but not used by any object` +
-        (unusedAddons.length > 0 ? `: ${unusedAddons.map(a => a.name).join(', ')}` : '') +
-        (possiblyUsedNames.length > 0
-          ? `; ${possiblyUsedNames.length} more possibly used by object types whose files could not be parsed: ${possiblyUsedNames.join(', ')}`
-          : ''),
+      message: `${unusedAddons.length} addon(s) declared but not used by any object: ${unusedAddons.map(a => a.name).join(', ')}`,
       suggestion: 'Remove unused addons to reduce project size',
+    });
+  }
+  // Apart, and with their own advice: removing an addon a broken object type uses breaks the project further
+  if (possiblyUsedNames.length > 0) {
+    issues.push({
+      severity: 'info',
+      category: 'cleanup',
+      location: 'project',
+      message: `${possiblyUsedNames.length} addon(s) used by no object the index could read, but possibly used by object types whose files could not be parsed: ${possiblyUsedNames.join(', ')}`,
+      suggestion: 'Repair those object type files first (validate_project lists them in unscannedFiles); do not remove these addons while an object type may use them',
     });
   }
 

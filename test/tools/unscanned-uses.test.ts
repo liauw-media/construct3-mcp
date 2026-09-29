@@ -1131,7 +1131,29 @@ describe('analysis of objects whose own object type file could not be parsed', (
     const messages = result.issues.map((i: { message: string }) => i.message);
     expect(messages.find((m: string) => /object type file could not be parsed/.test(m)))
       .toMatch(/^2 object\(s\) without a use found whose own object type file could not be parsed/);
-    expect(messages.find((m: string) => /addon\(s\) declared but not used/.test(m)))
-      .toBe('1 addon(s) declared but not used by any object: Mouse; 1 more possibly used by object types whose files could not be parsed: Keyboard');
+    const unused = result.issues.find((i: { message: string }) => /declared but not used/.test(i.message));
+    expect(unused.message).toBe('1 addon(s) declared but not used by any object: Mouse');
+    expect(unused.suggestion).toBe('Remove unused addons to reduce project size');
+    const possibly = result.issues.find((i: { message: string }) => /possibly used by object types/.test(i.message));
+    expect(possibly.message).toBe(
+      '1 addon(s) used by no object the index could read, but possibly used by object types whose files could not be parsed: Keyboard');
+    expect(possibly.suggestion).toMatch(/^Repair those object type files first/);
+  });
+
+  it('analyze_performance does not advise removing an addon that only such a file possibly uses', async () => {
+    await addEntity('objectTypes', 'Kb', { name: 'Kb', 'plugin-id': 'Keyboard', sid: 710000000000400, isGlobal: true });
+    await breakFile('objectTypes', 'Kb');
+    const c3projPath = join(tmpDir, 'project.c3proj');
+    const project = JSON.parse(await readFile(c3projPath, 'utf-8'));
+    project.usedAddons.push({ type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false });
+    await writeFile(c3projPath, JSON.stringify(project, null, '\t'));
+    await startServer();
+
+    const result = await call('analyze_performance', {});
+    const addonIssues = result.issues.filter((i: { message: string }) => /addon\(s\)/.test(i.message));
+    expect(addonIssues).toHaveLength(1);
+    expect(addonIssues[0].message).not.toMatch(/^0 addon/);
+    expect(addonIssues[0].message).toMatch(/possibly used by object types whose files could not be parsed: Keyboard$/);
+    expect(addonIssues[0].suggestion).not.toMatch(/Remove unused addons/);
   });
 });
