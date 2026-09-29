@@ -1198,19 +1198,17 @@ export class ProjectIndex {
 
 /**
  * The built index of each project, keyed by its reader: two projects opened in
- * one process (scripts, tests, embeddings) never see each other's index. Each
- * entry records the reset generation it was built in.
+ * one process (scripts, tests, embeddings) never see each other's index.
  */
-const cachedIndexes = new WeakMap<Construct3ProjectReader, { index: ProjectIndex; generation: number }>();
-/** Raised by resetProjectIndex() without a reader: every index built before is stale. */
-let indexGeneration = 0;
+let cachedIndexes = new WeakMap<Construct3ProjectReader, ProjectIndex>();
 
 /** The cross-reference index of the reader's project: built on first use, then cached for that reader. */
 export async function getProjectIndex(reader: Construct3ProjectReader): Promise<ProjectIndex> {
   const cached = cachedIndexes.get(reader);
-  if (cached && cached.generation === indexGeneration && cached.index.isBuilt()) return cached.index;
+  if (cached && cached.isBuilt()) return cached;
   const index = new ProjectIndex();
-  cachedIndexes.set(reader, { index, generation: indexGeneration });
+  // Cached before the build: a reset while it runs drops it, so the next call rebuilds
+  cachedIndexes.set(reader, index);
   await index.build(reader);
   return index;
 }
@@ -1221,5 +1219,5 @@ export async function getProjectIndex(reader: Construct3ProjectReader): Promise<
  */
 export function resetProjectIndex(reader?: Construct3ProjectReader): void {
   if (reader) cachedIndexes.delete(reader);
-  else indexGeneration++;
+  else cachedIndexes = new WeakMap();
 }
