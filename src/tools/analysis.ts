@@ -177,7 +177,7 @@ export function registerAnalysisTools(server: McpServer, reader: Construct3Proje
   // Tool: Project integrity validation
   server.tool(
     'validate_project',
-    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files, and the rules the Construct 3 editor enforces when opening a project (trigger placement, expression syntax, empty expressions, duplicate object names, family plugins).',
+    'Run integrity checks: file existence, duplicate SIDs/UIDs, broken references, orphaned files, and the rules the Construct 3 editor enforces when opening a project (trigger placement, expression syntax, empty expressions, duplicate object names, family plugins). `valid` means no errors in the files that were checked; `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read cap, invalid JSON, unreadable; listed in `unscannedFiles`), so no check covered its contents.',
     {},
     async () => {
       try {

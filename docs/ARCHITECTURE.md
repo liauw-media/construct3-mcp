@@ -82,6 +82,11 @@ class Construct3ProjectReader {
   readAllLayouts(): Promise<Map<string, Layout>>
   readAllFamilies(): Promise<Map<string, Record<string, unknown>>>
 
+  // Files the bulk reads skipped
+  getReadFailures(category): Map<string, ReadFailure>          // name → { code, message }
+  scanEntityIdsRaw(category, name): Promise<{ highestUid, sids }> // text scan, no size limit
+  getEntityRelativePath(category, name): string                 // e.g. "layouts/Levels/Title.json"
+
   // Query
   listObjectTypes(): Promise<string[]>
   listEventSheets(): Promise<string[]>
@@ -108,6 +113,8 @@ class Construct3ProjectReader {
 - **Path mapping**: Built at load time from c3proj container structures (handles subfolders)
 - **Fuzzy matching**: `findNearestName()` provides "Did you mean?" suggestions
 - **Bounded reads**: Entity and script files over 10MB are refused; a leading BOM is stripped before parsing
+- **Typed read failures**: The per-entity readers throw a `ProjectReadError` with a code (`E_FILE_TOO_LARGE`, `E_FILE_NOT_FOUND`, `E_INVALID_JSON`, `E_READ_ERROR`); the bulk `readAll*()` reads skip such files and record the code per name (`getReadFailures()`), so the ID generator and `validate_project` branch on the code, never on message text
+- **Raw ID scan**: `scanEntityIdsRaw()` reads a skipped layout or object type whole, without the size limit and without parsing, and collects its `"uid"` and `"sid"` values with a linear regex; the path goes through the same path map and `resolveProjectPath()` check as the parsed readers
 
 ### 3. Project Writer (`src/construct3/project-writer.ts`)
 
@@ -171,7 +178,7 @@ class IdGenerator {
 
 **SID strategy**: Random 15-digit integer (100,000,000,000,000 – 999,999,999,999,999), checked against a set of all existing SIDs scanned from the entire project. Retry up to 100 times on collision.
 
-**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment.
+**UID strategy**: Find highest existing UID across all layout instances and singleglobal-inst entries, then increment. Layouts and object types the bulk reads skipped (over the 10MB cap, invalid JSON) are scanned as text (`scanEntityIdsRaw`) for their UIDs and SIDs. A registered file that does not exist holds no IDs and is ignored; when a file exists but even the text scan fails, `generateUid()` throws with the file names instead of risking a duplicate UID (SIDs, being random, are still generated).
 
 **imageSpriteId strategy**: Random 7-digit integer, checked against the IDs of all existing animation frames. Links an animation frame to its image file.
 
@@ -334,7 +341,7 @@ The mutation tools provide extra context:
 - **Input validation**: Zod schemas on all tool parameters with length limits
 - **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
 - **Load-time gate**: The five event-editing tools listed under Write Flow reject writes that add an error the editor would refuse at load
-- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read
+- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole)
 
 ---
 

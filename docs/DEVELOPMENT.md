@@ -282,6 +282,7 @@ Tests prove what the files look like, not that Construct 3 accepts them. Before 
 - [ ] Duplicate name: `create_object` with existing name — must reject
 - [ ] Case-only clash: `create_object` with an existing family's name in other case — must reject
 - [ ] Load-time gate: `add_event_block` with an unterminated string in an expression — must reject
+- [ ] Layout over 10MB: `add_instance_to_layout` on another layout allocates a UID above the big layout's, `validate_project` returns `complete: false` with the file in `unscannedFiles`
 
 ## Contributing
 

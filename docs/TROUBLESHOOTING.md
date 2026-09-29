@@ -64,6 +64,14 @@ Common issues and solutions for the Construct3 MCP Server.
 
 Same as above — use the corresponding `list_` tool to find the correct name.
 
+### "File too large (... exceeds 10MB limit)"
+
+**Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the analysis tools leave it out. `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, even when `valid` is true.
+
+**Solutions**:
+- Check that file in the Construct 3 editor, or split a very large layout
+- New UIDs are still allocated above the UIDs in the file (it is scanned as text for them), so `add_instance_to_layout` and `create_object` keep working
+
 ### Stale data after editing in C3 editor
 
 **Cause**: The reader caches project data at startup.
@@ -130,6 +138,14 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 **Solutions**:
 - Change or delete those conditions, actions and expressions first, then remove it
 - Use `force: true` to remove it anyway (the uses are NOT changed; `validate_project` then reports them as `missing-behavior-or-variable`, except `Object.name` and `Self.name` in expressions, which the force warning lists)
+
+### "Cannot generate a safe UID: project file(s) could not be scanned"
+
+**Cause**: `add_instance_to_layout` or `create_object` (for a global plugin) needs a new UID, which must be above every UID in the project. A layout or object type named in the error is registered in `project.c3proj` and exists, but could not be read at all, not even as text (e.g. a folder where the file should be, or no read access), so its UIDs are unknown. Nothing was written. Files over the 10MB read limit and files with invalid JSON do not cause this: they are scanned as text. A registered name whose file does not exist does not cause it either.
+
+**Solutions**:
+- Fix the file named in the error (`validate_project` reports it as a `file-existence` error with the reason), or remove its name from `project.c3proj` if it is not needed
+- Then restart the MCP server, so the project is scanned again (a completed write through the tools also starts a new scan)
 
 ### "... not found: names are matched with their letter case"
 
