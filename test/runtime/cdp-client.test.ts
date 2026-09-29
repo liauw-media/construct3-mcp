@@ -29,6 +29,8 @@ interface FakeCdp {
   activeConnectionCount: () => number;
   commandCount: (command: string) => number;
   cdpCommands: () => Array<{ method: string; params: Record<string, unknown> }>;
+  /** How many page expressions (wait_for_condition type "expression") were evaluated. */
+  expressionCount: () => number;
   close(): Promise<void>;
 }
 
@@ -178,6 +180,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     connectionCount: () => connectionCount,
     activeConnectionCount: () => sockets.size,
     commandCount: (command) => commandCounts.get(command) ?? 0,
+    expressionCount: () => expressionChecks,
     cdpCommands: () => cdpCommands.map((command) => ({
       method: command.method,
       params: { ...command.params },
@@ -217,6 +220,7 @@ const openFakes: FakeCdp[] = [];
 const openControllers: RuntimeToolController[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   while (openControllers.length > 0) await openControllers.pop()!.close();
   while (openFakes.length > 0) await openFakes.pop()!.close();
 });
@@ -623,7 +627,7 @@ describe("wait_for_condition", () => {
     }));
     expect(layout).toMatchObject({ met: true, final_value: "Bonus" });
 
-    const expression = parseToolResult(await server.callTool("wait_for_condition", {
+    const expressionCall = {
       connectionId: connected.connectionId,
       condition: {
         type: "expression",
@@ -633,7 +637,18 @@ describe("wait_for_condition", () => {
       },
       pollIntervalMs: 10,
       timeoutMs: 500,
-    }));
+    };
+    // Page script runs only when whoever started the server allowed it.
+    for (const setting of [undefined, "", "0", "true"]) {
+      vi.stubEnv("C3MCP_ALLOW_EVAL", setting);
+      const refused = await server.callTool("wait_for_condition", expressionCall);
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain("C3MCP_ALLOW_EVAL=1");
+    }
+    expect(fake.expressionCount()).toBe(0);
+
+    vi.stubEnv("C3MCP_ALLOW_EVAL", "1");
+    const expression = parseToolResult(await server.callTool("wait_for_condition", expressionCall));
     expect(expression).toMatchObject({ met: true, final_value: 11 });
   });
 

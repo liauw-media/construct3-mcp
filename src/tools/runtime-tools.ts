@@ -77,7 +77,7 @@ const runtimeConditionSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('expression'),
-    expr: z.string().min(1).max(10_000),
+    expr: z.string().min(1).max(10_000).describe('JavaScript evaluated in the game page (only with C3MCP_ALLOW_EVAL=1 in the server environment)'),
     operator: conditionOperatorSchema,
     value: z.unknown(),
   }),
@@ -504,7 +504,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'wait_for_condition',
-    'Poll a running game until a global variable, object property, layout name, or browser expression matches a target. Checks immediately, returns the last value on timeout, and does not throw merely because the condition was not met. Expression conditions execute caller-supplied JavaScript in the connected page.',
+    'Poll a running game until a global variable, object property, layout name, or browser expression matches a target. Checks immediately, returns the last value on timeout, and does not throw merely because the condition was not met. The "expression" type runs the given JavaScript in the game page with the page\'s full rights; it is refused unless the server was started with the environment variable C3MCP_ALLOW_EVAL=1.',
     {
       connectionId: z.string().uuid().describe('Connection ID returned by connect_to_game'),
       condition: runtimeConditionSchema.describe('Condition to evaluate on each poll'),

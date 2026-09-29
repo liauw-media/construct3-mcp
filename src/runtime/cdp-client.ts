@@ -212,6 +212,16 @@ interface EvaluationResult {
   };
 }
 
+/**
+ * True when the server was started with C3MCP_ALLOW_EVAL=1, which allows
+ * wait_for_condition to run caller-supplied JavaScript in the game page.
+ * An environment setting, not a tool parameter: the caller who writes the
+ * expression must not be the one who allows it.
+ */
+export function pageEvaluationAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.C3MCP_ALLOW_EVAL === "1";
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -776,6 +786,11 @@ export class RuntimeConnectionManager {
   }
 
   async waitForCondition(options: WaitForConditionOptions): Promise<WaitForConditionResult> {
+    if (options.condition.type === "expression" && !pageEvaluationAllowed()) {
+      throw new Error(
+        'Condition type "expression" runs JavaScript in the game page and is off unless the server was started with the environment variable C3MCP_ALLOW_EVAL=1. Use a globalVar, objectProperty or layout condition, or ask whoever runs the server to set it.',
+      );
+    }
     const startedAt = Date.now();
     let finalValue: unknown = null;
 
