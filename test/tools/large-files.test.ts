@@ -27,8 +27,6 @@ import { registerAnalysisTools } from '../../src/tools/analysis.js';
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 /** Must match MAX_FILE_SIZE in src/construct3/project-reader.ts */
 const READER_SIZE_CAP = 10 * 1024 * 1024;
-/** Writing and scanning a file over 10MB takes well under a second locally; leave room for slow disks and AV scanners. */
-const BIG_FILE_TIMEOUT_MS = 15_000;
 
 let tmpDir: string;
 let server: MockServer;
@@ -105,7 +103,7 @@ describe('UIDs next to files over the read cap', () => {
     const result = await call('add_instance_to_layout', PLACE_SPRITE);
     expect(result.generatedUid).toBe(40001);
     expect(await layoutUids('Layout 1')).toEqual([0, 40001]);
-  }, BIG_FILE_TIMEOUT_MS);
+  });
 
   it('create_object allocates the singleglobal-inst UID above an object type over 10MB', async () => {
     await registerInProject('objectTypes', 'BigKeys');
@@ -115,7 +113,7 @@ describe('UIDs next to files over the read cap', () => {
     await call('create_object', { name: 'Keys', pluginId: 'Keyboard' });
     const keys = JSON.parse(await readFile(join(tmpDir, 'objectTypes', 'Keys.json'), 'utf-8'));
     expect(keys['singleglobal-inst'].uid).toBe(50001);
-  }, BIG_FILE_TIMEOUT_MS);
+  });
 
   it('add_instance_to_layout refuses, and writes nothing, when a registered layout cannot be scanned', async () => {
     await registerInProject('layouts', 'Bad');
@@ -171,7 +169,7 @@ describe('validate_project and get_layout_details on a layout over the read cap'
     expect(warning?.message).toContain('exceeds 10MB limit');
     // valid keeps its meaning: no errors in the files that were checked
     expect(result.valid).toBe(true);
-  }, BIG_FILE_TIMEOUT_MS);
+  });
 
   it('get_layout_details names the size limit without suggesting the name it was given', async () => {
     await registerInProject('layouts', 'Big');
@@ -182,7 +180,7 @@ describe('validate_project and get_layout_details on a layout over the read cap'
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('exceeds 10MB limit');
     expect(result.content[0].text).not.toContain('Did you mean');
-  }, BIG_FILE_TIMEOUT_MS);
+  });
 
   it('get_layout_details still suggests names for a layout that does not exist', async () => {
     await startServer();

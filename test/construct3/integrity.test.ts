@@ -76,7 +76,10 @@ describe('validateProjectIntegrity', () => {
     expect(result.valid).toBe(false);
     const err = result.errors.find(e => e.check === 'file-existence' && e.entity.includes('MissingSprite'));
     expect(err).toBeDefined();
-    expect(err!.message).toContain('missing or contains invalid JSON');
+    expect(err!.message).toContain('no file exists at objectTypes/MissingSprite.json');
+    // Nothing on disk escaped the checks
+    expect(result.complete).toBe(true);
+    expect(result.unscannedFiles).toEqual([]);
   });
 
   it('detects missing event sheet file', async () => {
@@ -220,6 +223,7 @@ describe('validateProjectIntegrity', () => {
     expect(result.valid).toBe(false);
     const err = result.errors.find(e => e.check === 'file-existence' && e.entity.includes('GhostLayout'));
     expect(err).toBeDefined();
+    expect(result.complete).toBe(true);
   });
 
   // ─── Check 2: required-fields ────────────────────────────

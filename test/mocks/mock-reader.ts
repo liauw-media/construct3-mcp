@@ -363,10 +363,22 @@ export class MockReader {
 
   /**
    * Register a name in c3proj containers without providing data.
-   * Simulates a missing/corrupt file for file-existence tests.
+   * Simulates a missing file for file-existence tests: like the real reader,
+   * the bulk read records E_FILE_NOT_FOUND for it (registerUnreadableEntity
+   * simulates a file that exists but cannot be read).
    */
   registerEntityName(category: 'objects' | 'eventSheets' | 'layouts', name: string): void {
     this.registeredOnly[category].push(name);
+    const readerCategory = category === 'objects' ? 'objectTypes' : category;
+    let failures = this.readFailures.get(readerCategory);
+    if (!failures) {
+      failures = new Map<string, ReadFailure>();
+      this.readFailures.set(readerCategory, failures);
+    }
+    failures.set(name, {
+      code: 'E_FILE_NOT_FOUND',
+      message: `ENOENT: no such file or directory, stat '/mock/project/${readerCategory}/${name}.json'`,
+    });
   }
 
   /**

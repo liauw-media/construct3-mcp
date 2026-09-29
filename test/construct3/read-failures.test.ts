@@ -23,8 +23,6 @@ const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 const READER_SIZE_CAP = 10 * 1024 * 1024;
 /** Pushes a small JSON document just past the cap. ASCII spaces, so byte length equals char length. */
 const PADDING = Buffer.alloc(READER_SIZE_CAP + 4096, 0x20);
-/** Writing and scanning a 10MB file is well under a second locally; leave room for slow disks and AV scanners. */
-const OVERSIZED_TIMEOUT_MS = 15_000;
 
 type Category = 'layouts' | 'objectTypes' | 'families';
 
@@ -123,7 +121,7 @@ describe('Construct3ProjectReader — read failures (real files)', () => {
     const failure = reader.getReadFailures('layouts').get('Big');
     expect(failure).toMatchObject({ code: 'E_FILE_TOO_LARGE' });
     expect(failure!.message).toContain('exceeds 10MB limit');
-  }, OVERSIZED_TIMEOUT_MS);
+  });
 
   it('records E_FILE_NOT_FOUND for a registered layout with no file', async () => {
     await registerInProject(tmpDir, 'layouts', 'GhostLayout');
@@ -163,7 +161,7 @@ describe('Construct3ProjectReader.scanEntityIdsRaw (real files)', () => {
     const scan = await reader.scanEntityIdsRaw('layouts', 'Big');
     expect(scan.highestUid).toBe(30046);
     expect(scan.sids).toEqual([510000000000001, 510000000000002, 510000000000003, 510000000000004]);
-  }, OVERSIZED_TIMEOUT_MS);
+  });
 
   it('resolves a layout registered in a c3proj subfolder through the same path map as readLayout', async () => {
     await registerInProject(tmpDir, 'layouts', 'Deep', 'Levels');
@@ -222,7 +220,7 @@ describe('IdGenerator — real files', () => {
     const reader = await openReader(tmpDir);
 
     expect(await new IdGenerator().generateUid(reader)).toBe(30047);
-  }, OVERSIZED_TIMEOUT_MS);
+  });
 
   it('ignores a registered layout whose file is missing (reviewer repro: GhostLayout)', async () => {
     await registerInProject(tmpDir, 'layouts', 'GhostLayout');
@@ -256,7 +254,7 @@ describe('IdGenerator — real files', () => {
     await reader.readAllObjectTypes();
     expect(reader.getReadFailures('objectTypes').get('BigGlobal')).toMatchObject({ code: 'E_FILE_TOO_LARGE' });
     expect(await new IdGenerator().generateUid(reader)).toBe(30051);
-  }, OVERSIZED_TIMEOUT_MS);
+  });
 
   it('ignores a registered object type whose file is missing', async () => {
     await registerInProject(tmpDir, 'objectTypes', 'GhostType');
@@ -281,7 +279,7 @@ describe('validateProjectIntegrity — real files', () => {
     expect(result.summary.unscanned).toBe(1);
     expect(result.valid).toBe(true);
     expect(result.complete).toBe(false);
-  }, OVERSIZED_TIMEOUT_MS);
+  });
 
   it('reports a missing layout as a file-existence error with complete: true', async () => {
     await registerInProject(tmpDir, 'layouts', 'GhostLayout');
