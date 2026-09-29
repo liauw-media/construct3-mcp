@@ -7,6 +7,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 ### Fixed
 
 - `get_function_map` lists each function's parameters (`params`). It read them from `parameters`, a key neither the editor nor `add_event_to_sheet` writes, instead of `functionParameters`, so every function came out with `params: []`; a function block that has only `parameters` is still read (#38).
+- `analyze_performance` counts the event blocks that really run every tick: blocks at the top level of a sheet or in groups whose conditions hold no trigger (an `on-` condition, as in `validate_project`'s trigger placement rule), including blocks with only *Every tick* or a comparison. Before, it counted every block without conditions at any depth, also sub-events of triggers, functions and custom actions (which run only when those do), disabled blocks and blocks in groups that are disabled or not active on start, and missed blocks whose conditions are not triggers (#38).
 
 ## [1.9.2] - 2026-09-29
 

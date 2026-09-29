@@ -124,3 +124,75 @@ describe('get_function_map parameters', () => {
     expect(map.functions).toEqual([expect.objectContaining({ name: 'Legacy', params: ['value'] })]);
   });
 });
+
+// ─── analyze_performance every-tick count (#38 item 7) ──────
+
+const trigger = () => ({ id: 'on-start-of-layout', objectClass: 'System', sid: sid() });
+const compareX = () => ({ id: 'compare-x', objectClass: 'Sprite', sid: sid(), parameters: { comparison: 0, 'x-co-ordinate': '0' } });
+const elseCondition = () => ({ id: 'else', objectClass: 'System', sid: sid() });
+const setX = () => ({ id: 'set-x', objectClass: 'Sprite', sid: sid(), parameters: { x: '1' } });
+const block = (conditions: unknown[] = [], children: unknown[] = [], extra: Record<string, unknown> = {}) => ({
+  eventType: 'block', conditions, actions: [setX()], sid: sid(), ...(children.length > 0 ? { children } : {}), ...extra,
+});
+const group = (title: string, children: unknown[], extra: Record<string, unknown> = {}) => ({
+  eventType: 'group', disabled: false, title, description: '', isActiveOnStart: true, children, sid: sid(), ...extra,
+});
+
+/** The number analyze_performance reports as running every tick for one sheet, or 0 without such an issue. */
+async function everyTickCount(sheet: string): Promise<number> {
+  const result = await call('analyze_performance', { scope: sheet, detail: 'full' });
+  const issue = result.issues.find((i: { location: string; message: string }) => i.location === sheet && /every tick/.test(i.message));
+  return issue ? Number(/^(\d+) event block/.exec(issue.message)![1]) : 0;
+}
+
+describe('analyze_performance every-tick count', () => {
+  const cases: Record<string, { events: unknown[]; expected: number }> = {
+    // Run every tick
+    TopLevelNoConditions: { events: [block()], expected: 1 },
+    OnlyEveryTickCondition: { events: [block([{ id: 'every-tick', objectClass: 'System', sid: sid() }])], expected: 1 },
+    OnlyNonTriggerCondition: { events: [block([compareX()])], expected: 1 },
+    InActiveGroups: { events: [group('Outer', [block(), group('Inner', [block([compareX()])])])], expected: 2 },
+    // A sub-event runs as part of its parent, which is counted
+    NonTriggerParentWithSubEvent: { events: [block([compareX()], [block(), block()])], expected: 1 },
+    // An else block belongs to the block before it
+    ElseAfterEveryTickBlock: { events: [block([compareX()]), block([elseCondition()])], expected: 1 },
+    // Run only when a trigger fires or a function runs
+    TriggerWithSubEvents: { events: [block([trigger()], [block(), block(), block()])], expected: 0 },
+    TriggerWithSubEventElsePair: { events: [block([trigger()], [block(), block([elseCondition()])])], expected: 0 },
+    OrBlockWithTrigger: { events: [block([compareX(), trigger()], [], { isOrBlock: true })], expected: 0 },
+    FunctionBody: {
+      events: [{
+        functionName: 'F', functionDescription: '', functionCategory: '', functionReturnType: 'none', functionCopyPicked: false,
+        functionIsAsync: false, functionParameters: [], eventType: 'function-block', conditions: [], actions: [], sid: sid(),
+        children: [block(), block([compareX()])],
+      }],
+      expected: 0,
+    },
+    CustomActionBody: {
+      events: [{ eventType: 'custom-ace-block', objectClass: 'Sprite', aceName: 'Hit', conditions: [], actions: [], sid: sid(), children: [block()] }],
+      expected: 0,
+    },
+    // Do not run, or not until something activates them
+    DisabledBlock: { events: [block([], [], { disabled: true })], expected: 0 },
+    DisabledGroup: { events: [group('Off', [block()], { disabled: true })], expected: 0 },
+    GroupInactiveOnStart: { events: [group('Later', [block(), group('Nested', [block()])], { isActiveOnStart: false })], expected: 0 },
+    // Rows that are not event blocks
+    NonBlockRows: {
+      events: [
+        { eventType: 'comment', text: 'note' },
+        { eventType: 'variable', name: 'V', type: 'number', initialValue: '0', comment: '', isStatic: false, isConstant: false, sid: sid() },
+        group('Empty', []),
+      ],
+      expected: 0,
+    },
+  };
+
+  it('counts the event blocks at the top level or in active groups that have no trigger condition', async () => {
+    for (const [name, { events }] of Object.entries(cases)) await addSheet(name, events);
+    await startServer();
+
+    const counts: Record<string, number> = {};
+    for (const name of Object.keys(cases)) counts[name] = await everyTickCount(name);
+    expect(counts).toEqual(Object.fromEntries(Object.entries(cases).map(([name, c]) => [name, c.expected])));
+  });
+});

@@ -229,6 +229,8 @@ Heuristic performance audit with categorized issues (info/warning/critical).
 
 The frame count check reports object types with more than 50 animation frames, counting every animation, including those in animation subfolders.
 
+The every-tick check (`info`, per event sheet) counts the event blocks that run every tick: blocks at the top level of the sheet or in groups whose conditions hold no trigger (a condition whose id starts with `on-`, as in the trigger placement rule of [`validate_project`](#validate_project)), so a block without conditions and one with only *Every tick* or a comparison both count. Not counted: sub-events (they run with their parent, and under a trigger, function or custom action only when it runs), else blocks (part of the block before them), disabled blocks, and blocks in a disabled group or a group that is not active on start. A third-party trigger whose id does not start with `on-` is counted as running every tick.
+
 ### `validate_project`
 
 Run integrity checks over the whole project. No parameters.

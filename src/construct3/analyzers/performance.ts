@@ -7,6 +7,11 @@ import type { PerformanceIssue, C3Event, BlockEvent, GroupEvent, FunctionBlockEv
 import { findOrphanedObjects } from './object-deps.js';
 import { forEachLayerInstance } from '../layers.js';
 import { countAnimationFrames } from './animations.js';
+import { isTriggerId } from './load-rules.js';
+import { isElseBlock } from '../event-shapes.js';
+
+/** Events visited per sheet at most */
+const MAX_NODES = 100_000;
 
 export interface PerformanceResult {
   summary: { critical: number; warning: number; info: number };
@@ -66,7 +71,7 @@ export async function analyzePerformance(
         severity: 'info',
         category: 'performance',
         location: sheetName,
-        message: `${everyTickCount} event block(s) with no trigger condition (runs every tick)`,
+        message: `${everyTickCount} event block(s) with no trigger condition (runs every tick; top-level blocks and blocks in groups active on start, sub-events not counted)`,
         suggestion: 'Review if every-tick evaluation is necessary; consider using triggers instead',
       });
     }
@@ -205,21 +210,37 @@ function getMaxNestingDepth(events: C3Event[]): number {
   return maxDepth;
 }
 
+/**
+ * Event blocks that run every tick: blocks at the top level of the sheet or
+ * in groups (nested to any depth) without a trigger among their conditions
+ * (isTriggerId, the rule validate_project's trigger placement check uses;
+ * conditions such as System "Every tick" or a comparison are tested every
+ * tick). Not counted:
+ * - sub-events: they run as part of their parent, only when its trigger
+ *   fires or its function or custom action runs, and otherwise together
+ *   with the parent, which is counted;
+ * - else blocks: they belong to the block before them;
+ * - function and custom action blocks, which run when called;
+ * - disabled blocks, and blocks in a disabled group or a group that is not
+ *   active on start (until an action activates it).
+ */
 function countEveryTickBlocks(events: C3Event[]): number {
   let count = 0;
-  const stack = [...events];
+  let nodes = 0;
+  const stack: unknown[] = [...events];
 
-  while (stack.length > 0) {
-    const event = stack.pop()!;
-    if (event.eventType === 'block') {
-      const block = event as BlockEvent;
-      // A block with no conditions or only non-trigger conditions runs every tick
-      if (!block.conditions || block.conditions.length === 0) {
-        count++;
-      }
-    }
-    if ('children' in event && Array.isArray(event.children)) {
-      stack.push(...event.children);
+  while (stack.length > 0 && nodes++ < MAX_NODES) {
+    const event = stack.pop();
+    if (!event || typeof event !== 'object') continue;
+    const record = event as Record<string, unknown>;
+    if (record.disabled === true) continue;
+    if (record.eventType === 'group') {
+      if ((record as unknown as GroupEvent).isActiveOnStart === false) continue;
+      if (Array.isArray(record.children)) stack.push(...record.children);
+    } else if (record.eventType === 'block' && !isElseBlock(record)) {
+      const conditions = Array.isArray(record.conditions) ? record.conditions as unknown[] : [];
+      const triggered = conditions.some(c => c !== null && typeof c === 'object' && isTriggerId((c as { id?: unknown }).id));
+      if (!triggered) count++;
     }
   }
   return count;
