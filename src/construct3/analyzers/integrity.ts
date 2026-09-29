@@ -24,7 +24,7 @@ import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.
 import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
 import { findHierarchyLinkProblems, type HierarchyLinkProblem } from '../hierarchy.js';
-import { isNamedAfterObject } from '../object-images.js';
+import { namedAfterAnyObject } from '../object-images.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
 import { nameKey } from '../names.js';
@@ -1706,9 +1706,10 @@ async function checkOrphanedImages(
     return; // No images/ folder
   }
   const groups = new Map<string, string[]>();
+  const namedAfterObject = namedAfterAnyObject(objectNames);
   for (const entry of entries) {
     if (!entry.isFile() || entry.name.toLowerCase().endsWith('.bak')) continue;
-    if (objectNames.some(name => isNamedAfterObject(entry.name, name))) continue;
+    if (namedAfterObject(entry.name)) continue;
     const stem = /^[^.-]*/.exec(entry.name)?.[0] ?? entry.name;
     const key = nameKey(stem);
     const list = groups.get(key);

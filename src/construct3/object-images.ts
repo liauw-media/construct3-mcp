@@ -15,7 +15,7 @@
  * type (orphaned-image).
  */
 
-import { everyAnimation, frameImageBaseName, indexImageFiles, type ImageFileRename } from './animation-rename.js';
+import { everyAnimation, frameImageBaseName, indexImageFiles, type ImageFileIndex, type ImageFileRename } from './animation-rename.js';
 import { nameKey } from './names.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,11 +28,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * file, which the editor names the files after), in frame order. Found as
  * the frame tools find them: by the frame's fileType extension, ignoring case
  * and Unicode normalization; for another fileType, every file with the name
- * and a single extension.
+ * and a single extension. `index` is indexImageFiles(files), for a caller
+ * that looks up several object types in the same listing (built here when
+ * not given).
  */
-export function objectImageFiles(objectName: string, objectType: unknown, files: readonly string[]): string[] {
+export function objectImageFiles(
+  objectName: string,
+  objectType: unknown,
+  files: readonly string[],
+  index: ImageFileIndex = indexImageFiles(files),
+): string[] {
   if (!isRecord(objectType)) return [];
-  const index = indexImageFiles(files);
   const found: string[] = [];
   if (objectType.animations !== undefined) {
     for (const anim of everyAnimation<{ name?: unknown; frames?: unknown }>(objectType.animations)) {
@@ -59,6 +65,25 @@ export function isNamedAfterObject(file: string, objectName: string): boolean {
   return key.startsWith(`${object}-`) || key.startsWith(`${object}.`);
 }
 
+/**
+ * isNamedAfterObject for many object names at once: a test whether a file is
+ * named after any of `objectNames`. The names go into a set once, and a file
+ * is looked up by each part of its name before a "-" or ".", so testing every
+ * file of images/ takes time in proportion to the files and names, not to
+ * their product (validate_project's orphaned-image check).
+ */
+export function namedAfterAnyObject(objectNames: Iterable<string>): (file: string) => boolean {
+  const objects = new Set<string>();
+  for (const name of objectNames) objects.add(nameKey(name));
+  return file => {
+    const key = nameKey(file);
+    for (let i = 0; i < key.length; i++) {
+      if ((key[i] === '-' || key[i] === '.') && objects.has(key.slice(0, i))) return true;
+    }
+    return false;
+  };
+}
+
 /** How delete_object keeps the image files of the object type it deletes. */
 export interface ObjectImageParking {
   /** Renames of the object's image files to free .bak names */
@@ -79,6 +104,8 @@ export interface ObjectImageParking {
  * and object "a" animation "b-c") and files named after an object type in
  * `unparsed` (registered, but its file could not be parsed). The .bak name is
  * <file>.bak, or <file>.1.bak, ... when that is taken, compared ignoring case.
+ * The listing is indexed once for all object types, so the plan takes time in
+ * proportion to the files and frames, not to their product.
  */
 export function planObjectImageParking(
   objectName: string,
@@ -87,14 +114,15 @@ export function planObjectImageParking(
   others: ReadonlyMap<string, unknown>,
   unparsed: readonly string[],
 ): ObjectImageParking {
-  const own = objectImageFiles(objectName, objectType, files);
+  const index = indexImageFiles(files);
+  const own = objectImageFiles(objectName, objectType, files, index);
   const plan: ObjectImageParking = { renames: [], shared: [], unknownUse: [] };
   if (own.length === 0) return plan;
 
   const usedByOthers = new Set<string>();
   for (const [name, other] of others) {
     const stored = isRecord(other) && typeof other.name === 'string' && other.name !== '' ? other.name : name;
-    for (const file of objectImageFiles(stored, other, files)) usedByOthers.add(file);
+    for (const file of objectImageFiles(stored, other, files, index)) usedByOthers.add(file);
   }
   const taken = new Set(files.map(nameKey));
   const backupName = (file: string): string => {
@@ -106,9 +134,10 @@ export function planObjectImageParking(
       }
     }
   };
+  const namedAfterUnparsed = namedAfterAnyObject(unparsed);
   for (const file of own) {
     if (usedByOthers.has(file)) plan.shared.push(file);
-    else if (unparsed.some(name => isNamedAfterObject(file, name))) plan.unknownUse.push(file);
+    else if (namedAfterUnparsed(file)) plan.unknownUse.push(file);
     else plan.renames.push({ from: file, to: backupName(file) });
   }
   return plan;
