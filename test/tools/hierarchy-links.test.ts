@@ -135,6 +135,21 @@ describe('delete_instance_from_layout and hierarchy links', () => {
     expect(data.warnings.join(' ')).toContain('Detached hierarchy children of the removed instance(s): UID 1, 2');
     expect(await hierarchyWarnings()).toEqual([]);
   });
+
+  it('leaves the links naming a UID that another instance still has (duplicate UIDs) alone', async () => {
+    // Two instances with UID 0: the first without links, the second the parent of UID 2
+    const layout = await readLayout();
+    layout.layers[0].instances = [instance(0), instance(0, parentRecord(0, [2])), instance(2, childRecord(2, 0))];
+    await writeFile(layoutPath(), JSON.stringify(layout, null, '\t'));
+    await reader.loadProject();
+
+    const result = await server.callTool('delete_instance_from_layout', { layoutName: 'Layout 1', uid: 0 });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.success).toBe(true);
+    expect(await links()).toEqual({ 0: [null, [2]], 2: [0, undefined] });
+    expect(data.warnings.join(' ')).toContain('Another instance of the layout has UID 0 too');
+    expect(data.warnings.join(' ')).not.toContain('Detached');
+  });
 });
 
 describe('delete_layer and hierarchy links', () => {
@@ -200,6 +215,21 @@ describe('validate_project hierarchy-link', () => {
     expect(messages.some(m => m.includes('UID 0') && m.includes('lists child UID 1, which names another parent or none'))).toBe(true);
     expect(messages.some(m => m.includes('UID 2') && m.includes('names parent UID 9, which is no instance'))).toBe(true);
     expect(messages.some(m => m.includes('UID 3') && m.includes('names parent UID 0, which does not list it'))).toBe(true);
+  });
+
+  it('skips UIDs that several instances have, which duplicate-uid reports', async () => {
+    const layout = await readLayout();
+    layout.layers[0].instances = [
+      instance(0), // shares UID 0 with the parent below
+      instance(0, parentRecord(0, [1])),
+      instance(1, childRecord(1, 0)),
+      instance(3, childRecord(3, 3)), instance(3), // UID 3 twice, one naming itself
+    ];
+    await writeFile(layoutPath(), JSON.stringify(layout, null, '\t'));
+    await reader.loadProject();
+
+    expect(findHierarchyLinkProblems(await readLayout())).toEqual([]);
+    expect(await hierarchyWarnings()).toEqual([]);
   });
 
   it('accepts intact links, also across layers', async () => {

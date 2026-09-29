@@ -61,6 +61,21 @@ export interface HierarchyUnlink {
   detachedChildren: number[];
   /** UIDs of instances that listed a removed instance as a child: the entry was removed */
   updatedParents: number[];
+  /**
+   * Removed UIDs that another instance of the layout still has (a duplicate
+   * UID, which validate_project reports as duplicate-uid): which instance a
+   * link naming it means cannot be told, so such links were left as they are
+   */
+  stillUsed: number[];
+}
+
+/** How many instances of the layout have each UID. */
+function uidCounts(layout: unknown): Map<number, number> {
+  const counts = new Map<number, number>();
+  forEachLayoutInstance(layout, instance => {
+    if (typeof instance.uid === 'number') counts.set(instance.uid, (counts.get(instance.uid) ?? 0) + 1);
+  });
+  return counts;
 }
 
 /**
@@ -71,10 +86,19 @@ export interface HierarchyUnlink {
  * parent's `children` (an emptied array is removed, as the editor saves a
  * parent without children). Children are detached, not deleted with their
  * parent: what the editor does with the children of an instance deleted in
- * the Layout View is not verified, and detaching loses no instance.
+ * the Layout View is not verified, and detaching loses no instance. A removed
+ * UID that another instance of the layout still has (duplicate UIDs) is left
+ * alone: a link naming it may mean that instance (`stillUsed`).
  */
-export function unlinkRemovedInstances(layout: Layout, removed: ReadonlySet<number>): HierarchyUnlink {
-  const result: HierarchyUnlink = { detachedChildren: [], updatedParents: [] };
+export function unlinkRemovedInstances(layout: Layout, removedUids: ReadonlySet<number>): HierarchyUnlink {
+  const result: HierarchyUnlink = { detachedChildren: [], updatedParents: [], stillUsed: [] };
+  if (removedUids.size === 0) return result;
+  const remaining = uidCounts(layout);
+  const removed = new Set<number>();
+  for (const uid of removedUids) {
+    if (remaining.has(uid)) result.stillUsed.push(uid);
+    else removed.add(uid);
+  }
   if (removed.size === 0) return result;
   forEachLayoutInstance(layout, instance => {
     const sceneGraph = sceneGraphOf(instance);
@@ -106,6 +130,10 @@ export function hierarchyUnlinkWarnings(unlink: HierarchyUnlink): string[] {
   if (unlink.updatedParents.length > 0) {
     warnings.push(`Removed the hierarchy links from UID ${unlink.updatedParents.join(', ')} to the removed instance(s).`);
   }
+  if (unlink.stillUsed.length > 0) {
+    warnings.push(`Another instance of the layout has UID ${unlink.stillUsed.join(', ')} too (duplicate-uid in validate_project), so ` +
+      'hierarchy links naming that UID were left as they are: check them in the Construct 3 editor.');
+  }
   return warnings;
 }
 
@@ -132,19 +160,24 @@ export interface HierarchyLinkProblem {
  * whose other side does not name this instance (e.g. a link left behind when
  * an instance was deleted, which a reused UID then points at another
  * instance). Each broken link is reported once, from the side that has it.
+ * UIDs that several instances of the layout have are skipped, as instances
+ * and as link targets: which instance a link means cannot be told, and
+ * duplicate-uid reports them.
  */
 export function findHierarchyLinkProblems(layout: unknown): HierarchyLinkProblem[] {
+  const counts = uidCounts(layout);
   const byUid = new Map<number, Instance>();
   forEachLayoutInstance(layout, instance => {
-    if (typeof instance.uid === 'number' && !byUid.has(instance.uid)) byUid.set(instance.uid, instance);
+    if (typeof instance.uid === 'number' && counts.get(instance.uid) === 1) byUid.set(instance.uid, instance);
   });
+  const duplicate = (uid: number) => (counts.get(uid) ?? 0) > 1;
   const problems: HierarchyLinkProblem[] = [];
   forEachLayoutInstance(layout, (instance, entry) => {
     const sceneGraph = sceneGraphOf(instance);
-    if (!sceneGraph || typeof instance.uid !== 'number') return;
+    if (!sceneGraph || typeof instance.uid !== 'number' || duplicate(instance.uid)) return;
     const base = { uid: instance.uid, type: String(instance.type), ...(entry ? { entry } : {}) };
     const parent = parentUidOf(sceneGraph);
-    if (parent !== undefined) {
+    if (parent !== undefined && !duplicate(parent)) {
       const parentGraph = sceneGraphOf(byUid.get(parent));
       if (!byUid.has(parent)) problems.push({ ...base, problem: 'missing-parent', target: parent });
       else if (!parentGraph || !childUidsOf(parentGraph).includes(instance.uid)) {
@@ -152,6 +185,7 @@ export function findHierarchyLinkProblems(layout: unknown): HierarchyLinkProblem
       }
     }
     for (const child of childUidsOf(sceneGraph)) {
+      if (duplicate(child)) continue;
       const childInstance = byUid.get(child);
       if (!childInstance) {
         problems.push({ ...base, problem: 'missing-child', target: child });
