@@ -62,7 +62,7 @@ Index of documentation: the manual URL, topic categories (interface, project, pl
 
 ### `construct3://docs/manual/{topic}`
 
-Official Construct 3 documentation fetched from construct.net.
+A short Markdown stub with the construct.net manual URL for the topic. The page content is not fetched; the stub asks the client to open the URL itself (construct.net blocks many automated requests).
 
 ### `construct3://docs/pitfalls`
 
@@ -1201,7 +1201,7 @@ These tools let external automation (Playwright, a browser console, anything tha
 
 ### `inject_runtime_bridge`
 
-Write the bridge script and register it in `project.c3proj` (`rootFileFolders.script.items`). The script starts through `runOnStartup()` and processes commands each tick. No parameters.
+Write the bridge script and register it in `project.c3proj` (`rootFileFolders.script.items`, with `"file-info": {"purpose": "none"}`). No `.bak` is written. The script uses `runOnStartup()` and processes commands each tick. According to the Construct 3 manual, Construct only loads and runs the main script automatically, and scripts with Purpose "(none)" must be imported by the main script, so import it there (`import "./c3-runtime-bridge.js";`) or set its Purpose to Main script; this is not yet confirmed in a live preview. When it runs, the console shows `[c3-bridge] Runtime bridge initialized. Access via globalThis.__c3bridge`. `submit(type, args)` returns a command id; `getResult(id)` returns `{ ok, value }` or `{ ok: false, error }` once, after the next tick (`null` before). No parameters.
 
 ### `remove_runtime_bridge`
 
@@ -1213,7 +1213,7 @@ List the commands the bridge understands (`ping`, `callFunction`, `getGlobalVar`
 
 ### `generate_bridge_eval_script`
 
-Generate a Python script and manual console steps that submit a bridge command and poll for its result.
+Generate a Python script and manual console steps that submit a bridge command and poll for its result. The Python script only prints the JavaScript lines (`js_submit`, `js_poll_template`) to run in the preview's browser console; it does not connect to the browser. The console steps (`manualUsage`) name the Firefox DevTools console, but they are plain JavaScript for the developer tools console of the preview window.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1222,7 +1222,7 @@ Generate a Python script and manual console steps that submit a bridge command a
 
 ### `export_for_preview`
 
-Pre-flight check for preview testing: reports the project's worker mode (`useWorker` should be `"dom"` so the bridge can reach `globalThis`) and, by default, injects the bridge.
+Pre-flight check for preview testing: reports the project's worker mode (`useWorker` should be `"dom"` so the bridge can reach `globalThis`) and, by default, injects the bridge into the project folder. It does not change `useWorker`. In the editor the setting is *Use worker* (Project Properties, Advanced) with Auto, Yes and No; No is stored as `"dom"`. With `injectBridge: false` nothing is written.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1296,10 +1296,14 @@ Diagnose a game that gets stuck or a feature that silently does nothing. Optiona
 
 ```json
 {
-  "content": [{ "type": "text", "text": "Error: message" }],
+  "content": [{ "type": "text", "text": "Object \"Player\" already exists. Use update_object_properties to modify it." }],
   "isError": true
 }
 ```
+
+The text is a plain message (some start with `Error ...`, e.g. `Error creating object: ...`). Arguments that do not match a tool's input schema are refused the same way, with a text that starts `MCP error -32602: Input validation error: Invalid arguments for tool <name>: [...]`.
+
+Refusals by the reference checks are **not** errors: `delete_object`, `update_object_properties` and similar tools return a normal response with `"success": false`, `"action": "delete_blocked"` or `"update_blocked"`, a `message` and the `references` found. Nothing is written in either case.
 
 ### WriteResult
 
@@ -1372,4 +1376,4 @@ interface ReferenceCheckResult {
 
 ---
 
-**Last Updated**: 2026-09-25
+**Last Updated**: 2026-09-29
