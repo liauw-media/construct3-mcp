@@ -275,6 +275,35 @@ describe('a write never replaces a change made on disk after the call read the f
     expect([a, b].filter(r => r.isError)).toHaveLength(1);
   });
 
+  it('of two parallel create_object calls with the same name, the second is refused', async () => {
+    // Both calls pass the tool's own check for an existing file before either writes
+    const entityFileRefusal = writer.entityFileRefusal.bind(writer);
+    let checks = 0;
+    let bothChecked!: () => void;
+    const bothHaveChecked = new Promise<void>(resolve => { bothChecked = resolve; });
+    vi.spyOn(writer, 'entityFileRefusal').mockImplementation(async (...args) => {
+      const refusal = await entityFileRefusal(...args);
+      if (++checks <= 2) {
+        if (checks === 2) bothChecked();
+        await bothHaveChecked;
+      }
+      return refusal;
+    });
+
+    const [sprite, text] = await Promise.all([
+      call('create_object', { name: 'Enemy', pluginId: 'Sprite' }),
+      call('create_object', { name: 'Enemy', pluginId: 'Text' }),
+    ]);
+
+    const results = [sprite, text];
+    expect(results.filter(r => r.isError)).toHaveLength(1);
+    const refused = results.find(r => r.isError)!;
+    expect(refused.text).toContain('Refusing to create "Enemy": the file objectTypes/Enemy.json already exists');
+    const winner = sprite.isError ? 'Text' : 'Sprite';
+    expect((await readJson('objectTypes/Enemy.json'))['plugin-id']).toBe(winner);
+    expect((await readJson('project.c3proj')).objectTypes.items.filter((n: string) => n === 'Enemy')).toHaveLength(1);
+  });
+
   it('a file the call wrote itself can be written again in the same call', async () => {
     await runInToolCall(async () => {
       const sheet = await reader.readEventSheet('MainSheet');

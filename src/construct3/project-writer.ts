@@ -20,6 +20,7 @@ import { simulateImageRenames } from './animation-rename.js';
 import {
   currentToolCall,
   fileKey,
+  noteFileRead,
   noteFileWritten,
   sameFileState,
   statFileState,
@@ -530,10 +531,11 @@ export class Construct3ProjectWriter {
   ): Promise<string> {
     // Pre-write validation
     const json = this.validateJsonData(data, name);
-    if (options.createOnly) {
+    const refuseExisting = async () => {
       const refusal = await this.entityFileRefusal(category, name, subfolder);
       if (refusal) throw new Error(refusal);
-    }
+    };
+    if (options.createOnly) await refuseExisting();
 
     const requested = this.entityFilePath(category, name, subfolder);
 
@@ -542,6 +544,13 @@ export class Construct3ProjectWriter {
     const filePath = await existingSpelling(requested);
     try {
       return await this.withFileLock(filePath, async () => {
+        if (options.createOnly) {
+          // Again under the file's lock: of two parallel calls creating the
+          // same entity, the second sees the first one's file and is refused
+          await refuseExisting();
+          // The call expects no file there, whatever state another call left
+          noteFileRead(fileKey(filePath), null);
+        }
         await this.assertUnchangedSinceRead(filePath, this.projectRelative(filePath));
 
         // Keep the existing file's text style; a new file follows the project's
