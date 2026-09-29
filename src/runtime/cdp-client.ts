@@ -14,6 +14,8 @@ import { isLoopbackHost } from "./preview-server.js";
 
 const BRIDGE_POLL_INTERVAL_MS = 100;
 const CDP_CALL_TIMEOUT_MS = 5_000;
+/** A capture of a large canvas takes seconds (a 4K frame of noise took about 5 s on a busy machine). */
+const SCREENSHOT_TIMEOUT_MS = 30_000;
 const LONG_PRESS_MS = 500;
 const SWIPE_STEPS = 8;
 const SWIPE_STEP_MS = 16;
@@ -170,6 +172,8 @@ export interface ScreenshotOptions {
   quality?: number;
   /** Capture only the game canvas rectangle. */
   canvasOnly: boolean;
+  /** How long the capture may take (default 30 s). */
+  timeoutMs?: number;
 }
 
 export interface ScreenshotResult {
@@ -1295,7 +1299,7 @@ export class RuntimeConnectionManager {
       clip = { x: canvas.left, y: canvas.top, width: canvas.cssWidth, height: canvas.cssHeight };
       params.clip = { ...clip, scale: 1 };
     }
-    const captured = await connection.command("Page.captureScreenshot", params) as { data?: unknown };
+    const captured = await connection.command("Page.captureScreenshot", params, options.timeoutMs ?? SCREENSHOT_TIMEOUT_MS) as { data?: unknown };
     if (!captured || typeof captured.data !== "string") throw new Error("Page.captureScreenshot returned no image data");
     return { data: Buffer.from(captured.data, "base64"), format: options.format, clip };
   }

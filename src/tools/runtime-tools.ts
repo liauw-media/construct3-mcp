@@ -828,11 +828,12 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
       quality: z.number().int().min(0).max(100).optional().describe('JPEG quality 0-100 (jpeg only)'),
       canvasOnly: z.boolean().optional().default(false).describe('Capture only the game canvas rectangle (default: the whole viewport)'),
       overwrite: z.boolean().optional().default(false).describe('Replace outputPath if the file exists (default: false, an existing file is an error)'),
+      timeoutMs: z.number().int().min(1_000).max(120_000).optional().default(30_000).describe('How long the capture may take (default 30000; a large canvas takes seconds)'),
     },
-    async ({ connectionId, outputPath, format, quality, canvasOnly, overwrite }) => {
+    async ({ connectionId, outputPath, format, quality, canvasOnly, overwrite, timeoutMs }) => {
       try {
         await checkScreenshotTarget(outputPath, format, overwrite, reader.getProjectDir());
-        const shot = await connections.captureScreenshot({ connectionId, format, quality, canvasOnly });
+        const shot = await connections.captureScreenshot({ connectionId, format, quality, canvasOnly, timeoutMs });
         await mkdir(dirname(outputPath), { recursive: true });
         // 'wx' fails rather than replace a file that appeared meanwhile.
         await writeFile(outputPath, shot.data, { flag: overwrite ? 'w' : 'wx' });

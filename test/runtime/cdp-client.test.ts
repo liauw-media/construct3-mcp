@@ -20,6 +20,8 @@ interface FakeCdpOptions {
   resultResponseDelayMs?: number;
   /** Answer Page.captureScreenshot with this many image bytes instead of the echoed parameters. */
   screenshotBytes?: number;
+  /** Hold the answer to Page.captureScreenshot until releaseScreenshot() is called. */
+  holdScreenshot?: boolean;
   /** What bridge.cancel(id) answers; "absent" plays a bridge without cancel. */
   cancelAnswer?: "queued" | "result" | false | "absent";
   /**
@@ -56,6 +58,8 @@ interface FakeCdp {
   housekeeping: () => Array<{ page: string; method: string }>;
   /** The CDP session each bridge.submit was evaluated in ("page" for the page itself). */
   submitSessions: () => string[];
+  /** Send the held screenshot answers (holdScreenshot). */
+  releaseScreenshot: () => void;
   close(): Promise<void>;
 }
 
@@ -66,6 +70,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
   const cancelledIds: number[] = [];
   const housekeeping: Array<{ page: string; method: string }> = [];
   const submitSessions: string[] = [];
+  const heldScreenshots: Array<() => void> = [];
   const pages: FakePage[] = options.pages ?? [{ id: "page-1", url: "http://localhost/game", bridge: "page" }];
   let nextCommandId = 17;
   const resultChecks = new Map<number, number>();
@@ -142,7 +147,9 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
           : options.screenshotBytes !== undefined
             ? { data: Buffer.alloc(options.screenshotBytes, 0x5a).toString("base64") }
             : { data: Buffer.from(`image:${JSON.stringify(request.params ?? {})}`).toString("base64") };
-        socket.send(JSON.stringify({ id: request.id, result }));
+        const send = () => socket.send(JSON.stringify({ id: request.id, result }));
+        if (request.method === "Page.captureScreenshot" && options.holdScreenshot) heldScreenshots.push(send);
+        else send();
         return;
       }
 
@@ -244,6 +251,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     cancelled: () => [...cancelledIds],
     housekeeping: () => [...housekeeping],
     submitSessions: () => [...submitSessions],
+    releaseScreenshot: () => { for (const send of heldScreenshots.splice(0)) send(); },
     cdpCommands: () => cdpCommands.map((command) => ({
       method: command.method,
       params: { ...command.params },
@@ -1035,6 +1043,42 @@ describe("screenshot_game", () => {
     } finally {
       await rm(project, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("waits longer than an ordinary CDP call for a large capture, 30 s by default or timeoutMs", async () => {
+    const fake = await startFakeCdp({ holdScreenshot: true });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+    const dir = await mkdtemp(join(tmpdir(), "c3-shot-"));
+    const captures = () => fake.cdpCommands().filter((c) => c.method === "Page.captureScreenshot").length;
+    const untilCaptured = async (count: number) => {
+      for (let turn = 0; captures() < count && turn < 100_000; turn++) await new Promise((r) => setImmediate(r));
+    };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // A 4K canvas of noise takes more than the 5 s an ordinary CDP call gets.
+      const slow = server.callTool("screenshot_game", { connectionId: connected.connectionId, outputPath: join(dir, "slow.png") });
+      await untilCaptured(1);
+      await vi.advanceTimersByTimeAsync(20_000);
+      fake.releaseScreenshot();
+      vi.useRealTimers();
+      expect(parseToolResult(await slow).success).toBe(true);
+
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const bounded = server.callTool("screenshot_game", { connectionId: connected.connectionId, outputPath: join(dir, "bounded.png"), timeoutMs: 2_000 });
+      await untilCaptured(2);
+      await vi.advanceTimersByTimeAsync(2_500);
+      vi.useRealTimers();
+      const timedOut = await bounded;
+      expect(timedOut.isError).toBe(true);
+      expect(timedOut.content[0].text).toMatch(/timed out after 2000ms/u);
+      fake.releaseScreenshot();
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
     }
   });
 
