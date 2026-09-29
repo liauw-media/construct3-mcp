@@ -2,6 +2,17 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `validate_project` check `hierarchy-link` (warning): hierarchy (scene graph) links that name no instance of the layout, and one-sided links (a parent that does not list its child, a child that names another parent or none), such as the links older versions of `delete_instance_from_layout` and `delete_layer` left behind (#38).
+
+### Fixed
+
+- `delete_instance_from_layout` and `delete_layer` remove the hierarchy links to the instances they delete: children of a deleted parent stay in the layout without a parent (`"parent-uid": null`), also on other layers, and a deleted child's entry is taken out of its parent's `children` (an emptied array is removed, as the editor saves it). Before, both sides kept pointing at the deleted UID, and since a new instance can get the UID of a deleted one, the link then pointed at an unrelated instance. A warning names the instances changed (#38).
+- New UIDs (`add_instance_to_layout`, `create_object` for global objects) are above every UID a hierarchy link names, also in layouts scanned as text, so a link left behind by an older version never points at a new instance (#38).
+
 ## [1.9.2] - 2026-09-29
 
 ### Highlights

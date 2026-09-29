@@ -23,6 +23,7 @@ import { scanLegacyEventShapes, describeLegacyEventShapeHit } from './legacy-eve
 import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.js';
 import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
+import { findHierarchyLinkProblems, type HierarchyLinkProblem } from '../hierarchy.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
 import { nameKey } from '../names.js';
@@ -153,6 +154,7 @@ export async function validateProjectIntegrity(
 
   // Warning checks
   checkDuplicateUids(layouts, objects, warnings);
+  checkHierarchyLinks(layouts, warnings);
   await checkBrokenObjectReferences(reader, objects, families, layouts, warnings);
   await checkMissingBehaviorsAndVariables(reader, families, warnings);
   checkDuplicateLayerNames(layouts, warnings);
@@ -173,8 +175,8 @@ export async function validateProjectIntegrity(
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
   // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable,
-  // frame-image
-  const checksRun = 26;
+  // frame-image, hierarchy-link
+  const checksRun = 27;
 
   return {
     valid: errors.length === 0 && unscannedFiles.length === 0,
@@ -1191,6 +1193,41 @@ function checkDuplicateLayerNames(layouts: Map<string, Layout>, warnings: Integr
         suggestion: 'Rename all but one of them with update_layer, which finds a layer by its exact name or a sub-layer by its path' +
           (subLayer ? ` (e.g. "${layerPathLabel(subLayer)}")` : '') +
           '. Layers with the same name and the same path have to be renamed in the layout file.',
+      });
+    }
+  }
+}
+
+// ─── Hierarchy Links ─────────────────────────────────────────
+
+const HIERARCHY_PROBLEMS: Record<HierarchyLinkProblem['problem'], (p: HierarchyLinkProblem) => string> = {
+  'missing-parent': p => `names parent UID ${p.target}, which is no instance of this layout`,
+  'missing-child': p => `lists child UID ${p.target}, which is no instance of this layout`,
+  'parent-not-linked': p => `names parent UID ${p.target}, which does not list it as a child`,
+  'child-not-linked': p => `lists child UID ${p.target}, which names another parent or none`,
+};
+
+/**
+ * Hierarchy (scene graph) links that point at no instance of the layout, or
+ * whose other side does not name the instance (see hierarchy.ts). Older
+ * versions of delete_instance_from_layout and delete_layer left such links
+ * behind, and a new instance can get the UID of a deleted one, so a link left
+ * behind can point at an unrelated instance. What the editor does with such a
+ * link when it opens the project is not verified, so a warning.
+ */
+function checkHierarchyLinks(layouts: Map<string, Layout>, warnings: IntegrityIssue[]): void {
+  for (const [layoutName, layout] of layouts) {
+    for (const problem of findHierarchyLinkProblems(layout)) {
+      const where = problem.entry ? `${layerLocation(problem.entry)}/` : 'nonworld:';
+      warnings.push({
+        check: 'hierarchy-link',
+        entity: `layouts/${layoutName}/${where}inst:${problem.type}`,
+        message: `The hierarchy record of "${problem.type}" UID ${problem.uid} in layout "${layoutName}" ` +
+          `${HIERARCHY_PROBLEMS[problem.problem](problem)}. Hierarchy links name UIDs, and a new instance can get the UID ` +
+          'of a deleted one, so a link left behind by a deletion can point at an unrelated instance.',
+        suggestion: 'Fix the link in the Construct 3 editor (remove the instance from its parent, or add it again), or in the layout file: ' +
+          'the child\'s sceneGraphData "parent-uid" and the parent\'s sceneGraphData "children" entry must name each other. ' +
+          'Older versions of delete_instance_from_layout and delete_layer left such links behind.',
       });
     }
   }

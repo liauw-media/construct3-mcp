@@ -112,12 +112,14 @@ function toReadFailure(error: unknown): ReadFailure {
 /**
  * Regex-scan raw JSON text for "uid"/"sid" values without parsing it.
  * Over-approximation (a value inside a string literal) is harmless for
- * high-water and collision purposes. Exported so the test mock shares this
- * exact implementation instead of re-implementing it.
+ * high-water and collision purposes. The UIDs hierarchy links name count too
+ * ("parent-uid", and "uid" of a children entry), as for parsed layouts.
+ * Exported so the test mock shares this exact implementation instead of
+ * re-implementing it.
  */
 export function scanIdsInText(content: string): { highestUid: number; sids: number[] } {
   let highestUid = 0;
-  for (const match of content.matchAll(/"uid"\s*:\s*(\d+)/g)) {
+  for (const match of content.matchAll(/"(?:parent-)?uid"\s*:\s*(\d+)/g)) {
     const uid = Number(match[1]);
     if (uid > highestUid) highestUid = uid;
   }

@@ -33,12 +33,14 @@ import {
 import {
   countInstancesInLayerTree,
   findInstanceByUid,
+  forEachLayerInstance,
   findLayerNameClash,
   findLayersByName,
   layerEntries,
   layerPathLabel,
   type LayerEntry,
 } from '../construct3/layers.js';
+import { hierarchyUnlinkWarnings, unlinkRemovedInstances } from '../construct3/hierarchy.js';
 
 /**
  * What delete_layout looks for in the text of a layout file it could not
@@ -576,7 +578,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_layer',
-    'Delete a layer or sub-layer from a layout, together with its sub-layers (a layout must keep at least one top-level layer)',
+    'Delete a layer or sub-layer from a layout, together with its sub-layers (a layout must keep at least one top-level layer). Hierarchy links of instances on other layers to the deleted instances are removed (children stay, without a parent).',
     {
       layoutName: z.string().max(200).describe('Layout name'),
       layerName: z.string().max(200).describe('Layer name to delete (any layer or sub-layer; a sub-layer can also be given by its path, e.g. "Main > HUD")'),
@@ -618,7 +620,14 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           });
         }
 
+        // Hierarchy links go across layers: links of instances left in the
+        // layout to the instances deleted with the layer are removed
+        const removedUids = new Set<number>();
+        forEachLayerInstance([entry.layer], instance => {
+          if (typeof instance.uid === 'number') removedUids.add(instance.uid);
+        });
         entry.siblings.splice(entry.index, 1);
+        const unlink = unlinkRemovedInstances(layout, removedUids);
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
@@ -626,6 +635,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         const warnings: string[] = [];
         if (instanceCount > 0) warnings.push(`Deleted layer contained ${instanceCount} instance(s)${withSubLayers} — they have been removed.`);
         if (subLayerCount > 0) warnings.push(`Its ${subLayerCount} sub-layer(s) were deleted with it.`);
+        warnings.push(...hierarchyUnlinkWarnings(unlink));
 
         const result: WriteResult = {
           success: true,
@@ -724,7 +734,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_instance_from_layout',
-    'Remove a placed object instance (on any layer or sub-layer, or a non-world instance) from a layout by its UID',
+    'Remove a placed object instance (on any layer or sub-layer, or a non-world instance) from a layout by its UID. Hierarchy links to it are removed: its children stay in the layout without a parent, and its parent no longer lists it.',
     {
       layoutName: z.string().max(200).describe('Layout name'),
       uid: z.number().int().describe('UID of the instance to remove'),
@@ -745,17 +755,23 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         }
         const removedType = typeof found.instance.type === 'string' ? found.instance.type : undefined;
         found.list.splice(found.index, 1);
+        // Hierarchy links name UIDs: its children lose their parent, its parent the child entry
+        const unlink = unlinkRemovedInstances(layout, new Set([args.uid]));
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
 
+        const warnings = [
+          ...(removedType ? [`Removed instance of "${removedType}" (UID ${args.uid}) from ${describeInstancePlace(found.entry)}.`] : []),
+          ...hierarchyUnlinkWarnings(unlink),
+        ];
         const result: WriteResult = {
           success: true,
           entity: args.layoutName,
           category: 'layout',
           action: 'updated',
           backupFile: backupPath,
-          warnings: removedType ? [`Removed instance of "${removedType}" (UID ${args.uid}) from ${describeInstancePlace(found.entry)}.`] : undefined,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
