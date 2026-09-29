@@ -40,7 +40,15 @@
  * The UID/SID scan of the ID generator (issue #49) reads such files the same
  * way (scanFileIds, issue #59): streamed, so a file of any size costs memory
  * for one chunk (and the SIDs found), not a string as long as the file, which
- * JavaScript cannot hold beyond about 512MB.
+ * JavaScript cannot hold beyond about 512MB. Unlike the search, it drops NUL
+ * characters instead of rejecting the file, and reads UTF-16BE as UTF-8. The
+ * entries it looks for are ASCII, and UTF-8 decoding keeps every ASCII byte
+ * as it is: in UTF-16 without a byte order mark, and in UTF-16BE, only NUL
+ * bytes stand between their characters, and the zeros at the end of a save
+ * cut short hold no entry. Dropping NUL characters can only make it find
+ * more entries or longer numbers, never miss a UID, so such a file does not
+ * block new UIDs. (A name search could miss a name outside ASCII in such a
+ * file, so searchFileText still rejects it.)
  */
 
 import { createReadStream } from 'fs';
@@ -375,13 +383,21 @@ export class RawTextEncodingError extends Error {
   readonly code = 'E_TEXT_ENCODING';
 }
 
+/**
+ * What streamFileText does with NUL characters and UTF-16BE: "reject" the
+ * file (the text search, which could miss a name outside ASCII in such a
+ * file), or "drop" the NUL characters and read UTF-16BE as UTF-8 (the
+ * UID/SID scan, whose entries are ASCII; see the top of this file).
+ */
+type NulHandling = 'reject' | 'drop';
+
 /** The encoding to stream a file in, from its first bytes: UTF-16LE after its byte order mark, otherwise UTF-8. */
-async function textEncodingOf(path: string): Promise<BufferEncoding> {
+async function textEncodingOf(path: string, nul: NulHandling): Promise<BufferEncoding> {
   const handle = await open(path, 'r');
   try {
     const { buffer, bytesRead } = await handle.read(Buffer.alloc(2), 0, 2, 0);
     if (bytesRead === 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return 'utf16le';
-    if (bytesRead === 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    if (bytesRead === 2 && buffer[0] === 0xfe && buffer[1] === 0xff && nul === 'reject') {
       throw new RawTextEncodingError('The file is UTF-16BE text, which the text search does not read');
     }
     return 'utf8';
@@ -393,19 +409,26 @@ async function textEncodingOf(path: string): Promise<BufferEncoding> {
 /**
  * Stream a file as text, one chunk of CHUNK_SIZE bytes at a time, to
  * `onPiece`, until it returns true (nothing more needed). The file is read
- * as UTF-8, or as UTF-16LE after that byte order mark; a file in UTF-16BE or
- * with a NUL character rejects with a RawTextEncodingError. fs errors
- * propagate unwrapped.
+ * as UTF-8, or as UTF-16LE after that byte order mark. With `nul` "reject"
+ * (the default), a file in UTF-16BE or with a NUL character rejects with a
+ * RawTextEncodingError; with "drop", UTF-16BE is read as UTF-8 and NUL
+ * characters are left out of the pieces. fs errors propagate unwrapped.
  */
-async function streamFileText(path: string, onPiece: (piece: string) => boolean): Promise<void> {
-  const encoding = await textEncodingOf(path);
+async function streamFileText(
+  path: string,
+  onPiece: (piece: string) => boolean,
+  nul: NulHandling = 'reject',
+): Promise<void> {
+  const encoding = await textEncodingOf(path, nul);
   const stream = createReadStream(path, { encoding, highWaterMark: CHUNK_SIZE });
   try {
-    for await (const piece of stream) {
-      if ((piece as string).includes('\u0000')) {
-        throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
+    for await (const chunk of stream) {
+      let piece = chunk as string;
+      if (piece.includes('\u0000')) {
+        if (nul === 'reject') throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
+        piece = piece.replaceAll('\u0000', '');
       }
-      if (onPiece(piece as string)) break;
+      if (onPiece(piece)) break;
     }
   } finally {
     stream.destroy();
@@ -527,16 +550,17 @@ export function scanIdsInText(content: string): { highestUid: number; sids: numb
 
 /**
  * Scan a file for its UIDs and SIDs (see RawIdScan), streaming it: no size
- * limit, memory for one chunk and the SIDs found. Read as searchFileText
- * reads: UTF-8, or UTF-16LE after its byte order mark; a file in UTF-16BE or
- * with a NUL character rejects with a RawTextEncodingError. fs errors
- * propagate unwrapped (ENOENT: no file).
+ * limit, memory for one chunk and the SIDs found. Read as UTF-8, or as
+ * UTF-16LE after its byte order mark, without its NUL characters, so UTF-16
+ * without a byte order mark and UTF-16BE are read too (see the top of this
+ * file): no file is rejected for its encoding. fs errors propagate unwrapped
+ * (ENOENT: no file).
  */
 export async function scanFileIds(path: string): Promise<{ highestUid: number; sids: number[] }> {
   const scan = new RawIdScan();
   await streamFileText(path, piece => {
     scan.push(piece);
     return false;
-  });
+  }, 'drop');
   return scan.finish();
 }

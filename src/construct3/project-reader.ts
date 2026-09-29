@@ -519,9 +519,10 @@ export class Construct3ProjectReader {
    * imageSpriteIds are not recovered (random 7-digit, collision-negligible).
    * The file is streamed (scanFileIds in raw-text-search.ts), so its size is
    * not limited by the length of a string. fs errors propagate unwrapped so
-   * callers can test `.code` (ENOENT means there is nothing to recover); a
-   * file that cannot be read as text (UTF-16BE, NUL characters) rejects with
-   * a RawTextEncodingError, so the ID generator treats it as unscannable.
+   * callers can test `.code` (ENOENT means there is nothing to recover). No
+   * file is rejected for its encoding: NUL characters are dropped, so UTF-16
+   * without a byte order mark, UTF-16BE and a save cut short (zeros at the
+   * end) are scanned too.
    */
   async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
     return scanFileIds(this.resolveEntityPath(category, name));

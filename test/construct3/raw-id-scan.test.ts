@@ -9,9 +9,11 @@
  *   string limit: `readFile` with an encoding throws what it throws for a
  *   608MB file on Node 22 (RangeError "Invalid string length") for files
  *   over LOWERED_STRING_LIMIT bytes;
- * - it reads a file with a UTF-16LE byte order mark as UTF-16LE, and counts
- *   a file it cannot read as text (UTF-16BE, NUL characters) as unscannable,
- *   as the text search of the reference checks does (issue #55).
+ * - it reads a file with a UTF-16LE byte order mark as UTF-16LE, and drops
+ *   NUL characters instead of refusing the file: the zeros at the end of a
+ *   save cut short, and those around each ASCII character of UTF-16 without
+ *   a byte order mark or in UTF-16BE (read as UTF-8), so it finds their UIDs
+ *   and SIDs, which are ASCII.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -104,10 +106,10 @@ async function registerLayout(name: string): Promise<void> {
   await writeFile(c3projPath, JSON.stringify(project, null, '\t'));
 }
 
-/** A layout over the read cap: its highest UID comes after a string of spaces that pushes it past the cap. */
-function bigLayoutText(name: string, highUid: number): string {
+/** A layout over the read cap: its highest UID comes after a string of spaces that pushes it past the cap (or `padding` spaces). */
+function bigLayoutText(name: string, highUid: number, padding = READER_SIZE_CAP + 128 * 1024): string {
   return `{"name":${JSON.stringify(name)},"layers":[{"name":"Main","sid":610000000000001,"instances":[` +
-    `{"type":"Sprite","uid":7,"sid":610000000000002,"properties":{},"tags":"${' '.repeat(READER_SIZE_CAP + 128 * 1024)}"},` +
+    `{"type":"Sprite","uid":7,"sid":610000000000002,"properties":{},"tags":"${' '.repeat(padding)}"},` +
     `{"type":"Sprite","uid":${highUid},"sid":610000000000003,"properties":{}}]}],"sid":610000000000004,` +
     `"eventSheet":"MainSheet","width":1920,"height":1080}`;
 }
@@ -209,12 +211,51 @@ describe('UID scan of files in other encodings', () => {
     expect(await new IdGenerator().generateUid(reader)).toBe(50047);
   });
 
-  it('refuses a new UID, naming the file, when a layout holds NUL characters (UTF-16 without a byte order mark)', async () => {
-    await registerLayout('NoBom');
-    await writeFile(join(tmpDir, 'layouts', 'NoBom.json'), Buffer.from(bigLayoutText('NoBom', 60046), 'utf16le'));
+  const SIDS = [610000000000001, 610000000000002, 610000000000003, 610000000000004];
+
+  it('reads UTF-16 without a byte order mark, and UTF-16BE, dropping the NUL bytes around the ASCII characters', async () => {
+    // Under the read limit: the reader skips them as not valid JSON
+    const text = bigLayoutText('Wide', 60046, 1);
+    const files: Array<[string, Buffer]> = [
+      ['LeNoBom', Buffer.from(text, 'utf16le')],
+      ['BeNoBom', Buffer.from(text, 'utf16le').swap16()],
+      ['BeBom', Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, 'utf16le').swap16()])],
+    ];
+    for (const [name, bytes] of files) {
+      await registerLayout(name);
+      await writeFile(join(tmpDir, 'layouts', `${name}.json`), bytes);
+    }
+    const reader = await openReader();
+    expect([...(await reader.readAllLayouts()).keys()]).toEqual(['Layout 1']);
+
+    for (const [name] of files) {
+      expect(await reader.scanEntityIdsRaw('layouts', name), name).toEqual({ highestUid: 60046, sids: SIDS });
+    }
+    expect(await new IdGenerator().generateUid(reader)).toBe(60047);
+  });
+
+  it('allocates above the UIDs of a layout whose end is NUL bytes (a save cut short), as 1.9.2 did', async () => {
+    await registerLayout('Crashed');
+    const text = bigLayoutText('Crashed', 70046, 1);
+    // Cut short after the last instance's UID, the rest of the file zeros: not valid JSON, so the reader skips it
+    const cut = text.indexOf('70046') + '70046'.length;
+    await writeFile(join(tmpDir, 'layouts', 'Crashed.json'),
+      Buffer.concat([Buffer.from(text.slice(0, cut), 'utf8'), Buffer.alloc(64 * 1024)]));
+    const reader = await openReader();
+    expect((await reader.readAllLayouts()).has('Crashed')).toBe(false);
+    expect(reader.getReadFailures('layouts').get('Crashed')?.code).toBe('E_INVALID_JSON');
+
+    expect((await reader.scanEntityIdsRaw('layouts', 'Crashed')).highestUid).toBe(70046);
+    expect(await new IdGenerator().generateUid(reader)).toBe(70047);
+  });
+
+  it('allocates above the UIDs of a layout over the read limit with a NUL character in it', async () => {
+    await registerLayout('BigNul');
+    const text = bigLayoutText('BigNul', 80046);
+    await writeFile(join(tmpDir, 'layouts', 'BigNul.json'), text.replace('    ', '  ' + String.fromCharCode(0) + ' '));
     const reader = await openReader();
 
-    await expect(reader.scanEntityIdsRaw('layouts', 'NoBom')).rejects.toMatchObject({ code: 'E_TEXT_ENCODING' });
-    await expect(new IdGenerator().generateUid(reader)).rejects.toThrow(/Cannot generate a safe UID.*layouts\/NoBom/);
+    expect(await reader.scanEntityIdsRaw('layouts', 'BigNul')).toEqual({ highestUid: 80046, sids: SIDS });
+    expect(await new IdGenerator().generateUid(reader)).toBe(80047);
   });
 });
