@@ -2,6 +2,16 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- `delete_event_sheet` returns `references.callers` and `references.variableReferences` (as `delete_event_from_sheet` does) when other sheets use the functions or global variables of the sheet, next to `includedBy` and `boundLayouts`; with `force` it returns them in `references` as well (#58).
+
+### Fixed
+
+- `delete_event_sheet` refuses without `force` while other event sheets call a function the sheet defines (*Call function* actions, function map registrations, `Functions.Name(...)` expression calls) or use one of its global variables (System conditions and actions on the variable, expressions that use it by name), and lists these uses; with `force` it deletes and names the uses it leaves behind. Before, it checked only includes and layout bindings and left such calls and variable references dangling without a word, which the editor's loader answers with *invalid function name*, *cannot find function* or *cannot find event variable*. The check is the one `delete_event_from_sheet` runs, with the whole sheet deleted: a use that a function or global of the same name in another sheet still resolves does not count, nor do local variables. Event sheets that could not be parsed are searched as text for these functions and globals too, and a sheet to delete that could not be parsed itself refuses without `force`, since what it defines is unknown (#58).
+
 ## [1.9.2] - 2026-09-29
 
 ### Highlights

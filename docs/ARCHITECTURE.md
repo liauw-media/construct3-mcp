@@ -240,7 +240,7 @@ A shared cross-reference index and sixteen analysis modules, several of which bu
 | `load-rules.ts` | Rules the Construct 3 editor enforces when it opens a project (expression syntax, empty parameters, trigger and else placement, name and SID clashes, family plugins); used by `validate_project` and the pre-write checks |
 | `legacy-behavior-keys.ts` | Scan and repair of the legacy `"behavior-type"` key |
 | `legacy-event-shapes.ts` | Scan and repair of event shapes older versions wrote (block `isElse`, condition `isOr`, old function calls, one-string scripts) |
-| `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event would leave pointing at nothing (`delete_event_from_sheet`) |
+| `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event or a whole event sheet would leave pointing at nothing (`delete_event_from_sheet`, `delete_event_sheet`) |
 | `unscanned-uses.ts` | Possible uses in registered files the bulk reads skipped (over the 10MB read limit, not valid JSON): the index lists these files (`unscannedFiles`), and the reference checks and `find_orphaned_objects` / `get_object_dependencies` search them as text; a match or an unreadable file refuses without force |
 | `behavior-refs.ts` | Behavior name checks against objects and families |
 | `group-settings.ts` | Event group settings (`get_group_settings`) |

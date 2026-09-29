@@ -196,6 +196,18 @@ describe('findReferencesLeftByDelete — event variables', () => {
   });
 });
 
+describe('findReferencesLeftByDelete — several deleted events (a deleted sheet, #58)', () => {
+  it('takes every top-level event of a sheet and reports only uses outside them', () => {
+    const lib = [fn('Spawn', 10), variable('Score', 11), block(12, [call('Spawn'), setVar('Score')])];
+    const report = findReferencesLeftByDelete(new Map<string, unknown>([
+      ['Lib', lib],
+      ['Game', [block(20, [call('spawn'), setVar('SCORE')])]],
+    ]), lib, 'Functions');
+    expect(report.functions.map(f => [f.name, f.references.map(r => `${r.sheet}:${r.path}`)])).toEqual([['Spawn', ['Game:block > action:0']]]);
+    expect(report.variables.map(v => [v.name, v.references.map(r => `${r.sheet}:${r.path}`)])).toEqual([['Score', ['Game:block > action:1']]]);
+  });
+});
+
 describe('namesVisibleToOtherSheets', () => {
   it('names the functions a delete removes and a top-level (global) variable', () => {
     const group = { eventType: 'group', title: 'G', sid: 50, children: [fn('Inner', 51), variable('Local', 52)] };

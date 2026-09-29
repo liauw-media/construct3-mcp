@@ -87,6 +87,7 @@ import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/inde
 import {
   blocksWithoutForce,
   checkUnscannedFiles,
+  ownFileReports,
   unscannedFields,
   unscannedFilesOf,
   unscannedRefusal,
@@ -125,16 +126,19 @@ const DANGLING_KIND_LABELS: Record<DeleteReferenceKind, string> = {
   'variable-expression': 'expression(s) using it by name',
 };
 
-/** One sentence per deleted function or variable that is still referenced. */
-function describeDanglingReferences(report: DeleteReferenceReport): string {
+/**
+ * One sentence per deleted function or variable that is still referenced
+ * `outside` what is deleted ("outside the deleted events").
+ */
+function describeDanglingReferences(report: DeleteReferenceReport, outside = 'outside the deleted events'): string {
   const kinds = (refs: DeleteReference[]) => {
     const counts = new Map<DeleteReferenceKind, number>();
     for (const r of refs) counts.set(r.kind, (counts.get(r.kind) ?? 0) + 1);
     return [...counts].map(([kind, n]) => `${n} ${DANGLING_KIND_LABELS[kind]}`).join(', ');
   };
   return [
-    ...report.functions.map(f => `Function "${f.name}" is still referenced ${f.references.length} time(s) outside the deleted events (${kinds(f.references)}).`),
-    ...report.variables.map(v => `Event variable "${v.name}" is still used ${v.references.length} time(s) outside the deleted events (${kinds(v.references)}).`),
+    ...report.functions.map(f => `Function "${f.name}" is still referenced ${f.references.length} time(s) ${outside} (${kinds(f.references)}).`),
+    ...report.variables.map(v => `Event variable "${v.name}" is still used ${v.references.length} time(s) ${outside} (${kinds(v.references)}).`),
   ].join(' ');
 }
 
@@ -503,10 +507,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_sheet',
-    'Delete an event sheet from the project (checks references first: sheets that include it and layouts bound to it; refused without force while there are any). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles).',
+    'Delete an event sheet from the project (checks references first; refused without force while there are any): sheets that include it, layouts bound to it, and uses in other event sheets of the functions and global variables it defines (Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name; scripts are not checked). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name, and event sheets also for those functions and global variables: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles), as does a sheet to delete that could not be parsed itself.',
     {
       name: z.string().max(200).describe('Event sheet name to delete'),
-      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
+      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references; the uses of its functions and global variables left behind are listed in "references" and a warning)'),
     },
     async (args) => {
       try {
@@ -532,17 +536,45 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const hasRefs = includedBy.length > 0 || boundLayouts.length > 0;
 
-        // 3. Event sheets (includes) and layouts (bindings) that could not be parsed
-        const unscanned = await checkUnscannedFiles(
-          reader,
-          index.unscannedFiles.filter(f => !(f.category === 'eventSheets' && f.name === args.name)),
-          [{ categories: ['eventSheets', 'layouts'], allOf: [[nameTerm(args.name)]] }],
-        );
-        const unscannedBlock = blocksWithoutForce(unscanned);
+        // 3. Functions and global variables the sheet defines that other
+        // sheets still use (issue #58): the same check as
+        // delete_event_from_sheet, with every event of the sheet deleted
+        const sheets = await reader.readAllEventSheets();
+        const ownEvents = sheets.get(args.name)?.events;
+        let dangling: DeleteReferenceReport = { functions: [], variables: [], complete: true };
+        const visibleNames = new Set<string>();
+        if (Array.isArray(ownEvents)) {
+          const sheetEvents = new Map<string, unknown>();
+          for (const [name, other] of sheets) sheetEvents.set(name, other.events);
+          dangling = findReferencesLeftByDelete(sheetEvents, ownEvents as object[], functionsObjectName(reader));
+          for (const event of ownEvents) {
+            for (const name of namesVisibleToOtherSheets(event, true)) visibleNames.add(name);
+          }
+        }
+        const danglingCount = countDeleteReferences(dangling);
 
-        if ((hasRefs || unscannedBlock) && !args.force) {
+        // 4. Event sheets (includes; the functions and globals it defines) and
+        // layouts (bindings) that could not be parsed. When the sheet itself
+        // could not be parsed, what it defines is unknown.
+        const otherFiles = index.unscannedFiles.filter(f => !(f.category === 'eventSheets' && f.name === args.name));
+        const unscanned = [
+          ...ownFileReports(index.unscannedFiles, [{
+            category: 'eventSheets',
+            name: args.name,
+            unchecked: 'the functions and global variables it defines are unknown, so their uses in other event sheets could not be checked',
+          }]),
+          ...await checkUnscannedFiles(reader, otherFiles, [
+            { categories: ['eventSheets', 'layouts'], allOf: [[nameTerm(args.name)]] },
+            { categories: ['eventSheets'], allOf: [[...visibleNames].map(n => nameTerm(n))] },
+          ]),
+        ];
+        const unscannedBlock = blocksWithoutForce(unscanned);
+        const outsideSheet = `in other event sheets than "${args.name}"`;
+
+        if ((hasRefs || danglingCount > 0 || unscannedBlock) && !args.force) {
           const reasons = [
             ...(hasRefs ? ['Event sheet is still referenced.'] : []),
+            ...(danglingCount > 0 ? [`${describeDanglingReferences(dangling, outsideSheet)} ${DANGLING_REFERENCE_CONSEQUENCE}`] : []),
             ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
           ];
           return toolResult({
@@ -554,6 +586,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             references: {
               includedBy,
               boundLayouts,
+              ...danglingReferenceList(dangling),
             },
             ...unscannedFields(unscanned),
           });
@@ -563,6 +596,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (hasRefs && args.force) {
           const refList = [...includedBy.map(s => `included by "${s}"`), ...boundLayouts.map(l => `bound to layout "${l}"`)];
           warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
+        }
+        if (danglingCount > 0) {
+          warnings.push(`Deleted with force=true: ${describeDanglingReferences(dangling, outsideSheet)} ` +
+            `${DANGLING_REFERENCE_CONSEQUENCE} Fix them before opening the project in Construct 3.`);
+        }
+        if (!dangling.complete) {
+          warnings.push('The check for uses of the functions and global variables the sheet defines stopped at its traversal limit; uses further on were not checked.');
         }
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
@@ -580,7 +620,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           backupFile: backupPath,
           ...unscannedFields(unscanned),
         };
-        return toolResult(result);
+        // With force=true, the uses of its functions and global variables left dangling
+        return toolResult(danglingCount > 0 ? { ...result, references: danglingReferenceList(dangling) } : result);
       } catch (error) {
         console.error('[delete_event_sheet] failed:', error);
         return toolError(`Error deleting event sheet: ${error instanceof Error ? error.message : String(error)}`);

@@ -685,10 +685,10 @@ Delete an event sheet from the project.
 | `force` | boolean | No | Delete even if referenced (default: false) |
 
 **Behavior:**
-- Checks for references: sheets that include this one, layouts bound to it
-- Event sheets and layouts that could not be parsed (see [Files the server could not parse](#mutation-tools)) are searched for the sheet's name: a match, or such a file that cannot be read at all, blocks as well (`unscannedFiles`)
-- If referenced and `force=false`: returns the reference list and blocks
-- If referenced and `force=true`: deletes with warning (references NOT cleaned up)
+- Checks for references: sheets that include this one, layouts bound to it, and uses in other event sheets of the functions and global variables the sheet defines (its function blocks, also in groups, and the variables at its top level). The uses are those [`delete_event_from_sheet`](#delete_event_from_sheet) checks, with the same scope rules: *Call function* actions, function map registrations and `Functions.Name(...)` calls (listed in `references.callers`), and the System conditions/actions on a variable and expressions that use it by name (`references.variableReferences`). A use that another sheet's function or global of the same name still resolves does not count, uses inside the deleted sheet do not count, and local variables (in groups, blocks and function blocks) are not visible to other sheets. Scripts are not scanned.
+- Event sheets and layouts that could not be parsed (see [Files the server could not parse](#mutation-tools)) are searched for the sheet's name, and event sheets also for the names of its functions and global variables: a match, or such a file that cannot be read at all, blocks as well (`unscannedFiles`). When the sheet to delete could not be parsed itself, the functions and globals it defines are unknown, so the delete is refused too (`textSearch: "not-searched"` with what was `unchecked`).
+- If referenced and `force=false`: returns the reference list (`references`: `includedBy`, `boundLayouts`, and `callers` / `variableReferences` when there are any) and blocks
+- If referenced and `force=true`: deletes with warning (references NOT cleaned up); the uses of its functions and global variables left behind are listed in `references` and named in a warning, since the editor's loader throws *invalid function name*, *cannot find function* or *cannot find event variable* for them (see [`delete_event_from_sheet`](#delete_event_from_sheet))
 - Backs up the JSON file and removes from c3proj
 
 ### `delete_event_from_sheet`
