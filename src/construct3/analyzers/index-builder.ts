@@ -1,6 +1,7 @@
 /**
  * Cross-reference index builder for Construct 3 projects.
- * Foundation for all analysis features: builds lazily on first use, cached.
+ * Foundation for all analysis features: builds lazily on first use, cached
+ * per project (per reader, see getProjectIndex).
  *
  * Objects count as used in events when they are the object of a condition or
  * action, or the objectClass of a custom action block (eventType
@@ -1195,17 +1196,28 @@ export class ProjectIndex {
   }
 }
 
-/** Singleton lazy builder */
-let cachedIndex: ProjectIndex | null = null;
+/**
+ * The built index of each project, keyed by its reader: two projects opened in
+ * one process (scripts, tests, embeddings) never see each other's index.
+ */
+let cachedIndexes = new WeakMap<Construct3ProjectReader, ProjectIndex>();
 
+/** The cross-reference index of the reader's project: built on first use, then cached for that reader. */
 export async function getProjectIndex(reader: Construct3ProjectReader): Promise<ProjectIndex> {
-  if (cachedIndex && cachedIndex.isBuilt()) return cachedIndex;
-  cachedIndex = new ProjectIndex();
-  await cachedIndex.build(reader);
-  return cachedIndex;
+  const cached = cachedIndexes.get(reader);
+  if (cached && cached.isBuilt()) return cached;
+  const index = new ProjectIndex();
+  // Cached before the build: a reset while it runs drops it, so the next call rebuilds
+  cachedIndexes.set(reader, index);
+  await index.build(reader);
+  return index;
 }
 
-/** Reset the cached project index so it rebuilds on next use. */
-export function resetProjectIndex(): void {
-  cachedIndex = null;
+/**
+ * Reset the cached index of the reader's project so it rebuilds on next use;
+ * other projects keep theirs. Without a reader, every project's index is reset.
+ */
+export function resetProjectIndex(reader?: Construct3ProjectReader): void {
+  if (reader) cachedIndexes.delete(reader);
+  else cachedIndexes = new WeakMap();
 }

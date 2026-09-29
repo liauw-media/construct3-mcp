@@ -155,7 +155,7 @@ class Construct3ProjectWriter {
 - **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write. A failure once the backup exists (while or after replacing the file) throws an `EntityWriteError` carrying the backup path, so a change that spans several files can restore this one too (`restoreEntityFile`)
 - **Project lock**: The writer's read-modify-writes of `project.c3proj` (`addToProject`, `removeFromProject`, `updateProjectProperties`, addon auto-registration) share one lock, so parallel writer calls cannot lose each other's updates
 - **Text style**: An existing file keeps its line endings, trailing whitespace and BOM; a new file follows `project.c3proj` (`json-format.ts`)
-- **Cache invalidation**: Reader caches, project index, and ID generator all reset
+- **Cache invalidation**: Reader caches, project index, and ID generator all reset (for the written project only)
 - **Image rollback**: `writeImageFiles()` deletes the images it already wrote when a later one fails
 
 Timelines, `register_addon` / `unregister_addon` and the runtime tools write outside the writer, with fewer of these steps; the README's Safety Model lists the differences. None of them takes the project lock, and the timeline and addon tools use the same `project.c3proj.tmp` file as the writer, so running them in parallel with other writes can lose or fail a `project.c3proj` update. Run them one at a time.
@@ -220,7 +220,7 @@ A shared cross-reference index and fifteen analysis modules, several of which bu
 
 | Module | Purpose |
 |--------|---------|
-| `index-builder.ts` | Builds and caches the project-wide cross-reference index |
+| `index-builder.ts` | Builds the project-wide cross-reference index and caches it per reader |
 | `event-flow.ts` | Include hierarchy and layout bindings (Mermaid output); function definitions and call sites |
 | `object-deps.ts` | Object usage across event sheets, layouts, families; objects not referenced anywhere |
 | `asset-usage.ts` | Sound, music, image, font, video, icon and project file usage (used, unused or not analysed); images follow the index's object usage |
@@ -237,7 +237,7 @@ A shared cross-reference index and fifteen analysis modules, several of which bu
 | `runtime-traps.ts` | Signal pairing and order, script/function-parameter traps (`find_runtime_traps`) |
 | `script-scan.ts` | Lightweight JS/TS scanner for script actions, used by the runtime trap checks |
 
-The cross-reference index (`ProjectIndex`) is cached and reset when writes occur via `resetProjectIndex()`.
+The cross-reference index (`ProjectIndex`) is cached per reader, so projects opened side by side in one process (scripts, tests, embeddings) each keep their own; a write through the writer or the event tools resets the index of its project only, via `resetProjectIndex(reader)`.
 
 ### 7. MCP Layers
 
@@ -297,7 +297,7 @@ Event sheet writes (`add_event_block`, `update_event_block`, `add_event_to_sheet
 
 ```
 Claude → get_object_dependencies({ object: "Player" })
-  → getProjectIndex(reader) (builds or returns cached index)
+  → getProjectIndex(reader) (builds or returns the index cached for this reader)
       → reader.readAllEventSheets()
       → reader.readAllLayouts()
       → reader.readAllFamilies()

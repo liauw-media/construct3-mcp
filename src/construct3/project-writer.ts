@@ -618,7 +618,7 @@ export class Construct3ProjectWriter {
    */
   private invalidateAll(): void {
     this.reader.invalidateCaches();
-    resetProjectIndex();
+    resetProjectIndex(this.reader);
     this.idGen.reset();
   }
 
