@@ -4,14 +4,14 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `find_orphaned_objects` and `get_object_dependencies` return `unanalysedObjects` (`{ name, file, reason, unchecked, files? }`): objects without a use the index found whose own object type file could not be parsed (over the 10MB read limit, not valid JSON, unreadable). Their SID is unknown, so uses by SID (object properties of other instances) cannot be looked up; they are listed there instead of in `orphanedObjects` or `possiblyUsed` / `possiblyUsedObjects`. `get_object_dependencies` marks every such object with `unanalysed` (`{ file, reason, unchecked }`), and `totalReferenced`, `orphanedObjects`, `possiblyUsedObjects` and `unanalysedObjects` add up to `totalObjects`. The fields appear only while there are such files (#60).
+
 ### Changed
 
 - The UID/SID text scan of layouts and object types the reader skips (over the 10MB read limit, invalid JSON) streams the file instead of reading it into memory whole, as the text search of the reference checks does: memory no longer grows with the file (a peak of about 120MB instead of about 290MB of process memory for a 50MB layout), and a file over about 512MB, the most a JavaScript string can hold, no longer refuses new UIDs in `add_instance_to_layout` and `create_object` (a 608MB layout scans in about 1.5 seconds). The scan reads a file with a UTF-16LE byte order mark as UTF-16LE, and drops NUL characters: it finds the UIDs of a file in UTF-16 without a byte order mark or in UTF-16BE (only NUL bytes stand between the ASCII characters of `"uid": 42`) and of a save cut short (zeros at the end). Before, a UTF-16 file was read as UTF-8, where `"uid"` does not match, so its UIDs were missed and a new UID could repeat one of them (#59).
 - The UID/SID text scan also counts the UIDs that hierarchy links name (`"parent-uid"`), wherever a chunk boundary cuts the entry, so a UID a link still names in a skipped layout is not handed out again (#59).
-
-### Added
-
-- `find_orphaned_objects` and `get_object_dependencies` return `unanalysedObjects` (`{ name, file, reason, unchecked, files? }`): objects without a use the index found whose own object type file could not be parsed (over the 10MB read limit, not valid JSON, unreadable). Their SID is unknown, so uses by SID (object properties of other instances) cannot be looked up; they are listed there instead of in `orphanedObjects` or `possiblyUsed` / `possiblyUsedObjects`. `get_object_dependencies` marks every such object with `unanalysed` (`{ file, reason, unchecked }`), and `totalReferenced`, `orphanedObjects`, `possiblyUsedObjects` and `unanalysedObjects` add up to `totalObjects`. The fields appear only while there are such files (#60).
 
 ### Fixed
 

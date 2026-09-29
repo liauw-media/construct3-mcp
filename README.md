@@ -123,7 +123,7 @@ Claude Desktop, Cursor, VS Code and others use a JSON config instead, see [Usage
 |------|-------------|
 | `get_eventsheet_flow` | Event sheet include hierarchy and layout bindings (Mermaid or JSON) |
 | `get_function_map` | Function definitions and call sites across event sheets (Call function actions, `Functions.Name(...)` expression calls, function map registrations) |
-| `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families); objects that files it could not parse possibly use are marked (`possiblyReferencedIn`, `unscannedFiles`) |
+| `get_object_dependencies` | Where objects are used (event sheets, layouts including sub-layers, families); objects that files it could not parse possibly use are marked (`possiblyReferencedIn`, `unscannedFiles`), and objects whose own object type file it could not parse are marked `unanalysed` (listed in `unanalysedObjects` when no use was found) |
 | `find_orphaned_objects` | Find objects not used by any event (including object parameters, expressions, script actions and *Create object (by name)* with a literal name) or layout (including sub-layers, non-world instances and object properties of other instances); objects that files it could not parse possibly use are listed as `possiblyUsed` instead, and objects whose own file it could not parse as `unanalysedObjects` |
 | `get_asset_usage` | Track sound, image, font, video and project file usage (used, unused or not analysed) |
 | `analyze_performance` | Heuristic performance audit with categorized issues |
