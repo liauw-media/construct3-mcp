@@ -19,7 +19,7 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
 │  ┌──────────▼───────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                    │  │
 │  │  ProjectReader · ProjectWriter · IdGenerator             │  │
-│  │  Templates · Analyzers (15) · Cross-Reference Index      │  │
+│  │  Templates · Analyzers (16) · Cross-Reference Index      │  │
 │  │  Runtime bridge · ZIP writer · PNG generator             │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
@@ -85,6 +85,7 @@ class Construct3ProjectReader {
   // Files the bulk reads skipped
   getReadFailures(category): Map<string, ReadFailure>          // name → { code, message }
   scanEntityIdsRaw(category, name): Promise<{ highestUid, sids }> // text scan, no size limit
+  searchEntityTextRaw(category, name, terms): Promise<Set<string>> // streamed name search, no size limit
   getEntityRelativePath(category, name): string                 // e.g. "layouts/Levels/Title.json"
 
   // Query
@@ -115,6 +116,7 @@ class Construct3ProjectReader {
 - **Bounded reads**: Entity and script files over 10MB are refused; a leading BOM is stripped before parsing
 - **Typed read failures**: The per-entity readers throw a `ProjectReadError` with a code (`E_FILE_TOO_LARGE`, `E_FILE_NOT_FOUND`, `E_INVALID_JSON`, `E_READ_ERROR`); the bulk `readAll*()` reads skip such files and record the code per name (`getReadFailures()`), so the ID generator and `validate_project` branch on the code, never on message text. A bulk read stores its failures together with its cached map when it finishes, and callers take them right after the read: a project reload by a concurrent tool call (`invalidateCaches()`) can then drop both, but never leave a cached map without the failures that go with it
 - **Raw ID scan**: `scanEntityIdsRaw()` reads a skipped layout or object type whole, without the size limit and without parsing, and collects its `"uid"` and `"sid"` values with a linear regex; the path goes through the same path map and `resolveProjectPath()` check as the parsed readers
+- **Raw text search**: `searchEntityTextRaw()` searches a skipped file for names (whole words, ignoring case), numbers and bounded patterns (`raw-text-search.ts`), through the same path check. It streams the file in 1MB chunks with an overlap, so memory does not grow with the file, and stops once every term was found; fs errors propagate unwrapped (ENOENT: no file, so no uses). The reference checks use it for the files the index could not parse (`unscanned-uses.ts`)
 
 ### 3. Project Writer (`src/construct3/project-writer.ts`)
 
@@ -216,6 +218,7 @@ Supporting modules next to the templates:
 | `construct3/layers.ts` | The layer tree of a layout: walks every layer and nested sub-layer and their instances (non-world instances included), finds layers and instances, compares layer names ignoring case; every walk over layers or layout instances goes through it |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
 | `construct3/png-generator.ts` | Zero-dependency placeholder PNGs and C3 image file names (all lowercase) |
+| `construct3/raw-text-search.ts` | Streamed text search in files the reader skips: whole-word names ignoring case (as JSON writes them in a string), whole numbers, bounded patterns; one alternation of literals, word boundaries checked where a literal matched |
 | `construct3/timeline-folders.ts` | The editor's Transitions folder in the timelines container (first nameless first-level folder, files in `timelines/transitions/`), shared by the timeline tools and `validate_project` |
 | `construct3/types.ts` | TypeScript types for project files and analysis results |
 | `runtime/bridge.ts` | Generates the injectable runtime bridge script (`globalThis.__c3bridge`) |
@@ -223,7 +226,7 @@ Supporting modules next to the templates:
 
 ### 6. Analyzers (`src/construct3/analyzers/`)
 
-A shared cross-reference index and fifteen analysis modules, several of which build on the index:
+A shared cross-reference index and sixteen analysis modules, several of which build on the index:
 
 | Module | Purpose |
 |--------|---------|
@@ -238,13 +241,14 @@ A shared cross-reference index and fifteen analysis modules, several of which bu
 | `legacy-behavior-keys.ts` | Scan and repair of the legacy `"behavior-type"` key |
 | `legacy-event-shapes.ts` | Scan and repair of event shapes older versions wrote (block `isElse`, condition `isOr`, old function calls, one-string scripts) |
 | `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event would leave pointing at nothing (`delete_event_from_sheet`) |
+| `unscanned-uses.ts` | Possible uses in registered files the bulk reads skipped (over the 10MB read limit, not valid JSON): the index lists these files (`unscannedFiles`), and the reference checks and `find_orphaned_objects` / `get_object_dependencies` search them as text; a match or an unreadable file refuses without force |
 | `behavior-refs.ts` | Behavior name checks against objects and families |
 | `group-settings.ts` | Event group settings (`get_group_settings`) |
 | `event-outline.ts` | Editor event numbers, `locate_event` and the paged `get_eventsheet_outline` |
 | `runtime-traps.ts` | Signal pairing and order, script/function-parameter traps (`find_runtime_traps`) |
 | `script-scan.ts` | Lightweight JS/TS scanner for script actions, used by the runtime trap checks |
 
-The cross-reference index (`ProjectIndex`) is cached per reader, so projects opened side by side in one process (scripts, tests, embeddings) each keep their own; a write through the writer or the event tools resets the index of its project only, via `resetProjectIndex(reader)`.
+The cross-reference index (`ProjectIndex`) is cached per reader, so projects opened side by side in one process (scripts, tests, embeddings) each keep their own; a write through the writer or the event tools resets the index of its project only, via `resetProjectIndex(reader)`. It records the registered files its bulk reads skipped (`unscannedFiles`, not files that do not exist), which nothing in it covers.
 
 ### 7. MCP Layers
 
@@ -348,8 +352,8 @@ The mutation tools provide extra context:
 - **Input validation**: Zod schemas on all tool parameters with length limits
 - **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
 - **Load-time gate**: The five event-editing tools listed under Write Flow reject writes that add an error the editor would refuse at load
-- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole, again for the first ID after each write, up to the about 512MB a JavaScript string can hold; a larger file refuses new UIDs)
+- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole, again for the first ID after each write, up to the about 512MB a JavaScript string can hold; a larger file refuses new UIDs). The name search of the reference checks streams skipped files without a limit
 
 ---
 
-**Last Updated**: 2026-09-26
+**Last Updated**: 2026-09-29

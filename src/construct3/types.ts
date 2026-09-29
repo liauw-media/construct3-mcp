@@ -12,6 +12,8 @@
  * yet modelled here.
  */
 
+import type { UnscannedFileReport } from './analyzers/unscanned-uses.js';
+
 // ─── Project Root ───────────────────────────────────────────
 
 export interface Construct3Project {
@@ -515,7 +517,14 @@ export interface ObjectDependencyNode {
   };
   families: string[];
   coOccursWith: string[];
+  /** References the index found (event references + layouts) */
   referenceCount: number;
+  /**
+   * Files that could not be parsed whose text names the object (or holds its
+   * SID), or that could not be searched at all: possible references, which
+   * referenceCount does not count
+   */
+  possiblyReferencedIn?: string[];
 }
 
 /** Performance issue found by heuristic analysis */
@@ -574,6 +583,11 @@ export interface WriteResult {
   generatedUid?: number;
   warnings?: string[];
   backupFile?: string;
+  /**
+   * Registered files the bulk reads skipped that the tool's reference check
+   * searched as text (see analyzers/unscanned-uses.ts)
+   */
+  unscannedFiles?: UnscannedFileReport[];
 }
 
 /** Result of checking references before deletion */

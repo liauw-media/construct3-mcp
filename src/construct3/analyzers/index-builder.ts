@@ -58,7 +58,11 @@
  * is deleted. Scripts that read instance variables and behaviors by name
  * (instVars.name, behaviors.Name in script actions, script events and project
  * script files) are listed apart (getScriptMemberReads): which object's
- * instances they read is not known, so they only warrant a warning.
+ * instances they read is not known, so they only warrant a warning. A
+ * registered object type whose file could not be parsed (over the read cap,
+ * not valid JSON) still counts as an object type, with the names it gets
+ * from its families only (its own are unknown), so the uses of its families'
+ * names through it are found (issue #55).
  */
 
 import type { Construct3ProjectReader } from '../project-reader.js';
@@ -83,6 +87,7 @@ import {
   parameterValues,
 } from '../event-shapes.js';
 import { forEachLayoutInstance, layerPathLabel } from '../layers.js';
+import { unscannedFilesOf, type UnscannedFile } from './unscanned-uses.js';
 
 /** Instances of an object type in one layout, on one layer (or among the non-world instances). */
 export interface InstancePlacement {
@@ -221,6 +226,12 @@ interface ClassMembers {
   isFamily: boolean;
   variables: string[];
   behaviors: string[];
+  /**
+   * The object type's file could not be parsed (issue #55): its own
+   * instance variables and behaviors are unknown (variables and behaviors
+   * are empty), only those it gets from its families are known
+   */
+  ownUnknown?: boolean;
 }
 
 const MAX_NODES = 100_000;
@@ -503,12 +514,22 @@ export class ProjectIndex {
   /** Warnings collected during indexing */
   warnings: string[] = [];
 
+  /**
+   * Registered event sheets, layouts, object types and families the bulk
+   * reads skipped (over the size cap, not valid JSON, unreadable; not files
+   * that do not exist). Nothing in them is indexed: the reference checks
+   * search them as text (unscanned-uses.ts).
+   */
+  unscannedFiles: UnscannedFile[] = [];
+
   /** Object type and family names that parameters, expressions and scripts can refer to */
   private referableNames: Set<string> = new Set();
   /** Event variable and function parameter names declared in any event sheet */
   private variableNames: Set<string> = new Set();
   /** SID → name of every object type and family (for object properties that store a SID) */
   private namesBySid: Map<number, string> = new Map();
+  /** Name → SID of every object type and family that could be read */
+  private sidsByName: Map<string, number> = new Map();
   /** Instance variable and behavior names of every object type and family that could be read */
   private classMembers: Map<string, ClassMembers> = new Map();
   /** Lower-cased name → name, for the object types and families in classMembers */
@@ -538,15 +559,21 @@ export class ProjectIndex {
     this.allLayouts = await reader.listLayouts();
     this.referableNames = new Set([...this.allObjects, ...(await reader.listFamilies())]);
 
-    // Instance variables and behaviors of object types and families (for the uses found in events)
+    // Instance variables and behaviors of object types and families (for the uses found in events).
+    // Each bulk read's failures are taken right away: a reload by a concurrent call clears them.
     const objectTypes = await reader.readAllObjectTypes();
+    const objectTypeFailures = reader.getReadFailures('objectTypes');
     const families = await reader.readAllFamilies();
-    this.indexClassMembers(objectTypes, families);
-    this.unreadableFamilies = (await reader.listFamilies()).some(name => !families.has(name));
+    const familyFailures = reader.getReadFailures('families');
+    const familyNames = await reader.listFamilies();
+    const unparsedObjectTypes = unscannedFilesOf('objectTypes', this.allObjects, objectTypes, objectTypeFailures);
+    this.indexClassMembers(objectTypes, families, unparsedObjectTypes.map(f => f.name));
+    this.unreadableFamilies = familyNames.some(name => !families.has(name));
     this.functionsName = functionsObjectName(reader);
 
     // Index event sheets (variable names first: parameters are checked against them)
     const eventSheets = await reader.readAllEventSheets();
+    const eventSheetFailures = reader.getReadFailures('eventSheets');
     for (const [, sheet] of eventSheets) {
       if (Array.isArray(sheet.events)) collectVariableNames(sheet.events, this.variableNames);
     }
@@ -571,13 +598,22 @@ export class ProjectIndex {
     for (const [name, data] of [...objectTypes, ...families]) {
       const sid = (data as { sid?: unknown } | null)?.sid;
       if (typeof sid === 'number' && !this.namesBySid.has(sid)) this.namesBySid.set(sid, name);
+      if (typeof sid === 'number') this.sidsByName.set(name, sid);
     }
 
     // Index layouts
     const layouts = await reader.readAllLayouts();
+    const layoutFailures = reader.getReadFailures('layouts');
     for (const [layoutName, layout] of layouts) {
       this.indexLayout(layoutName, layout);
     }
+
+    this.unscannedFiles = [
+      ...unscannedFilesOf('eventSheets', this.allEventSheets, eventSheets, eventSheetFailures),
+      ...unscannedFilesOf('layouts', this.allLayouts, layouts, layoutFailures),
+      ...unparsedObjectTypes,
+      ...unscannedFilesOf('families', familyNames, families, familyFailures),
+    ];
 
     // Index families
     for (const [familyName, familyData] of families) {
@@ -805,21 +841,31 @@ export class ProjectIndex {
     return !this.variableNames.has(name);
   }
 
-  /** Instance variable and behavior names of the object types and families, and each object type's families. */
+  /**
+   * Instance variable and behavior names of the object types and families,
+   * and each object type's families. A registered object type whose file
+   * could not be parsed (`unparsedObjectTypes`) is a class whose own names are
+   * unknown: the uses of the names it gets from a family are still found and
+   * checked (delete_family, update_family), and validate_project does not
+   * report its uses as unresolved.
+   */
   private indexClassMembers(
     objectTypes: ReadonlyMap<string, unknown>,
     families: ReadonlyMap<string, Record<string, unknown>>,
+    unparsedObjectTypes: readonly string[],
   ): void {
-    const add = (name: string, data: unknown, isFamily: boolean) => {
+    const add = (name: string, data: unknown, isFamily: boolean, ownUnknown = false) => {
       const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
       this.classMembers.set(name, {
         isFamily,
         variables: entryNames(record.instanceVariables),
         behaviors: entryNames(record.behaviorTypes),
+        ...(ownUnknown ? { ownUnknown } : {}),
       });
       if (!this.classNamesLower.has(name.toLowerCase())) this.classNamesLower.set(name.toLowerCase(), name);
     };
     for (const [name, data] of objectTypes) add(name, data, false);
+    for (const name of unparsedObjectTypes) add(name, undefined, false, true);
     for (const [name, data] of families) {
       add(name, data, true);
       if (!Array.isArray(data?.members)) continue;
@@ -834,7 +880,9 @@ export class ProjectIndex {
   /**
    * Whether an object type or family has an instance variable or behavior of
    * this name (ignoring case) after `removal`: its own, or for an object type
-   * one of a family it stays a member of.
+   * one of a family it stays a member of. An object type whose file could not
+   * be parsed has no known names of its own, so a use of a family's name
+   * through it counts as broken when it loses that family's name.
    */
   hasMember(
     objectClass: string, kind: MemberReference['kind'], name: string, removal: MemberRemoval = {},
@@ -1035,6 +1083,11 @@ export class ProjectIndex {
     }
   }
 
+  /** SID of an object type or family whose file could be read. */
+  sidOf(name: string): number | undefined {
+    return this.sidsByName.get(name);
+  }
+
   /**
    * Get unique event sheets that reference a given object
    */
@@ -1109,12 +1162,14 @@ export class ProjectIndex {
    * parameter, behaviorType and "Name.Behavior.Expression"; a "Name.member"
    * that names none is one of the plugin's expressions, and the legacy
    * "behavior-type" key is validate_project's legacy-behavior-key check. Uses
-   * through an object type are left out while a family file could not be read.
+   * through an object type are left out while a family file could not be read,
+   * and uses through an object type whose own file could not be parsed.
    */
   findUnresolvedMemberReferences(): MemberReference[] {
     return this.memberReferences.filter(ref =>
       ref.form !== 'member-expression' && ref.form !== 'legacy-behavior-type' &&
       !(this.unreadableFamilies && this.classMembers.get(ref.objectClass)?.isFamily === false) &&
+      !this.classMembers.get(ref.objectClass)?.ownUnknown &&
       !this.hasMember(ref.objectClass, ref.kind, ref.name));
   }
 

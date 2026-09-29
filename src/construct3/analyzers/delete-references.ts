@@ -323,6 +323,30 @@ export function findReferencesLeftByDelete(
   return report;
 }
 
+/**
+ * The names other event sheets can use of what deleting `event` removes: the
+ * functions it holds (function blocks are visible in every sheet) and, when
+ * `event` is a variable at the top level of its sheet (`topLevel`), that
+ * global variable. Variables in groups, blocks and function blocks are local
+ * to their sheet. delete_event_from_sheet searches event sheets it could not
+ * parse for these names (issue #55).
+ */
+export function namesVisibleToOtherSheets(event: object, topLevel: boolean): string[] {
+  const names = new Set<string>();
+  if (topLevel && isRecord(event) && event.eventType === 'variable' && typeof event.name === 'string') {
+    names.add(event.name);
+  }
+  const stack: Array<{ ev: unknown; depth: number }> = [{ ev: event, depth: 0 }];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const { ev, depth } = stack.pop()!;
+    if (!isRecord(ev) || depth > MAX_DEPTH || ++nodes > MAX_NODES) continue;
+    if (ev.eventType === 'function-block' && typeof ev.functionName === 'string') names.add(ev.functionName);
+    for (const child of childList(ev)) stack.push({ ev: child, depth: depth + 1 });
+  }
+  return [...names];
+}
+
 /** Number of references in a report. */
 export function countDeleteReferences(report: DeleteReferenceReport): number {
   return [...report.functions, ...report.variables].reduce((n, entry) => n + entry.references.length, 0);

@@ -2,6 +2,23 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- `get_object_dependencies` and `find_orphaned_objects` no longer report an object as unused while a registered event sheet, layout or family file they could not parse (over the 10MB read limit, not valid JSON) names it or holds its SID, or cannot be read at all: `find_orphaned_objects` lists it in `possiblyUsed` instead of `orphanedObjects` (`count` counts the orphans only), and `get_object_dependencies` gives it `possiblyReferencedIn` (not counted in `referenceCount`) and, project-wide, lists it in `possiblyUsedObjects` instead of `orphanedObjects`. Both return `unscannedFiles`. The new fields appear only while there are such files (#55).
+- The delete and removal tools listed under Fixed, and `rename_animation`, return `unscannedFiles` (each skipped file with its reason and the outcome of the text search: `possible-use` with the `names` found, `no-match` with what it was `searchedFor`, `unreadable`, or `not-searched` with what was `unchecked` for the tool's own object type or family file) whenever there is such a file; `get_object_dependencies` and `find_orphaned_objects` list them whenever there are any, `not-searched` when no object was left to search them for (#55).
+- `rename_animation` has `force`. Without it, a layout it could not parse whose text names the object and the old animation (possibly instances that start with it, which it cannot update), or that cannot be read at all, refuses the rename with `update_blocked`; before, the rename went ahead with a warning (#55).
+- `analyze_performance` counts unused objects like `find_orphaned_objects` and says how many more files it could not parse possibly use; `validate_project` reports no `orphaned-object` for them either (#55).
+
+### Fixed
+
+- The reference checks see uses inside registered files the bulk reads skip (over the 10MB read limit, not valid JSON, unreadable). Before, `delete_object` without `force` deleted an object whose only instances were in a layout over 10MB, without a warning, and the other checks missed such uses the same way. Such files are now searched as text (streamed, without a size limit; for a 50MB file about 0.1 s while the names are rare in the text, up to about 0.3 s when a name is common inside other words) for the names each check looks for, also as `\u` escapes for names outside ASCII, and UTF-16LE files with a byte order mark as such (a file in another encoding counts as unreadable): `delete_object` (the name in event sheets, layouts and families, the SID in layouts), `delete_family` (name and SID; its instance variables and behaviors together with a member's name), `delete_layout` (instances and an event sheet binding in the layout's own file), `delete_event_sheet` (the sheet name in event sheets and layouts), `delete_event_from_sheet` (the deleted functions and global variables in other event sheets), and the removals of `update_object_properties` and `update_family` (the removed names together with the object, family or leaving member). A match is a possible use: the text search cannot tell a use from the same name in another string, and the message says so. A match, or a file that cannot be read even as text, refuses without `force` and names the files; with `force` the tool goes ahead and names them in a warning; without a match it goes ahead and warns that the file was only searched as text. A registered name without a file does not block. Only these files are searched, and only when there are any (#55).
+- `delete_object` and `delete_family` refuse without `force` when the object type's or family's own file could not be parsed: its SID (and a family's members and names) is unknown, so object properties that hold it and uses through members could not be checked. Before, they deleted without a word (#55).
+- `delete_family` and `update_family` find uses of the family's instance variables and behaviors through a member whose object type file could not be parsed (`Enemy.armor` in a parsed sheet); before, they removed the family, variable or member without `force` (#55).
+- `update_object_properties`, `update_family` and `delete_family` warn when layouts they could not parse possibly hold instances whose behavior entries they would have updated, and when a member's object type file could not be parsed; before, those instances were skipped silently (#55).
+- `rename_animation` no longer leaves layouts it could not parse out silently (see Changed) and warns about such event sheets that possibly name the animation (#55).
+
 ## [1.9.1] - 2026-09-29
 
 ### Highlights

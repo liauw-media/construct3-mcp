@@ -64,6 +64,7 @@ construct3-mcp/
 │   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
+│   │   ├── raw-text-search.ts      # Streamed whole-word text search in files the reader skips
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/              # Analysis modules
@@ -78,6 +79,7 @@ construct3-mcp/
 │   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
 │   │       ├── legacy-event-shapes.ts # Legacy isElse/isOr/function call/script shape scan and repair
 │   │       ├── delete-references.ts # Function and variable names an event delete would leave dangling
+│   │       ├── unscanned-uses.ts   # Possible uses in registered files the bulk reads skipped
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
 │   │       ├── group-settings.ts   # Event group settings
 │   │       ├── event-outline.ts    # Editor event numbers, event sheet outline

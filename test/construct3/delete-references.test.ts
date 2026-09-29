@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { findReferencesLeftByDelete, countDeleteReferences } from '../../src/construct3/analyzers/delete-references.js';
+import { findReferencesLeftByDelete, countDeleteReferences, namesVisibleToOtherSheets } from '../../src/construct3/analyzers/delete-references.js';
 
 const fn = (name: string, sid: number, extra: Record<string, unknown> = {}) => ({
   functionName: name, functionReturnType: 'none', functionParameters: [],
@@ -193,5 +193,18 @@ describe('findReferencesLeftByDelete — event variables', () => {
     const plain = block(40, [setVar('Anything')]);
     const report = scan({ A: [plain, variable('Anything', 41)] }, plain);
     expect(report).toEqual({ functions: [], variables: [], complete: true });
+  });
+});
+
+describe('namesVisibleToOtherSheets', () => {
+  it('names the functions a delete removes and a top-level (global) variable', () => {
+    const group = { eventType: 'group', title: 'G', sid: 50, children: [fn('Inner', 51), variable('Local', 52)] };
+    expect(namesVisibleToOtherSheets(fn('Spawn', 53), true)).toEqual(['Spawn']);
+    expect(namesVisibleToOtherSheets(variable('Score', 54), true)).toEqual(['Score']);
+    expect(namesVisibleToOtherSheets(group, true)).toEqual(['Inner']);
+  });
+
+  it('leaves out variables that are local: not at the top level of the sheet', () => {
+    expect(namesVisibleToOtherSheets(variable('Local', 55), false)).toEqual([]);
   });
 });

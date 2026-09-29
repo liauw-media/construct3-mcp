@@ -76,7 +76,7 @@ Same as above — use the corresponding `list_` tool to find the correct name.
 
 ### "File too large (... exceeds 10MB limit)"
 
-**Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the analysis tools and the reference checks of the delete and update tools leave it out: `delete_object` without `force` deletes an object whose only uses are in that file. `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, and `valid` is `false`, also when `summary.errors` is 0.
+**Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the cross-reference index leaves it out. The reference checks of the delete and update tools, `find_orphaned_objects` and `get_object_dependencies` search it as text instead (see "Possible uses in files that could not be parsed" below). `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, and `valid` is `false`, also when `summary.errors` is 0.
 
 New UIDs are still allocated above the UIDs in the file, so `add_instance_to_layout` and `create_object` keep working: the file is scanned as text for its UIDs and SIDs. That scan reads the whole file, again for the first new UID or SID after each write, so it costs time and memory in proportion to the file's size (for a 150MB layout, one to two seconds per call). A file too large to read into memory as text (about 512MB) cannot be scanned, and new UIDs are refused (see "Cannot generate a safe UID" below).
 
@@ -152,6 +152,18 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 - Change or delete those conditions, actions and expressions first, then remove it
 - Use `force: true` to remove it anyway (the uses are NOT changed; `validate_project` then reports them as `missing-behavior-or-variable`, except `Object.name` and `Self.name` in expressions, which the force warning lists)
 
+### "Possible uses in files that could not be parsed"
+
+**Cause**: A delete or removal (`delete_object`, `delete_family`, `delete_layout`, `delete_event_sheet`, `delete_event_from_sheet`, `update_object_properties`, `update_family`, `rename_animation`) refused with `delete_blocked` or `update_blocked` because a registered layout, event sheet or family file it could not parse (over the 10MB read limit, not valid JSON) names what the tool checks for. The cross-reference index cannot see inside such a file, so the tool searched its text for the names instead (whole words, ignoring case; `delete_layout` looks for instances and an event sheet binding in the layout's own file). A match is a *possible* use: the name may just as well be in another string there. `unscannedFiles` lists each file with its reason and `textSearch`: `possible-use` (with the `names` found), `unreadable` (the file exists but cannot be read even as text, e.g. a folder in its place or no read access; this refuses too) or `no-match` (only a warning). A registered name without a file is not listed and does not block.
+
+**Solutions**:
+- Open the project in the Construct 3 editor and check the named file for the use; remove it there if it is real
+- Fix a file with invalid JSON (`validate_project` names it as a `file-existence` error), or split a very large layout, so the server can read it
+- Use `force: true` if the match is a false alarm; the warning names the files again, and nothing in them is changed
+- `find_orphaned_objects` and `get_object_dependencies` report such objects as possibly used (`possiblyUsed`, `possiblyUsedObjects`, `possiblyReferencedIn`) instead of unused, for the same reason
+- *Its own file could not be parsed* (`"textSearch": "not-searched"`): `delete_object` or `delete_family` refuses because the object type's or family's own file is over the limit or not valid JSON, so its SID is unknown. Fix the file, or delete with `force: true`
+- A file saved as UTF-16 without a byte order mark, or in UTF-16BE, cannot be searched and refuses as `unreadable`; save it as UTF-8 (the editor does)
+
 ### "Cannot generate a safe UID: project file(s) could not be scanned"
 
 **Cause**: `add_instance_to_layout` or `create_object` (for a global plugin) needs a new UID, which must be above every UID in the project. A layout or object type named in the error is registered in `project.c3proj` and exists, but could not be read at all, not even as text (e.g. a folder where the file should be, no read access, or a file too large to read into memory as text, about 512MB), so its UIDs are unknown. Nothing was written. Files over the 10MB read limit (up to that size) and files with invalid JSON do not cause this: they are scanned as text. A registered name whose file does not exist does not cause it either.
@@ -220,6 +232,8 @@ If you get type errors after modifying the code:
 **Cause**: Analysis tools like `get_eventsheet_flow` and `get_object_dependencies` need to read all project files to build the cross-reference index.
 
 **Solution**: The index is cached after first build. Subsequent analysis queries are fast. After a write operation, the cache is cleared and will be rebuilt on next analysis query.
+
+Files over the 10MB read limit or with invalid JSON are not in the index; the reference checks, `find_orphaned_objects` and `get_object_dependencies` search them as text on every call instead, only while there are such files. The search streams the file. Measured on a 50MB layout (Node 22, Windows 11): about 0.1 seconds with one name or with 200, while the names are rare in the text; about 0.2 to 0.3 seconds when a searched name is common inside other names (e.g. `Bullet` in 400,000 `EnemyBullet` instances); about 2 seconds in a constructed worst case of 200 very short names that occur everywhere (`e`, `i`, ...). `find_orphaned_objects` and `get_object_dependencies` with 200 unused objects on such a layout take about 0.1 seconds.
 
 ## Getting Help
 

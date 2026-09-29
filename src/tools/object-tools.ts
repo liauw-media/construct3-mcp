@@ -21,6 +21,22 @@ import {
 } from '../construct3/analyzers/index-builder.js';
 import { forEachLayoutInstance } from '../construct3/layers.js';
 import {
+  blocksWithoutForce,
+  checkUnscannedFiles,
+  describeReadFailure,
+  describeUnscannedFile,
+  mergeUnscannedReports,
+  ownFileReports,
+  unscannedFields,
+  unscannedFilesOf,
+  unscannedRefusal,
+  unscannedWarnings,
+  type UnscannedFileReport,
+  type UseRule,
+} from '../construct3/analyzers/unscanned-uses.js';
+import { nameTerm, numberTerm } from '../construct3/raw-text-search.js';
+import { classifyReadError, type EntityCategory } from '../construct3/project-reader.js';
+import {
   checkFamilyPlugins,
   findObjectClassNameClash,
   findBuiltinObjectClassClash,
@@ -175,7 +191,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'update_object_properties',
-    'Update properties of an existing object type (variables, behaviors, global status). Removing an instance variable or behavior that events still use is refused without force, listing the uses: the "instance-variable" parameter or behaviorType of conditions/actions on the object (also System actions such as Sort Z order that name the object with the variable), and "Object.name", "Object.Behavior.Expression" or (on the object) "Self.name" in expressions. Scripts are not checked; a warning names scripts that read a removed name (instVars.name, behaviors.Name).',
+    'Update properties of an existing object type (variables, behaviors, global status). Removing an instance variable or behavior that events still use is refused without force, listing the uses: the "instance-variable" parameter or behaviorType of conditions/actions on the object (also System actions such as Sort Z order that name the object with the variable), and "Object.name", "Object.Behavior.Expression" or (on the object) "Self.name" in expressions. Scripts are not checked; a warning names scripts that read a removed name (instVars.name, behaviors.Name). Event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text: one that names a removed variable or behavior and the object (a possible use), or that cannot be read at all, also refuses without force; they are listed in unscannedFiles.',
     {
       name: z.string().max(200).describe('Existing object name, as registered (letter case included)'),
       isGlobal: z.boolean().optional().describe('Change global status'),
@@ -224,13 +240,20 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           variables: new Map([[args.name, variablesToRemove]]),
           behaviors: new Map([[args.name, behaviorsToRemove]]),
         };
+        let unscanned: UnscannedFileReport[] = [];
         if (variablesToRemove.length > 0 || behaviorsToRemove.length > 0) {
           const index = await getProjectIndex(reader);
           const broken = index.findReferencesBrokenBy(removal);
-          if (broken.length > 0 && !args.force) {
-            return toolResult(removalBlocked(args.name, 'object', broken));
+          // Event sheets that could not be parsed: a use names the member and the object
+          unscanned = await checkUnscannedFiles(reader, index.unscannedFiles, [{
+            categories: ['eventSheets'],
+            allOf: [[...variablesToRemove, ...behaviorsToRemove].map(n => nameTerm(n)), [nameTerm(args.name)]],
+          }]);
+          if ((broken.length > 0 || blocksWithoutForce(unscanned)) && !args.force) {
+            return toolResult(removalBlocked(args.name, 'object', broken, unscanned));
           }
           warnings.push(...removalForcedWarnings(args.name, broken));
+          warnings.push(...unscannedWarnings(unscanned, 'Removed'));
           warnings.push(...await scriptReadWarnings(reader, index, removal, [
             ...variablesToRemove.map(name => ({ objectClass: args.name, kind: 'instance variable' as const, name })),
             ...behaviorsToRemove.map(name => ({ objectClass: args.name, kind: 'behavior' as const, name })),
@@ -325,6 +348,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             [args.name, { expected, add: addedBehaviors, drop: removedBehaviors }],
           ]));
           warnings.push(...sync.warnings);
+          unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
         }
 
         const result: WriteResult = {
@@ -334,6 +358,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           action: 'updated',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -347,7 +372,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_object',
-    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. References in project script files and objects created by name at runtime are not detected.',
+    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by name at runtime are not detected.',
     {
       name: z.string().max(200).describe('Object name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -366,21 +391,38 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const hasRefs = index.isObjectReferenced(args.name);
         const eventSheetRefs = [...new Set(usage.events.map(r => r.eventSheet))];
         const layoutRefs = [...new Set([...usage.placements, ...usage.instanceProperties].map(p => p.layout))];
+        // Files the index could not parse: the name, and the SID an object property holds.
+        // The object type's own file: without it, its SID is unknown
+        const unscanned = mergeUnscannedReports(
+          ownFileReports(index.unscannedFiles, [{
+            category: 'objectTypes',
+            name: args.name,
+            unchecked: 'its SID is unknown, so object properties of instances that hold it could not be checked',
+          }]),
+          await checkUnscannedFiles(reader, index.unscannedFiles, nameOrSidRules(
+            args.name, index.sidOf(args.name), ['eventSheets', 'layouts', 'families'],
+          )),
+        );
+        const unscannedBlock = blocksWithoutForce(unscanned);
 
-        if (hasRefs && !args.force) {
+        if ((hasRefs || unscannedBlock) && !args.force) {
+          const reasons = [
+            ...(hasRefs ? [`Object is still referenced: ${describeObjectUsage(usage)}.`] : []),
+            ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+          ];
           return toolResult({
             success: false,
             entity: args.name,
             category: 'object',
             action: 'delete_blocked',
-            message: `Object is still referenced: ${describeObjectUsage(usage)}. ` +
-              'Use force=true to delete anyway (references will NOT be cleaned up).',
+            message: `${reasons.join(' ')} Use force=true to delete anyway (references will NOT be cleaned up).`,
             references: {
               eventSheets: eventSheetRefs,
               layouts: layoutRefs,
               families: usage.families,
               ...usageDetails(usage),
             },
+            ...unscannedFields(unscanned),
           });
         }
 
@@ -390,6 +432,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           const unreported = unreportedUsesWarning(usage.events);
           if (unreported) warnings.push(unreported);
         }
+        warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
         const backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
@@ -402,6 +445,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           action: 'deleted',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -505,7 +549,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'update_family',
-    'Update a family: add/remove members, add/remove shared instance variables. Removing an instance variable that events still use (on the family, or through a member that gets it from this family only), or a member through which events use the family\'s instance variables or behaviors, is refused without force, listing the uses. Removing a member also warns when events use the family itself, since they no longer apply to that member. Scripts are not checked; a warning names scripts that read a name a member loses.',
+    'Update a family: add/remove members, add/remove shared instance variables. Removing an instance variable that events still use (on the family, or through a member that gets it from this family only), or a member through which events use the family\'s instance variables or behaviors, is refused without force, listing the uses. Removing a member also warns when events use the family itself, since they no longer apply to that member. Scripts are not checked; a warning names scripts that read a name a member loses. Event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text: one that names a removed variable (or, for a removed member, one of the family\'s variables or behaviors) together with the family or member (a possible use), or that cannot be read at all, also refuses without force; they are listed in unscannedFiles.',
     {
       name: z.string().max(200).describe('Family name to update, as registered (letter case included)'),
       addMembers: z.array(z.string().max(200)).optional().describe('Object type names to add to the family'),
@@ -549,17 +593,31 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           variables: new Map([[args.name, variablesToRemove]]),
           members: new Map([[args.name, leaving]]),
         };
+        let unscanned: UnscannedFileReport[] = [];
         if (leaving.length > 0 || variablesToRemove.length > 0) {
           const index = await getProjectIndex(reader);
           const broken = index.findReferencesBrokenBy(removal);
-          if (broken.length > 0 && !args.force) {
-            return toolResult(removalBlocked(args.name, 'family', broken));
-          }
-          warnings.push(...removalForcedWarnings(args.name, broken));
           // What member instances lose: the removed variables, and for a leaving member
           // all of the family's instance variables and behaviors
           const familyVariables = entryNamesOf(family.instanceVariables);
           const familyBehaviors = entryNamesOf(family.behaviorTypes);
+          // Event sheets that could not be parsed: a use names what is removed and the
+          // family or member it goes through
+          unscanned = await checkUnscannedFiles(reader, index.unscannedFiles, [
+            {
+              categories: ['eventSheets'],
+              allOf: [variablesToRemove.map(n => nameTerm(n)), [args.name, ...currentMembers].map(n => nameTerm(n))],
+            },
+            {
+              categories: ['eventSheets'],
+              allOf: [[...familyVariables, ...familyBehaviors].map(n => nameTerm(n)), leaving.map(n => nameTerm(n))],
+            },
+          ]);
+          if ((broken.length > 0 || blocksWithoutForce(unscanned)) && !args.force) {
+            return toolResult(removalBlocked(args.name, 'family', broken, unscanned));
+          }
+          warnings.push(...removalForcedWarnings(args.name, broken));
+          warnings.push(...unscannedWarnings(unscanned, 'Removed'));
           warnings.push(...await scriptReadWarnings(reader, index, removal, [...new Set(currentMembers)].flatMap(member => [
             ...(leaving.includes(member) ? familyVariables : variablesToRemove)
               .map(name => ({ objectClass: member, kind: 'instance variable' as const, name })),
@@ -657,8 +715,10 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (familyBehaviors.length > 0 && memberChanges.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.set(args.name, family);
-          const plans = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
-          warnings.push(...(await syncLayoutInstances(reader, writer, plans)).warnings);
+          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
+          const sync = await syncLayoutInstances(reader, writer, plans);
+          warnings.push(...planWarnings, ...sync.warnings);
+          unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
         }
 
         const result: WriteResult = {
@@ -668,6 +728,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           action: 'updated',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -681,7 +742,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_family',
-    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions and runtime.objects in script actions; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. The member object types are kept. References in project script files and script access to instance variables and behaviors of member instances are not detected.',
+    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions and runtime.objects in script actions; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. References in project script files and script access to instance variables and behaviors of member instances are not detected.',
     {
       name: z.string().max(200).describe('Family name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -700,20 +761,47 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const memberUses = index.getFamilyMemberUses(args.name);
         const hasRefs = events.length > 0 || instanceProperties.length > 0 || memberUses.length > 0;
         const description = [describeObjectUsage(usage), describeMemberUses(memberUses)].filter(Boolean).join('; ');
+        // Files the index could not parse: the family's name and SID, and in event sheets its
+        // instance variables and behaviors together with a member's name
+        const familyMemberNames = [
+          ...index.memberNamesOf(args.name, 'instance variable'),
+          ...index.memberNamesOf(args.name, 'behavior'),
+        ];
+        // The family's own file: without it, its members, names and SID are unknown
+        let unscanned = mergeUnscannedReports(
+          ownFileReports(index.unscannedFiles, [{
+            category: 'families',
+            name: args.name,
+            unchecked: 'its members, instance variables, behaviors and SID are unknown, so uses through its members ' +
+              'and object properties of instances that hold its SID could not be checked',
+          }]),
+          await checkUnscannedFiles(reader, index.unscannedFiles, [
+            ...nameOrSidRules(args.name, index.sidOf(args.name), ['eventSheets', 'layouts']),
+            {
+              categories: ['eventSheets'],
+              allOf: [familyMemberNames.map(n => nameTerm(n)), (index.familyMembers.get(args.name) ?? []).map(n => nameTerm(n))],
+            },
+          ]),
+        );
+        const unscannedBlock = blocksWithoutForce(unscanned);
 
-        if (hasRefs && !args.force) {
+        if ((hasRefs || unscannedBlock) && !args.force) {
+          const reasons = [
+            ...(hasRefs ? [`Family is still referenced: ${description}.`] : []),
+            ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+          ];
           return toolResult({
             success: false,
             entity: args.name,
             category: 'family',
             action: 'delete_blocked',
-            message: `Family is still referenced: ${description}. ` +
-              'Use force=true to delete anyway (references will NOT be cleaned up).',
+            message: `${reasons.join(' ')} Use force=true to delete anyway (references will NOT be cleaned up).`,
             references: {
               eventSheets: [...new Set([...events, ...memberUses].map(r => r.eventSheet))],
               layouts: [...new Set(instanceProperties.map(p => p.layout))],
               ...boundedLists({ events: eventUseList(events), instanceProperties, memberUses }),
             },
+            ...unscannedFields(unscanned),
           });
         }
 
@@ -728,6 +816,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           const unreported = unreportedUsesWarning(events, unreportedMemberUses);
           if (unreported) warnings.push(unreported);
         }
+        warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
         // Read before deleting: the members' instances lose the entries for the family's behaviors
         let family: Record<string, unknown> | undefined;
@@ -748,10 +837,12 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (familyBehaviors.length > 0 && formerMembers.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.delete(args.name);
-          const plans = await familyMemberPlans(
+          const { plans, warnings: planWarnings } = await familyMemberPlans(
             reader, families, formerMembers.map(m => ({ member: m, joined: false })), familyBehaviors,
           );
-          warnings.push(...(await syncLayoutInstances(reader, writer, plans)).warnings);
+          const sync = await syncLayoutInstances(reader, writer, plans);
+          warnings.push(...planWarnings, ...sync.warnings);
+          unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
         }
 
         const result: WriteResult = {
@@ -761,6 +852,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           action: 'deleted',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -934,20 +1026,43 @@ async function scriptReadWarnings(
   return warnings;
 }
 
-/** The refusal of update_object_properties / update_family while events use what it removes. */
-function removalBlocked(entity: string, category: 'object' | 'family', uses: MemberReference[]): Record<string, unknown> {
+/**
+ * The refusal of update_object_properties / update_family while events use
+ * what it removes, or event sheets that could not be parsed possibly do.
+ */
+function removalBlocked(
+  entity: string, category: 'object' | 'family', uses: MemberReference[], unscanned: UnscannedFileReport[],
+): Record<string, unknown> {
+  const reasons = [
+    ...(uses.length > 0 ? [`Events still use what this update removes: ${describeMemberReferences(entity, uses)}.`] : []),
+    ...(blocksWithoutForce(unscanned) ? [unscannedRefusal(unscanned)] : []),
+  ];
   return {
     success: false,
     entity,
     category,
     action: 'update_blocked',
-    message: `Events still use what this update removes: ${describeMemberReferences(entity, uses)}. Nothing was changed. ` +
-      'Use force=true to remove anyway (the uses will NOT be changed).',
+    message: `${reasons.join(' ')} Nothing was changed. Use force=true to remove anyway (the uses will NOT be changed).`,
     references: {
       eventSheets: [...new Set(uses.map(u => u.eventSheet))],
       ...boundedLists({ uses: memberUseList(uses) }),
     },
+    ...unscannedFields(unscanned),
   };
+}
+
+/**
+ * What delete_object and delete_family look for in files the index could not
+ * parse: the name in files of `categories`, and in layouts the SID (object
+ * properties of instances store an object type's or family's SID).
+ */
+function nameOrSidRules(name: string, sid: number | undefined, categories: EntityCategory[]): UseRule[] {
+  return [
+    { categories, allOf: [[nameTerm(name)]] },
+    ...(sid !== undefined && categories.includes('layouts')
+      ? [{ categories: ['layouts'] as EntityCategory[], allOf: [[numberTerm(sid, `SID ${sid} of "${name}"`)]] }]
+      : []),
+  ];
 }
 
 /**
@@ -1063,14 +1178,19 @@ interface InstanceSyncPlan {
  *
  * Returns warnings naming the modified layouts, the entries that were missing
  * before the change, and any behavior that got an empty entry because its
- * defaults are not known.
+ * defaults are not known. Layouts that could not be parsed (over the read
+ * cap, not valid JSON) are not updated (issue #55): when a plan adds or drops
+ * entries, their text is searched for the object types' names, and
+ * `unscanned` reports them; a warning names those that possibly hold their
+ * instances or could not be searched.
  */
 async function syncLayoutInstances(
   reader: Construct3ProjectReader,
   writer: Construct3ProjectWriter,
   plans: ReadonlyMap<string, InstanceSyncPlan>,
-): Promise<{ warnings: string[] }> {
+): Promise<{ warnings: string[]; unscanned: UnscannedFileReport[] }> {
   const layouts = await reader.readAllLayouts();
+  const layoutFailures = reader.getReadFailures('layouts');
   const modifiedLayouts: string[] = [];
   const unknownDefaults: InstanceBehavior[] = [];
   /** Per object type: instances that lacked entries the change did not add, and those behavior names */
@@ -1117,7 +1237,36 @@ async function syncLayoutInstances(
       + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores an entry for every behavior of the object and its families on each instance.');
   }
   if (unknownDefaults.length > 0) warnings.push(unknownDefaultsWarning(unknownDefaults));
-  return { warnings };
+
+  const changing = [...plans].filter(([, plan]) => (plan.add?.length ?? 0) > 0 || (plan.drop?.length ?? 0) > 0);
+  const skipped = unscannedFilesOf('layouts', await reader.listLayouts(), layouts, layoutFailures);
+  const unscanned = changing.length > 0 && skipped.length > 0
+    ? await checkUnscannedFiles(reader, skipped, [{ categories: ['layouts'], allOf: [changing.map(([name]) => nameTerm(name))] }])
+    : [];
+  warnings.push(...unsyncedLayoutWarnings(unscanned));
+  return { warnings, unscanned };
+}
+
+/**
+ * Warnings for the layouts syncLayoutInstances could not parse: those whose
+ * text names an object type whose instances it updates (possibly instances,
+ * left as they were), and those it could not search.
+ */
+function unsyncedLayoutWarnings(reports: readonly UnscannedFileReport[]): string[] {
+  const warnings: string[] = [];
+  const possible = reports.filter(r => r.textSearch === 'possible-use');
+  const unreadable = reports.filter(r => r.textSearch === 'unreadable');
+  if (possible.length > 0) {
+    warnings.push('Instances in layouts that could not be parsed were NOT updated: ' +
+      possible.map(r => `${describeUnscannedFile(r)}, whose text names ${(r.names ?? []).map(n => `"${n}"`).join(', ')}`).join('; ') +
+      '. Instances there possibly still have the old behavior entries (a text search cannot tell an instance from the same name ' +
+      'in another string); check them in the Construct 3 editor.');
+  }
+  if (unreadable.length > 0) {
+    warnings.push('Layouts that could not be parsed could not be searched for instances either, and were NOT updated: ' +
+      `${unreadable.map(describeUnscannedFile).join(', ')}.`);
+  }
+  return warnings;
 }
 
 /**
@@ -1131,18 +1280,30 @@ async function familyMemberPlans(
   families: ReadonlyMap<string, unknown>,
   changes: Array<{ member: string; joined: boolean }>,
   familyBehaviors: string[],
-): Promise<Map<string, InstanceSyncPlan>> {
-  const memberObjects = await readMemberObjects(reader, changes.map(c => c.member));
+): Promise<{ plans: Map<string, InstanceSyncPlan>; warnings: string[] }> {
   const plans = new Map<string, InstanceSyncPlan>();
+  const warnings: string[] = [];
   for (const { member, joined } of changes) {
-    const obj = memberObjects.get(member);
-    if (!obj) continue; // missing object type: it has no instances to update
+    let obj: unknown;
+    try {
+      obj = await reader.readObjectType(member);
+    } catch (error) {
+      // A missing object type has no instances to update. One whose file could not be
+      // parsed does (issue #55), but the entries its instances should have are unknown
+      const code = classifyReadError(error);
+      if (code !== 'E_FILE_NOT_FOUND') {
+        warnings.push(`Instances of "${member}" were NOT updated: objectTypes/${member} (${describeReadFailure(code)}) could not ` +
+          `be parsed, so the behaviors its instances need entries for are unknown. Their entries for the family's behaviors ` +
+          `(${familyBehaviors.map(b => `"${b}"`).join(', ')}) were left as they were; check them in the Construct 3 editor.`);
+      }
+      continue;
+    }
     plans.set(member, {
       expected: expectedInstanceBehaviors(member, obj, families),
       ...(joined ? { add: familyBehaviors } : { drop: familyBehaviors }),
     });
   }
-  return plans;
+  return { plans, warnings };
 }
 
 /**

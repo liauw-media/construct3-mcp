@@ -4,7 +4,7 @@
 
 import type { Construct3ProjectReader } from '../project-reader.js';
 import type { PerformanceIssue, C3Event, BlockEvent, GroupEvent, FunctionBlockEvent } from '../types.js';
-import { getProjectIndex } from './index-builder.js';
+import { findOrphanedObjects } from './object-deps.js';
 import { forEachLayerInstance } from '../layers.js';
 import { countAnimationFrames } from './animations.js';
 
@@ -23,7 +23,6 @@ export async function analyzePerformance(
     detail?: 'summary' | 'standard' | 'full';
   } = {}
 ): Promise<PerformanceResult> {
-  const index = await getProjectIndex(reader);
   const detail = options.detail || 'standard';
   const issues: PerformanceIssue[] = [];
 
@@ -123,15 +122,19 @@ export async function analyzePerformance(
     }
   }
 
-  // Check: Orphaned objects (same rule and caveats as find_orphaned_objects and validate_project)
-  const orphanedCount = index.allObjects.filter(obj => !index.isObjectUsed(obj)).length;
+  // Check: Orphaned objects (find_orphaned_objects, whose rule validate_project follows too: objects
+  // that files the index could not parse possibly use are not orphans)
+  const orphans = await findOrphanedObjects(reader);
+  const orphanedCount = orphans.count;
+  const possiblyUsed = orphans.possiblyUsed?.length ?? 0;
 
   if (orphanedCount > 0) {
     issues.push({
       severity: 'info',
       category: 'cleanup',
       location: 'project',
-      message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (on any layer or sub-layer, including non-world instances)`,
+      message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (on any layer or sub-layer, including non-world instances)` +
+        (possiblyUsed > 0 ? `; ${possiblyUsed} more possibly used in files that could not be parsed (find_orphaned_objects lists them as possiblyUsed)` : ''),
       suggestion: 'Use find_orphaned_objects to list them. Before removing one, check what this analysis cannot see: ' +
         'project script files, objects created by name at runtime, and script references it does not recognise.',
     });
