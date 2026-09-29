@@ -349,7 +349,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'connect_to_game',
-    'Connect to a running Construct game over Chrome DevTools Protocol. Provide a page WebSocket endpoint directly, or a host and debugging port to discover the first page target. The tool waits for globalThis.__c3bridge to become ready and keeps the connection for later runtime calls.',
+    'Connect to a running Construct game over Chrome DevTools Protocol. Provide a page WebSocket endpoint directly, or a host and debugging port to discover the first page target. The tool waits for globalThis.__c3bridge to become ready and keeps the connection for later runtime calls. Only browsers on this machine are reached, unless the server was started with C3MCP_ALLOW_REMOTE_CDP=1.',
     {
       cdpEndpoint: z.string().url().refine(
         (value) => value.startsWith('ws://') || value.startsWith('wss://'),
@@ -359,14 +359,12 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
       port: z.number().int().min(1).max(65535).optional().describe('CDP discovery port (default: 9222)'),
       timeoutMs: z.number().int().min(100).max(60_000).optional().default(10_000)
         .describe('Maximum time to connect and wait for the runtime bridge'),
-      allowRemoteHost: z.boolean().optional().default(false)
-        .describe('Allow a host other than this machine (localhost, 127.0.0.1, ::1). Off by default: the bridge runs arbitrary script in the connected page.'),
     },
-    async ({ cdpEndpoint, host, port, timeoutMs, allowRemoteHost }) => {
+    async ({ cdpEndpoint, host, port, timeoutMs }) => {
       try {
         const target = cdpEndpoint !== undefined ? hostOfEndpoint(cdpEndpoint) : (host ?? 'localhost');
-        if (!allowRemoteHost && !isLoopbackHost(target)) {
-          return toolError(`Refusing to connect to "${target}": only this machine (localhost, 127.0.0.1, ::1) is allowed unless allowRemoteHost is true. The runtime bridge runs script in whatever page it reaches.`);
+        if (process.env.C3MCP_ALLOW_REMOTE_CDP !== '1' && !isLoopbackHost(target)) {
+          return toolError(`Refusing to connect to "${target}": only this machine (localhost, 127.0.0.1, ::1) is allowed unless the server was started with the environment variable C3MCP_ALLOW_REMOTE_CDP=1. The runtime bridge runs script in whatever page it reaches.`);
         }
         const connected = await connections.connect({ cdpEndpoint, host, port, timeoutMs });
         return toolResult(connected, { projectWritten: false });

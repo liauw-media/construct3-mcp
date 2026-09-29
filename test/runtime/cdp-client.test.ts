@@ -271,31 +271,38 @@ describe("connect_to_game", () => {
     });
   });
 
-  it("refuses a host off this machine unless allowRemoteHost is set", async () => {
+  it("refuses a host off this machine unless the server environment allows it", async () => {
     const { server, controller } = registerConnectionTools();
     openControllers.push(controller);
+    vi.stubEnv("C3MCP_ALLOW_REMOTE_CDP", undefined);
 
     const byHost = await server.callTool("connect_to_game", { host: "10.1.2.3", port: 1, timeoutMs: 200 });
     expect(byHost.isError).toBe(true);
-    expect(byHost.content[0].text).toContain("allowRemoteHost");
+    expect(byHost.content[0].text).toContain("C3MCP_ALLOW_REMOTE_CDP=1");
     expect(byHost.content[0].text).toContain("10.1.2.3");
 
     const byEndpoint = await server.callTool("connect_to_game", { cdpEndpoint: "ws://example.com:9222/devtools/page/1", timeoutMs: 200 });
     expect(byEndpoint.isError).toBe(true);
-    expect(byEndpoint.content[0].text).toContain("allowRemoteHost");
+    expect(byEndpoint.content[0].text).toContain("C3MCP_ALLOW_REMOTE_CDP=1");
     expect(byEndpoint.content[0].text).toContain("example.com");
+
+    // The caller cannot lift the limit: a tool parameter for it does not exist.
+    const asked = await server.callTool("connect_to_game", { host: "10.1.2.3", port: 1, timeoutMs: 200, allowRemoteHost: true });
+    expect(asked.isError).toBe(true);
+    expect(asked.content[0].text).toContain("C3MCP_ALLOW_REMOTE_CDP=1");
 
     // Loopback spellings pass the guard and fail only on the connection itself.
     for (const host of ["localhost", "127.0.0.1", "::1"]) {
       const attempt = await server.callTool("connect_to_game", { host, port: 1, timeoutMs: 200 });
       expect(attempt.isError).toBe(true);
-      expect(attempt.content[0].text).not.toContain("allowRemoteHost");
+      expect(attempt.content[0].text).not.toContain("C3MCP_ALLOW_REMOTE_CDP");
     }
 
-    // With the flag the remote host is attempted, and fails on the connection, not the guard.
-    const allowed = await server.callTool("connect_to_game", { host: "10.1.2.3", port: 1, timeoutMs: 200, allowRemoteHost: true });
+    // Allowed by the environment, the remote host is attempted and fails on the connection, not the guard.
+    vi.stubEnv("C3MCP_ALLOW_REMOTE_CDP", "1");
+    const allowed = await server.callTool("connect_to_game", { host: "10.1.2.3", port: 1, timeoutMs: 200 });
     expect(allowed.isError).toBe(true);
-    expect(allowed.content[0].text).not.toContain("allowRemoteHost");
+    expect(allowed.content[0].text).not.toContain("C3MCP_ALLOW_REMOTE_CDP");
   });
 
   it("accepts a direct page WebSocket endpoint", async () => {
