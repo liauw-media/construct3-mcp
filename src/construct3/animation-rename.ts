@@ -23,6 +23,11 @@
  * the old animation to the new name, and left a string naming the old
  * animation in an event sheet as it was.
  *
+ * Since the file name holds the frame's index, inserting or deleting a frame
+ * renumbers the image files of the frames after it too: they move one index
+ * up or down with their frames (planFrameImageShift), or every later frame
+ * would show its neighbour's image.
+ *
  * Layout instances: every Sprite instance names an animation of its object
  * in "initial-animation" (20,833 of 20,833 in the public examples, 2,494 of
  * 2,494 in the editor-saved projects, sub-layers included).
@@ -58,8 +63,53 @@ export function frameImageExtension(fileType: unknown): 'jpg' | 'png' | undefine
 }
 
 /** A frame's image file name without the extension, e.g. "hero-walk-000". */
-function frameImageBaseName(objectName: string, animationName: string, frameIndex: number): string {
+export function frameImageBaseName(objectName: string, animationName: string, frameIndex: number): string {
   return getImageFileName(objectName, animationName, frameIndex, 'Sprite').replace(/\.png$/, '');
+}
+
+/**
+ * The file name a frame's image is expected under, e.g. "hero-walk-001.jpg":
+ * `base` (from frameImageBaseName) with the extension of the frame's
+ * fileType, "*" for a fileType without a known extension.
+ */
+export function expectedFrameImageName(base: string, fileType: unknown): string {
+  return `${base}.${frameImageExtension(fileType) ?? '*'}`;
+}
+
+/** The files of a listing of images/, looked up ignoring case. */
+export interface ImageFileIndex {
+  /** The files whose lowercase name is `lowerName` (several only on a case-sensitive file system) */
+  named(lowerName: string): string[];
+  /**
+   * The files that hold the image of the frame whose file name without
+   * extension is `base` (lowercase): the file its fileType points to; for
+   * another fileType, every file named `base` with a single extension.
+   */
+  frameFiles(base: string, fileType: unknown): string[];
+}
+
+/** Index a listing of images/ (file names) for lookups that ignore case. */
+export function indexImageFiles(files: readonly string[]): ImageFileIndex {
+  const byLowerName = new Map<string, string[]>();
+  const byStem = new Map<string, string[]>();
+  const add = (map: Map<string, string[]>, key: string, file: string) => {
+    const list = map.get(key);
+    if (list) list.push(file); else map.set(key, [file]);
+  };
+  for (const file of files) {
+    const lower = file.toLowerCase();
+    add(byLowerName, lower, file);
+    // "hero-walk-000.gif" has the stem "hero-walk-000", "hero-walk-000.png.bak" has none that a frame uses
+    const dot = lower.lastIndexOf('.');
+    if (dot > 0 && dot < lower.length - 1) add(byStem, lower.slice(0, dot), file);
+  }
+  return {
+    named: lowerName => byLowerName.get(lowerName) ?? [],
+    frameFiles: (base, fileType) => {
+      const extension = frameImageExtension(fileType);
+      return extension !== undefined ? byLowerName.get(`${base}.${extension}`) ?? [] : byStem.get(base) ?? [];
+    },
+  };
 }
 
 /**
@@ -78,26 +128,15 @@ export function planFrameImageRenames(
   newName: string,
   frames: ReadonlyArray<{ fileType?: unknown }>,
 ): FrameImageRenamePlan {
-  const byLowerName = new Map<string, string[]>();
-  for (const file of files) {
-    const lower = file.toLowerCase();
-    const list = byLowerName.get(lower);
-    if (list) list.push(file); else byLowerName.set(lower, [file]);
-  }
+  const index = indexImageFiles(files);
 
   const plan: FrameImageRenamePlan = { renames: [], missing: [], clashes: [] };
-  frames.forEach((frame, index) => {
-    const oldBase = frameImageBaseName(objectName, oldName, index);
-    const newBase = frameImageBaseName(objectName, newName, index);
-    const extension = frameImageExtension(frame?.fileType);
-    const sources = extension !== undefined
-      ? byLowerName.get(`${oldBase}.${extension}`) ?? []
-      : files.filter(file => {
-        const lower = file.toLowerCase();
-        return lower.startsWith(`${oldBase}.`) && /^[^.]+$/.test(lower.slice(oldBase.length + 1));
-      });
+  frames.forEach((frame, frameIndex) => {
+    const oldBase = frameImageBaseName(objectName, oldName, frameIndex);
+    const newBase = frameImageBaseName(objectName, newName, frameIndex);
+    const sources = index.frameFiles(oldBase, frame?.fileType);
     if (sources.length === 0) {
-      plan.missing.push(`${oldBase}.${extension ?? '*'}`);
+      plan.missing.push(expectedFrameImageName(oldBase, frame?.fileType));
       return;
     }
     for (const from of sources) {
@@ -105,7 +144,7 @@ export function planFrameImageRenames(
       if (from === to) continue;
       // Another file under the target name (any case) would be replaced, or
       // two files that differ only in case would get the same name
-      if ((byLowerName.get(to) ?? []).some(file => file !== from) || plan.renames.some(r => r.to === to)) {
+      if (index.named(to).some(file => file !== from) || plan.renames.some(r => r.to === to)) {
         plan.clashes.push(to);
         continue;
       }
@@ -113,6 +152,155 @@ export function planFrameImageRenames(
     }
   });
   return plan;
+}
+
+/** A frame inserted at index `insertAt` (0 to the frame count), or the frame at `deleteAt` deleted. */
+export type FrameListChange = { insertAt: number } | { deleteAt: number };
+
+/** The image file renames that go with inserting or deleting a frame. */
+export interface FrameImageShiftPlan {
+  /**
+   * Every rename, in the order to apply them: each target name is free when
+   * its rename runs (a name another rename moved away before counts as free).
+   * Undo them in reverse order.
+   */
+  renames: ImageFileRename[];
+  /** Image files of later frames moved one index up (insert) or down (delete), in `renames` */
+  shifted: ImageFileRename[];
+  /** Image files of the deleted frame, kept under a .bak name, in `renames` */
+  parked: ImageFileRename[];
+  /**
+   * Files no frame uses under a name a moved image or the new frame's image
+   * takes (e.g. an image left behind by a deleted frame), kept under a .bak
+   * name instead of being replaced, in `renames`
+   */
+  backedUp: ImageFileRename[];
+  /** Expected file names of moved frames that have no image file (nothing moved for them) */
+  missing: string[];
+  /** Name of the new frame's image file (insert only; the name is free once `renames` ran) */
+  newFrameFile?: string;
+  /** Why the renames cannot be applied (nothing may be changed then) */
+  clashes: string[];
+}
+
+/**
+ * Plan the image file renames that keep an animation's frames and their
+ * images together when a frame is inserted or deleted. `files` lists images/,
+ * `frames` are the animation's frames before the change. Each frame's files
+ * are found as for a rename (planFrameImageRenames: its fileType's
+ * extension, or for another fileType every file with its name and a single
+ * extension, ignoring case) and move to the lowercase name of their new
+ * index, keeping the extension.
+ *
+ * - Insert at k: the files of frames k..n-1 move one index up, the last
+ *   first; the new frame's image then goes under the name of index k.
+ * - Delete at k: the deleted frame's files are renamed to <file>.bak (kept,
+ *   not deleted), then the files of frames k+1..n-1 move one index down.
+ *
+ * No existing file is replaced: a file that no frame uses but that has a
+ * name a moved image or the new frame's image needs is renamed to <file>.bak
+ * first (<file>.1.bak, … when that name is taken too).
+ */
+export function planFrameImageShift(
+  files: readonly string[],
+  objectName: string,
+  animationName: string,
+  frames: ReadonlyArray<{ fileType?: unknown } | null | undefined>,
+  change: FrameListChange,
+): FrameImageShiftPlan {
+  const index = indexImageFiles(files);
+  const base = (frameIndex: number) => frameImageBaseName(objectName, animationName, frameIndex);
+  const plan: FrameImageShiftPlan = { renames: [], shifted: [], parked: [], backedUp: [], missing: [], clashes: [] };
+
+  // Every name in images/ so far, and those the renames produce, ignoring case (for free .bak names)
+  const taken = new Set(files.map(f => f.toLowerCase()));
+  const backupName = (file: string): string => {
+    for (let n = 0; ; n++) {
+      const name = n === 0 ? `${file}.bak` : `${file}.${n}.bak`;
+      if (!taken.has(name.toLowerCase())) {
+        taken.add(name.toLowerCase());
+        return name;
+      }
+    }
+  };
+
+  const move = (from: number, to: number) => {
+    const fileType = frames[from]?.fileType;
+    const sources = index.frameFiles(base(from), fileType);
+    if (sources.length === 0) plan.missing.push(expectedFrameImageName(base(from), fileType));
+    for (const file of sources) {
+      const target = `${base(to)}.${file.slice(base(from).length + 1).toLowerCase()}`;
+      plan.shifted.push({ from: file, to: target });
+      taken.add(target);
+    }
+  };
+
+  if ('insertAt' in change) {
+    for (let i = frames.length - 1; i >= change.insertAt; i--) move(i, i + 1);
+    plan.newFrameFile = getImageFileName(objectName, animationName, change.insertAt, 'Sprite');
+  } else {
+    for (const file of index.frameFiles(base(change.deleteAt), frames[change.deleteAt]?.fileType)) {
+      plan.parked.push({ from: file, to: backupName(file) });
+    }
+    for (let i = change.deleteAt + 1; i < frames.length; i++) move(i, i - 1);
+  }
+
+  // Files in the way: named like a target, but not moved themselves
+  const moved = new Set([...plan.parked, ...plan.shifted].map(r => r.from));
+  const targets = [...plan.shifted.map(r => r.to), ...(plan.newFrameFile !== undefined ? [plan.newFrameFile] : [])];
+  for (const target of targets) {
+    for (const file of index.named(target.toLowerCase())) {
+      if (!moved.has(file) && !plan.backedUp.some(r => r.from === file)) {
+        plan.backedUp.push({ from: file, to: backupName(file) });
+      }
+    }
+  }
+  plan.renames = [...plan.backedUp, ...plan.parked, ...plan.shifted];
+  const result = simulateImageRenames(files, plan.renames);
+  plan.clashes = result.clashes.map(c => `images/${c.from} cannot be renamed to images/${c.to}: images/${c.occupant} would be replaced`);
+  if (plan.newFrameFile !== undefined && plan.clashes.length === 0) {
+    const occupant = result.present.get(plan.newFrameFile.toLowerCase())?.[0];
+    if (occupant !== undefined) plan.clashes.push(`images/${occupant} would be replaced by the new frame's image`);
+  }
+  return plan;
+}
+
+/** A rename whose target name is taken by another file when it would run. */
+export interface ImageRenameClash extends ImageFileRename {
+  /** The file under the target name (ignoring case) */
+  occupant: string;
+  /** Whether an earlier rename of the list put `occupant` there */
+  renamedThere: boolean;
+}
+
+/**
+ * Apply `renames` in order to a listing of images/, comparing names ignoring
+ * case (as Windows and macOS do): a target name is free when no file has it
+ * at that point, also when an earlier rename moved its file away. Returns the
+ * renames whose target is taken by another file (these are skipped) and the
+ * files present afterwards by lowercase name.
+ */
+export function simulateImageRenames(
+  files: readonly string[],
+  renames: readonly ImageFileRename[],
+): { clashes: ImageRenameClash[]; present: Map<string, string[]> } {
+  const present = new Map<string, string[]>();
+  const add = (file: string) => present.set(file.toLowerCase(), [...(present.get(file.toLowerCase()) ?? []), file]);
+  files.forEach(add);
+  const renamedThere = new Set<string>();
+  const clashes: ImageRenameClash[] = [];
+  for (const { from, to } of renames) {
+    const occupant = (present.get(to.toLowerCase()) ?? []).find(file => file !== from);
+    if (occupant !== undefined) {
+      clashes.push({ from, to, occupant, renamedThere: renamedThere.has(occupant) });
+      continue;
+    }
+    const left = (present.get(from.toLowerCase()) ?? []).filter(file => file !== from);
+    if (left.length > 0) present.set(from.toLowerCase(), left); else present.delete(from.toLowerCase());
+    add(to);
+    renamedThere.add(to);
+  }
+  return { clashes, present };
 }
 
 /** An animation of a Sprite's "animations" container and where it is. */

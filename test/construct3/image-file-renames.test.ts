@@ -95,6 +95,33 @@ describe('renameImageFiles', () => {
     expect(await images()).toEqual(['hero-walk-000.png', 'hero-walk-001.png']);
   });
 
+  it('renames in order, so files can move along a chain, and the reverse chain undoes it', async () => {
+    await addImages({ 'hero-walk-000.png': 'frame 0', 'hero-walk-001.png': 'frame 1', 'hero-walk-002.png': 'left over' });
+    const chain = [
+      { from: 'hero-walk-002.png', to: 'hero-walk-002.png.bak' },
+      { from: 'hero-walk-001.png', to: 'hero-walk-002.png' },
+      { from: 'hero-walk-000.png', to: 'hero-walk-001.png' },
+    ];
+    await writer.renameImageFiles(chain);
+    expect(await images()).toEqual(['hero-walk-001.png', 'hero-walk-002.png', 'hero-walk-002.png.bak']);
+    expect(await readFile(join(tmpDir, 'images', 'hero-walk-002.png'), 'utf8')).toBe('frame 1');
+    expect(await readFile(join(tmpDir, 'images', 'hero-walk-002.png.bak'), 'utf8')).toBe('left over');
+
+    await writer.renameImageFiles(chain.map(r => ({ from: r.to, to: r.from })).reverse());
+    expect(await images()).toEqual(['hero-walk-000.png', 'hero-walk-001.png', 'hero-walk-002.png']);
+    expect(await readFile(join(tmpDir, 'images', 'hero-walk-002.png'), 'utf8')).toBe('left over');
+  });
+
+  it('refuses a chain in the wrong order before renaming anything', async () => {
+    await addImages({ 'hero-walk-000.png': 'frame 0', 'hero-walk-001.png': 'frame 1' });
+    await expect(writer.renameImageFiles([
+      { from: 'hero-walk-000.png', to: 'hero-walk-001.png' },
+      { from: 'hero-walk-001.png', to: 'hero-walk-002.png' },
+    ])).rejects.toThrow('Cannot rename images/hero-walk-000.png to images/hero-walk-001.png: images/hero-walk-001.png already exists. No image file was renamed.');
+    expect(await images()).toEqual(['hero-walk-000.png', 'hero-walk-001.png']);
+    expect(await readFile(join(tmpDir, 'images', 'hero-walk-001.png'), 'utf8')).toBe('frame 1');
+  });
+
   it('refuses names that are not plain file names in images/', async () => {
     await addImages({ 'hero-walk-000.png': 'frame 0' });
     for (const to of ['../hero-run-000.png', 'sub/hero-run-000.png', 'sub\\hero-run-000.png', '..', '']) {

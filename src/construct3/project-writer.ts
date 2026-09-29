@@ -16,6 +16,7 @@ import { resetProjectIndex } from './analyzers/index-builder.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from './templates.js';
 import { generatePlaceholderPng, getImageFileName } from './png-generator.js';
 import { applyJsonTextStyle, jsonTextStyleOf, parseJsonText, resolveJsonTextStyle } from './json-format.js';
+import { simulateImageRenames } from './animation-rename.js';
 
 /** Maximum entity file size we'll write (5MB — well above any real C3 entity) */
 const MAX_WRITE_SIZE = 5 * 1024 * 1024;
@@ -540,23 +541,24 @@ export class Construct3ProjectWriter {
   }
 
   /**
-   * Rename files in images/ (`from` and `to` are names in that folder), all
-   * or nothing: when a rename fails, the files renamed before it are renamed
-   * back and the call throws. Nothing is renamed when a `to` is taken by
-   * another file, also one whose name differs only in case (on Windows and
-   * macOS that is the same file). `to` may differ from `from` only in case.
+   * Rename files in images/ (`from` and `to` are names in that folder), in
+   * order and all or nothing: when a rename fails, the files renamed before
+   * it are renamed back, last first, and the call throws. Nothing is renamed
+   * when a `to` is taken by another file at the point its rename runs, also
+   * one whose name differs only in case (on Windows and macOS that is the
+   * same file); a name an earlier rename of the list moved away is free, so
+   * files can move along a chain (002 → 003, then 001 → 002). `to` may differ
+   * from `from` only in case. To undo a call, rename each `to` back to its
+   * `from` in reverse order.
    */
   async renameImageFiles(renames: ReadonlyArray<{ from: string; to: string }>): Promise<void> {
     const moves = renames.map(r => ({ ...r, fromPath: this.imageFilePath(r.from), toPath: this.imageFilePath(r.to) }));
     const existing = moves.length > 0 ? await this.listImageFiles() : [];
-    for (const [index, move] of moves.entries()) {
-      const taken = existing.find(f => f !== move.from && f.toLowerCase() === move.to.toLowerCase());
-      if (taken !== undefined) {
-        throw new Error(`Cannot rename images/${move.from} to images/${move.to}: images/${taken} already exists. No image file was renamed.`);
-      }
-      if (moves.findIndex(m => m.to.toLowerCase() === move.to.toLowerCase()) !== index) {
-        throw new Error(`Cannot rename two files to images/${move.to}. No image file was renamed.`);
-      }
+    const [clash] = simulateImageRenames(existing, moves).clashes;
+    if (clash !== undefined) {
+      throw new Error(clash.renamedThere
+        ? `Cannot rename two files to images/${clash.to}. No image file was renamed.`
+        : `Cannot rename images/${clash.from} to images/${clash.to}: images/${clash.occupant} already exists. No image file was renamed.`);
     }
 
     const done: typeof moves = [];

@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { readFile } from 'fs/promises';
+import { unlink } from 'fs/promises';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Animation, AnimationFrame } from '../construct3/types.js';
 import { toolResult, toolError, notFoundError } from './shared.js';
@@ -22,9 +22,10 @@ import {
   familiesContaining,
   findAnimation,
   planFrameImageRenames,
+  planFrameImageShift,
   renameInitialAnimation,
 } from '../construct3/animation-rename.js';
-import type { ImageFileRename } from '../construct3/animation-rename.js';
+import type { FrameImageShiftPlan, ImageFileRename } from '../construct3/animation-rename.js';
 
 export function registerAnimationTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── add_animation_to_sprite ──────────────────────────────
@@ -484,42 +485,63 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         const nameError = animationNameFileError(anim.name, true);
         if (nameError) return toolError(nameError);
 
+        const frameCount = anim.frames.length;
+        const insertAt = args.index ?? frameCount;
+        if (insertAt > frameCount) {
+          return toolError(`Frame index ${insertAt} is out of range. Animation "${anim.name}" has ${frameCount} frame(s): `
+            + `insert at an index from 0 to ${frameCount}, or leave index out to append. Nothing was changed.`);
+        }
+
+        // Frame image files are named by frame index: the images of the frames
+        // from insertAt on move one index up (see animation-rename.ts)
+        const images = planFrameImageShift(await writer.listImageFiles(), args.objectName, anim.name, anim.frames, { insertAt });
+        if (images.clashes.length > 0) {
+          return toolError(`Cannot add a frame at index ${insertAt} to "${anim.name}" on "${args.objectName}": the frame image files `
+            + `after it cannot be renamed one index up (${someOf(images.clashes, 3)}). Nothing was changed. Check these files in images/.`);
+        }
+
         // Infer dimensions from first existing frame
         const frameWidth = args.width ?? (anim.frames[0]?.width ?? 100);
         const frameHeight = args.height ?? (anim.frames[0]?.height ?? 100);
 
         const imageSpriteId = await idGen.generateImageSpriteId(reader);
 
-        // Write placeholder PNG
-        await writer.writeImageFiles([{
-          objectName: args.objectName,
-          animationName: args.animationName,
-          frameIndex: args.index ?? anim.frames.length,
-          pluginId: 'Sprite',
-          width: 1,
-          height: 1,
-        }]);
-
         const newFrame: AnimationFrame = {
           ...createAnimationFrame(frameWidth, frameHeight, imageSpriteId),
           duration: args.duration,
         };
+        anim.frames.splice(insertAt, 0, newFrame);
+        const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
 
-        if (args.index !== undefined) {
-          anim.frames.splice(args.index, 0, newFrame);
-        } else {
-          anim.frames.push(newFrame);
+        // Image files first (renamed back by the writer if one fails), then the
+        // placeholder PNG in the freed name, then the object; a failure there
+        // undoes everything before it
+        if (images.renames.length > 0) await writer.renameImageFiles(images.renames);
+        const placeholders: string[] = [];
+        let backupPath: string;
+        try {
+          placeholders.push(...await writer.writeImageFiles([{
+            objectName: args.objectName,
+            animationName: anim.name,
+            frameIndex: insertAt,
+            pluginId: 'Sprite',
+            width: 1,
+            height: 1,
+          }]));
+          backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
+        } catch (error) {
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, placeholders, images.renames)}`);
         }
 
-        const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
-        const backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
-
+        const warnings = frameImageWarnings(images, anim.name);
         const result: WriteResult = {
           success: true,
           entity: args.objectName,
           category: 'object',
           action: 'updated',
           backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
@@ -568,17 +590,39 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
           return toolError(`Cannot delete the last frame of animation "${args.animationName}". An animation must have at least one frame.`);
         }
 
+        // Frame image files are named by frame index: the deleted frame's image
+        // is kept as .bak, the images of the frames after it move one index
+        // down (see animation-rename.ts)
+        const images = planFrameImageShift(
+          await writer.listImageFiles(), args.objectName, anim.name, anim.frames, { deleteAt: args.frameIndex },
+        );
+        if (images.clashes.length > 0) {
+          return toolError(`Cannot delete frame ${args.frameIndex} of "${anim.name}" on "${args.objectName}": the frame image files `
+            + `after it cannot be renamed one index down (${someOf(images.clashes, 3)}). Nothing was changed. Check these files in images/.`);
+        }
+
         anim.frames.splice(args.frameIndex, 1);
-
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
-        const backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
 
+        // Image files first (renamed back by the writer if one fails), then the
+        // object; a failure there renames the image files back
+        if (images.renames.length > 0) await writer.renameImageFiles(images.renames);
+        let backupPath: string;
+        try {
+          backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
+        } catch (error) {
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, [], images.renames)}`);
+        }
+
+        const warnings = frameImageWarnings(images, anim.name);
         const result: WriteResult = {
           success: true,
           entity: args.objectName,
           category: 'object',
           action: 'updated',
           backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
@@ -799,6 +843,84 @@ function animationNameFileError(animationName: string, existing = false): string
 function someOf(items: string[], max: number): string {
   const shown = items.slice(0, max).map(item => `"${item}"`).join(', ');
   return items.length > max ? `${shown} and ${items.length - max} more` : shown;
+}
+
+/**
+ * Warnings about the image files an add_frame_to_animation or
+ * delete_frame_from_animation renamed (see planFrameImageShift).
+ */
+function frameImageWarnings(images: FrameImageShiftPlan, animationName: string): string[] {
+  const warnings: string[] = [];
+  const list = (renames: ImageFileRename[]) => {
+    const shown = renames.slice(0, 3).map(r => `"images/${r.from}" → "images/${r.to}"`).join(', ');
+    return renames.length > 3 ? `${shown} and ${renames.length - 3} more` : shown;
+  };
+  if (images.shifted.length > 0) {
+    const [first] = images.shifted;
+    const direction = images.newFrameFile !== undefined ? 'up' : 'down';
+    warnings.push(`Renamed ${images.shifted.length} frame image file(s) in images/ one index ${direction}, with their frames `
+      + `("${first.from}" → "${first.to}"${images.shifted.length > 1 ? ', …' : ''}).`);
+  }
+  if (images.parked.length > 0) {
+    warnings.push(`The deleted frame's image was kept as a backup: ${list(images.parked)}. No frame uses it; delete it when it is no longer needed.`);
+  }
+  if (images.backedUp.length > 0) {
+    warnings.push(`${images.backedUp.length} file(s) in images/ had the name a frame image needed, but no frame used them (e.g. images a `
+      + `deleted frame left behind); they were renamed instead of being replaced: ${list(images.backedUp)}.`);
+  }
+  if (images.missing.length > 0) {
+    warnings.push(`No image file in images/ for ${images.missing.length} frame(s) of "${animationName}" after the changed index `
+      + `(expected ${someOf(images.missing, 3)}); nothing was renamed for them.`);
+  }
+  return warnings;
+}
+
+/**
+ * Undo an add_frame_to_animation or delete_frame_from_animation whose writes
+ * after the image renames failed: put back the object file from its backup
+ * when its write failed after replacing it, remove the placeholder images
+ * written, then rename the image files back, last first. Returns a sentence
+ * for the error message.
+ */
+async function rollBackFrameChange(
+  writer: MutationToolDeps['writer'],
+  error: unknown,
+  placeholders: string[],
+  renames: ImageFileRename[],
+): Promise<string> {
+  const failed: string[] = [];
+  if (error instanceof EntityWriteError) {
+    try {
+      await writer.restoreEntityFile(error.backupPath);
+    } catch {
+      failed.push(error.backupPath.replace(/\.bak$/, ''));
+    }
+  }
+  for (const path of placeholders) {
+    try {
+      await unlink(path);
+    } catch (e) {
+      if (!(e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT')) failed.push(path);
+    }
+  }
+  if (renames.length > 0) {
+    try {
+      await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })).reverse());
+    } catch (e) {
+      failed.push(`image files (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  if (failed.length > 0) {
+    return `Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
+  }
+  const undone = [
+    ...(renames.length > 0 ? ['the image files have their old names again'] : []),
+    ...(placeholders.length > 0 ? ['the placeholder image was removed'] : []),
+    ...(error instanceof EntityWriteError ? ['the object file was restored from its backup'] : []),
+  ];
+  return undone.length === 0
+    ? 'Nothing was changed.'
+    : `Nothing was changed: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`;
 }
 
 /**

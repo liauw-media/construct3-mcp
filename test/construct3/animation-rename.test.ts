@@ -9,7 +9,9 @@ import {
   findAnimation,
   frameImageExtension,
   planFrameImageRenames,
+  planFrameImageShift,
   renameInitialAnimation,
+  simulateImageRenames,
 } from '../../src/construct3/animation-rename.js';
 
 const png = { fileType: 'image/png' };
@@ -100,6 +102,102 @@ describe('planFrameImageRenames', () => {
     const plan = planFrameImageRenames(['Hero-Walk-000.png', 'hero-walk-000.png'], 'Hero', 'Walk', 'Run', [png]);
     expect(plan.renames).toEqual([{ from: 'Hero-Walk-000.png', to: 'hero-run-000.png' }]);
     expect(plan.clashes).toEqual(['hero-run-000.png']);
+  });
+});
+
+describe('planFrameImageShift', () => {
+  const gif = { fileType: 'image/gif' };
+
+  it('inserting moves the files from the index on one index up, last first, and names the new frame\'s file', () => {
+    const files = ['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-002.gif', 'hero-idle-001.png'];
+    const plan = planFrameImageShift(files, 'Hero', 'Walk', [png, jpeg, gif], { insertAt: 1 });
+    expect(plan.renames).toEqual([
+      { from: 'hero-walk-002.gif', to: 'hero-walk-003.gif' },
+      { from: 'hero-walk-001.jpg', to: 'hero-walk-002.jpg' },
+    ]);
+    expect(plan.shifted).toEqual(plan.renames);
+    expect(plan.newFrameFile).toBe('hero-walk-001.png');
+    expect(plan).toMatchObject({ parked: [], backedUp: [], missing: [], clashes: [] });
+  });
+
+  it('appending moves nothing', () => {
+    const plan = planFrameImageShift(['hero-walk-000.png'], 'Hero', 'Walk', [png], { insertAt: 1 });
+    expect(plan.renames).toEqual([]);
+    expect(plan.newFrameFile).toBe('hero-walk-001.png');
+  });
+
+  it('deleting keeps the deleted frame\'s files as .bak, then moves the later ones one index down', () => {
+    const files = ['hero-walk-000.png', 'hero-walk-001.png', 'Hero-Walk-002.JPG', 'hero-walk-001.png.bak'];
+    const plan = planFrameImageShift(files, 'Hero', 'Walk', [png, png, jpeg], { deleteAt: 1 });
+    expect(plan.renames).toEqual([
+      { from: 'hero-walk-001.png', to: 'hero-walk-001.png.1.bak' },
+      { from: 'Hero-Walk-002.JPG', to: 'hero-walk-001.jpg' },
+    ]);
+    expect(plan.parked).toEqual([plan.renames[0]]);
+    expect(plan.newFrameFile).toBeUndefined();
+    expect(plan.clashes).toEqual([]);
+  });
+
+  it('renames a file no frame uses out of the way first, instead of replacing it', () => {
+    // 002.png was left behind by a deleted frame; 000.png sits next to the JPEG frame's 000.jpg
+    const files = ['hero-walk-000.jpg', 'hero-walk-000.png', 'hero-walk-001.png', 'hero-walk-002.png'];
+    const plan = planFrameImageShift(files, 'Hero', 'Walk', [jpeg, png], { insertAt: 0 });
+    expect(plan.backedUp).toEqual([
+      { from: 'hero-walk-002.png', to: 'hero-walk-002.png.bak' },
+      { from: 'hero-walk-000.png', to: 'hero-walk-000.png.bak' },
+    ]);
+    expect(plan.renames).toEqual([
+      ...plan.backedUp,
+      { from: 'hero-walk-001.png', to: 'hero-walk-002.png' },
+      { from: 'hero-walk-000.jpg', to: 'hero-walk-001.jpg' },
+    ]);
+    expect(plan.clashes).toEqual([]);
+    // A leftover under a name no moved image needs stays as it is
+    const kept = planFrameImageShift(['hero-walk-000.png', 'hero-walk-001.jpg', 'hero-walk-001.png'], 'Hero', 'Walk', [png], { insertAt: 0 });
+    expect(kept.backedUp).toEqual([{ from: 'hero-walk-001.png', to: 'hero-walk-001.png.bak' }]);
+    const untouched = planFrameImageShift(['hero-walk-000.png', 'hero-walk-001.jpg'], 'Hero', 'Walk', [png], { insertAt: 0 });
+    expect(untouched.backedUp).toEqual([]);
+  });
+
+  it('lists frames without a file as missing and moves the others', () => {
+    const plan = planFrameImageShift(['hero-walk-002.png'], 'Hero', 'Walk', [png, jpeg, png], { insertAt: 0 });
+    expect(plan.missing).toEqual(['hero-walk-001.jpg', 'hero-walk-000.png']);
+    expect(plan.renames).toEqual([{ from: 'hero-walk-002.png', to: 'hero-walk-003.png' }]);
+  });
+
+  it('reports a clash when two files that differ only in case would get the same name', () => {
+    // Possible on a case-sensitive file system
+    const plan = planFrameImageShift(['Hero-Walk-000.png', 'hero-walk-000.png'], 'Hero', 'Walk', [png], { insertAt: 0 });
+    expect(plan.clashes).toEqual([
+      'images/hero-walk-000.png cannot be renamed to images/hero-walk-001.png: images/hero-walk-001.png would be replaced',
+    ]);
+  });
+});
+
+describe('simulateImageRenames', () => {
+  it('frees a name once an earlier rename moved its file away', () => {
+    const result = simulateImageRenames(['a-000.png', 'a-001.png'], [
+      { from: 'a-001.png', to: 'a-002.png' },
+      { from: 'a-000.png', to: 'a-001.png' },
+    ]);
+    expect(result.clashes).toEqual([]);
+    expect([...result.present.keys()].sort()).toEqual(['a-001.png', 'a-002.png']);
+  });
+
+  it('reports a target taken by a file, ignoring case, or by an earlier rename', () => {
+    const result = simulateImageRenames(['a-000.png', 'A-001.png', 'b.png'], [
+      { from: 'a-000.png', to: 'a-001.png' },
+      { from: 'b.png', to: 'c.png' },
+      { from: 'a-000.png', to: 'c.png' },
+    ]);
+    expect(result.clashes).toEqual([
+      { from: 'a-000.png', to: 'a-001.png', occupant: 'A-001.png', renamedThere: false },
+      { from: 'a-000.png', to: 'c.png', occupant: 'c.png', renamedThere: true },
+    ]);
+  });
+
+  it('allows a rename that changes only the case of a name', () => {
+    expect(simulateImageRenames(['A-000.png'], [{ from: 'A-000.png', to: 'a-000.png' }]).clashes).toEqual([]);
   });
 });
 
