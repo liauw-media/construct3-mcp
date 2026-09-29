@@ -22,8 +22,11 @@ import {
   findEnclosingEvents,
   findEventVariableNameProblem,
   findNewEventVariableNameClashes,
+  findFunctionNameProblem,
+  functionBlockNames,
+  newDuplicateFunctionNames,
 } from '../construct3/event-variable-names.js';
-import type { EventVariableNameProblem, NewEventVariableNameClash } from '../construct3/event-variable-names.js';
+import type { EventVariableNameProblem, FunctionBlockName, FunctionNameProblem, NewEventVariableNameClash } from '../construct3/event-variable-names.js';
 import {
   conditionSchema,
   actionSchema,
@@ -268,7 +271,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       sheetName: z.string().max(200).describe('Target event sheet'),
       eventType: z.enum(['group', 'function', 'variable', 'include', 'comment']).describe('Type of event to add'),
       title: z.string().max(500).optional().describe('For groups: the group title'),
-      functionName: z.string().max(200).optional().describe('For functions: function name'),
+      functionName: z.string().max(200).optional().describe('For functions: function name. Refused like in the editor: a name that matches, ignoring case, another function in the project or a System expression; with a return type also whitespace, punctuation such as - . : or a leading underscore (the name is used in expressions). Without a return type the editor accepts any name that is not empty'),
       functionParams: z.array(z.object({
         name: z.string().describe('Parameter name'),
         type: z.enum(['number', 'string', 'boolean']).describe('Parameter type'),
@@ -312,6 +315,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
           case 'function': {
             if (!args.functionName) return toolError('functionName is required for function events');
+            // The name is checked like in the editor's Function dialog, against every function in the project
+            const allSheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
+            const nameProblem = findFunctionNameProblem(args.functionName, args.functionReturnType ?? 'none', functionBlockNames(allSheets));
+            if (nameProblem) return toolError(functionNameMessage(nameProblem, args.functionName, args.functionReturnType ?? 'none'));
             // Parameter names are checked like in the editor's Function parameter dialog
             if (args.functionParams && args.functionParams.length > 0) {
               const sheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
@@ -1231,6 +1238,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sourceSheetData.events = sourceEvents as unknown as C3Event[];
           targetSheetData.events = targetBefore;
           return toolError(movedEventVariableNameClashMessage(args.targetSheet, args.deleteSource, nameClashes));
+        }
+        // Function names: a copied function block keeps its name, which its original still has
+        const functionClashes = newDuplicateFunctionNames(functionBlockNames(sheetsBefore), functionBlockNames(sheetsAfter));
+        if (functionClashes.length > 0) {
+          sourceSheetData.events = sourceEvents as unknown as C3Event[];
+          targetSheetData.events = targetBefore;
+          return toolError(copiedFunctionNameClashMessage(args.targetSheet, functionClashes));
         }
 
         // Editor load-time rules over both sheets: a copy of an event that
@@ -2216,6 +2230,37 @@ function functionParameterNamesError(
     fn.functionParameters.push({ name });
   }
   return undefined;
+}
+
+/** Error text for a function name the editor would refuse (see event-variable-names.ts, Function names). */
+function functionNameMessage(problem: FunctionNameProblem, name: string, returnType: string): string {
+  if (problem.problem === 'invalid') {
+    return `"${name}" is not a valid name for a function with return type "${returnType}": ${problem.reason}. ` +
+      'A function with a return type is used in expressions (Functions.Name(...)), so Construct 3 gives it only a name ' +
+      'it accepts for an event variable: no whitespace, no punctuation such as - . : ( ), no leading underscore, not ' +
+      'only digits. A function without a return type (functionReturnType "none") may have such a name. Choose a different name.';
+  }
+  if (problem.problem === 'reserved') {
+    return `"${name}" is the name of the System expression "${problem.expression}"${problem.expression === name ? '' : ' (ignoring case)'}. ` +
+      'Construct 3 reserves the names of its built-in System functions for functions; choose a different name.';
+  }
+  const { use } = problem;
+  const same = use.name === name ? `A function named "${name}"` : `The function "${use.name}", which differs from "${name}" only in case,`;
+  return `${same} already exists in sheet "${use.sheet}" (${use.eventPath}${use.sid !== undefined ? `, SID ${use.sid}` : ''}). ` +
+    'Construct 3 requires a function name to differ, ignoring case, from every other function in the project (it looks ' +
+    'functions up ignoring case, so a call could not tell them apart). Choose a different name.';
+}
+
+/** Error text for a copy that would leave two function blocks whose names match ignoring case. */
+function copiedFunctionNameClashMessage(targetSheet: string, groups: readonly FunctionBlockName[][]): string {
+  const lines = groups.slice(0, 10).map(g =>
+    `- ${g.map(f => `"${f.name}" in sheet "${f.sheet}" (${f.eventPath})`).join(', ')}`);
+  if (groups.length > 10) lines.push(`- and ${groups.length - 10} more`);
+  return `Copying these events to "${targetSheet}" would leave function blocks whose names match, ignoring case:\n` +
+    `${lines.join('\n')}\n\n` +
+    'Construct 3 requires a function name to differ, ignoring case, from every other function in the project, and ' +
+    'renames a pasted function block; this tool keeps the names, so nothing was written. Move the function instead ' +
+    '(deleteSource: true).';
 }
 
 /** Error text for copied or moved events whose variable or parameter names clash in their new scope. */

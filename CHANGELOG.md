@@ -9,10 +9,14 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `add_event_to_sheet` returns the SID of the group, function or variable it creates (`generatedSid`), the SIDs of a new function's parameters (`functionParameterSids`, `[{ name, sid }]`), the new event's `eventPath` and `backupFile`, so the next call can address the event without reading the sheet again (#38).
 - `add_event_to_sheet` takes `commentTextColor` and `commentBackgroundColor` for a comment event, written as the editor's `"text-color"` and `"background-color"`; before, a comment event could only get colours as a sub-event of `add_event_block` (#38).
 - `update_event_block` edits a comment row among the actions in place: an `updateActions` entry takes `text`, `"text-color"` and `"background-color"` (`null` removes a colour). Before, the only way was to remove the row and add a new one, which moved it to the end of the actions, and the error message suggested a new row without its colours (#38).
+- `validate_project` check `duplicate-function-name`: a warning for function blocks anywhere in the project whose names are the same ignoring case, with each block's sheet, path and SID (#38).
+- `get_function_map` marks function blocks that share a name with `sameNameAs` and lists such names in `summary.duplicateFunctionNames` (#38).
 - `move_events_between_sheets` has `force`, to move an event variable out of the scope of events that use it anyway (see Fixed) (#38).
 
 ### Changed
 
+- `move_events_between_sheets` refuses to copy a function block (`deleteSource: false`, also inside a copied group): the copy would share its name with the original. Move it instead; the editor renames a pasted function (#38).
+- `add_event_to_sheet` refuses a `functionName` the editor refuses (see Fixed), so a call that worked before can now fail (#38).
 - `delete_event_sheet` returns `references.callers` and `references.variableReferences` (as `delete_event_from_sheet` does) when other sheets use the functions or global variables of the sheet, next to `includedBy` and `boundLayouts`; with `force` it returns them in `references` as well (#58).
 
 ### Fixed
@@ -22,6 +26,9 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `move_events_between_sheets` refuses without `force` a move that takes an event variable out of the scope of events that use it. Before, a used global variable moved into a group (`targetGroupPath`) became a local variable of that group without a warning, and every event elsewhere that used it was left naming a variable the editor's loader cannot find (*cannot find event variable*); the documentation even called moving a global variable fine. The refusal (`move_blocked`) lists the uses in `references.variableReferences` (the checks of `delete_event_from_sheet`, comparing where each use resolves before and after the move), and with `force` the move goes ahead and names them. Event sheets that could not be parsed are searched as text for a global variable the move makes local (#38).
 
 - An update of a function call's arguments (`update_event_block` `updateActions`, `update_event_block_action`) no longer re-orders the keys of a call that is already in the editor's shape: only `parameters` is replaced, so an update with the same arguments changes nothing. Before, a disabled call saved as `{ callFunction, sid, parameters, disabled }` was rewritten as `{ callFunction, sid, disabled, parameters }` even when nothing changed. Calls in an older shape are still rewritten into the editor's (#38).
+
+- `add_event_to_sheet` checks `functionName` like the editor's Function dialog: a name another function block in the project has, also only in another case (`DoIt` next to `DoIt` or `doit`), and System expression names are refused, and a function with a return type gets the character rules of event variable names (a function without one may be named `Do It`, as in the editor). Before, any name was accepted, and two functions with one name made calls ambiguous (#38).
+- `get_function_map` and `get_eventsheet_flow` no longer merge function blocks that share a name: every function block is listed (and counted per sheet) on its own. Before, a second function of the same name replaced the first, so `get_eventsheet_flow` counted too few functions in a sheet (#38).
 
 ## [1.9.2] - 2026-09-29
 

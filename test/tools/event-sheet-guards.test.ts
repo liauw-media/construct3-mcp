@@ -406,3 +406,73 @@ describe('comment rows and function calls edited in place (#38)', () => {
     ]);
   });
 });
+
+// ─── function names (#38) ───────────────────────────────────
+
+describe('function names are checked like in the editor and duplicates are reported (#38)', () => {
+  const addFunction = (functionName: string, extra: Record<string, unknown> = {}, sheetName = 'MainSheet') =>
+    server.callTool('add_event_to_sheet', { sheetName, eventType: 'function', functionName, ...extra });
+
+  it('add_event_to_sheet refuses a name another function has, also only in case or in another sheet (the #38 repro)', async () => {
+    await addSheet('Other', [group('Helpers', 784000000000001, [fn('Spawn', 784000000000002)])]);
+    await startServer();
+
+    expect((await addFunction('DoIt')).isError).toBeUndefined();
+    expect(await callError('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'function', functionName: 'DoIt' }))
+      .toContain('A function named "DoIt" already exists in sheet "MainSheet"');
+    expect(await callError('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'function', functionName: 'doit' }))
+      .toContain('The function "DoIt", which differs from "doit" only in case, already exists');
+    expect(await callError('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'function', functionName: 'SPAWN' }))
+      .toContain('already exists in sheet "Other" (events[0].children[0], SID 784000000000002)');
+    expect((await readSheet('MainSheet')).events.filter((e: any) => e.eventType === 'function-block')).toHaveLength(1);
+  });
+
+  it('checks the characters only for a function with a return type, as the editor does, and refuses System expression names', async () => {
+    await startServer();
+    for (const name of ['Do It', 'a.b', '_x']) {
+      expect((await addFunction(name)).isError, name).toBeUndefined();
+      expect(await callError('add_event_to_sheet', {
+        sheetName: 'MainSheet', eventType: 'function', functionName: `${name}2`, functionReturnType: 'number',
+      })).toContain(`is not a valid name for a function with return type "number"`);
+    }
+    expect(await callError('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'function', functionName: 'Random' }))
+      .toContain('is the name of the System expression "random" (ignoring case)');
+    expect((await addFunction('Sprite')).isError).toBeUndefined();
+  });
+
+  it('move_events_between_sheets refuses to copy a function block, and moves it', async () => {
+    await addSheet('Other', []);
+    const main = await readSheet('MainSheet');
+    main.events.push(fn('DoIt', 784000000000010));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await startServer();
+
+    expect(await callError('move_events_between_sheets', { sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [784000000000010] }))
+      .toContain('would leave function blocks whose names match, ignoring case:\n- "DoIt" in sheet "MainSheet" (events[1]), "DoIt" in sheet "Other" (events[0])');
+    expect((await readSheet('Other')).events).toEqual([]);
+    const moved = await call('move_events_between_sheets', { sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [784000000000010], deleteSource: true });
+    expect(moved.success).toBe(true);
+  });
+
+  it('validate_project reports function names that several function blocks have, and the analyses list each of them', async () => {
+    await addSheet('Other', [fn('doit', 784000000000021)]);
+    const main = await readSheet('MainSheet');
+    main.events.push(fn('DoIt', 784000000000020), fn('DoIt', 784000000000024), block(784000000000022, [callFn('DoIt', 784000000000023)]));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await startServer();
+
+    const validation = await call('validate_project', {});
+    const issue = validation.warnings.find((w: any) => w.check === 'duplicate-function-name');
+    expect(issue.message).toContain('3 function blocks have the name "DoIt", ignoring case: "DoIt" in eventSheets/MainSheet at events[1] (sid 784000000000020), "DoIt" in eventSheets/MainSheet at events[2] (sid 784000000000024), "doit" in eventSheets/Other at events[0] (sid 784000000000021)');
+
+    const map = await call('get_function_map', {});
+    expect(map.functions.map((f: any) => [f.name, f.sheet, f.callCount, f.sameNameAs.length])).toEqual([
+      ['DoIt', 'MainSheet', 1, 2], ['DoIt', 'MainSheet', 1, 2], ['doit', 'Other', 1, 2],
+    ]);
+    expect(map.summary).toMatchObject({ totalFunctions: 3, totalCallSites: 1, duplicateFunctionNames: ['DoIt'] });
+
+    const flow = await call('get_eventsheet_flow', { format: 'json' });
+    expect(flow.nodes.find((n: any) => n.name === 'MainSheet').functionCount).toBe(2);
+    expect(flow.nodes.find((n: any) => n.name === 'Other').functionCount).toBe(1);
+  });
+});
