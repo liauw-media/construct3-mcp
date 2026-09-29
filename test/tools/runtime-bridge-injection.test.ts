@@ -217,6 +217,22 @@ describe('inject_runtime_bridge and remove_runtime_bridge on script files as use
     expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(projectBefore);
     expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(true);
   });
+
+  it('writes nothing when the bridge is registered already, wherever its entry sits', async () => {
+    const dir = await copyFixture('minimal-project');
+    await addRootMainScript(dir, 'runOnStartup(async (runtime) => {});\n');
+    const server = await tools(dir);
+    payload(await server.callTool('inject_runtime_bridge', {}));
+    // Another script added after the bridge, as the editor would list it.
+    const project = await readProject(dir);
+    project.rootFileFolders.script.items.push({ name: 'zzz-helper.js', type: 'application/javascript', sid: 402118576391206, 'script-info': { purpose: 'none' } });
+    await writeFile(join(dir, 'project.c3proj'), JSON.stringify(project, null, '\t'), 'utf8');
+    const before = await readFile(join(dir, 'project.c3proj'), 'utf8');
+
+    const again = payload(await server.callTool('inject_runtime_bridge', {}));
+    expect(again).toMatchObject({ registered: false, importAdded: false });
+    expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(before);
+  });
 });
 
 describe('export_for_preview', () => {

@@ -180,6 +180,14 @@ function findMainScript(folder: ScriptFolder | undefined, prefix = '', depth = 0
   return undefined;
 }
 
+/** How many bridge entries the script folders hold. */
+function countBridgeEntries(folder: ScriptFolder | undefined, depth = 0): number {
+  if (!folder || depth > 32) return 0;
+  let count = Array.isArray(folder.items) ? folder.items.filter((item) => item?.name === BRIDGE_FILENAME).length : 0;
+  for (const sub of Array.isArray(folder.subfolders) ? folder.subfolders : []) count += countBridgeEntries(sub, depth + 1);
+  return count;
+}
+
 /** Remove every bridge entry from the script folders; returns those removed. */
 function takeBridgeEntries(folder: ScriptFolder | undefined, depth = 0): Array<Record<string, unknown>> {
   if (!folder || depth > 32) return [];
@@ -310,24 +318,30 @@ async function installBridge(projectDir: string, c3projPath: string): Promise<Br
   const loadedAs: BridgeLoading = scriptsType === 'classic' ? 'classic' : mainScript ? 'import' : 'main';
   const purpose = loadedAs === 'main' ? 'main' : 'none';
 
-  const existing = takeBridgeEntries(scripts);
-  const current = existing.length === 1 && scripts.items !== undefined ? existing[0] : undefined;
-  const upToDate = current !== undefined
-    && current['file-info'] === undefined
-    && (current['script-info'] as { purpose?: unknown } | undefined)?.purpose === purpose;
-  const sid = typeof existing[0]?.sid === 'number'
-    ? existing[0].sid
-    : Math.floor(Math.random() * 900_000_000_000_000) + 100_000_000_000_000;
-  const entry = upToDate ? current : {
+  const entryFor = (earlier: Record<string, unknown> | undefined) => ({
     name: BRIDGE_FILENAME,
     type: 'application/javascript',
-    sid,
+    sid: typeof earlier?.sid === 'number'
+      ? earlier.sid
+      : Math.floor(Math.random() * 900_000_000_000_000) + 100_000_000_000_000,
     'script-info': { purpose },
-  };
-  scripts.items.push(entry);
-  // Unchanged when exactly one up-to-date entry sat at the end of the root list.
-  const registered = !(upToDate && raw === serializeJson(c3proj, jsonTextStyleOf(raw)));
-  if (registered) await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
+  });
+  const rootIndex = scripts.items.findIndex(item => item?.name === BRIDGE_FILENAME);
+  if (rootIndex >= 0 && countBridgeEntries(scripts) === 1) {
+    // The one entry stays where it is (the editor keeps the order it was
+    // given); only an outdated one ("file-info", another purpose) is replaced.
+    const current = scripts.items[rootIndex];
+    const upToDate = current['file-info'] === undefined
+      && (current['script-info'] as { purpose?: unknown } | undefined)?.purpose === purpose;
+    if (!upToDate) scripts.items[rootIndex] = entryFor(current);
+  } else {
+    const existing = takeBridgeEntries(scripts);
+    scripts.items.push(entryFor(existing[0]));
+  }
+  // Written only when something changed, so a repeated call leaves the file as it was.
+  const text = serializeJson(c3proj, jsonTextStyleOf(raw));
+  const registered = text !== raw;
+  if (registered) await writeFile(c3projPath, text, 'utf-8');
 
   const importAdded = loadedAs === 'import' ? await addBridgeImport(projectDir, mainScript!) : false;
   return { loadedAs, mainScript: loadedAs === 'import' ? mainScript : undefined, registered, importAdded };
