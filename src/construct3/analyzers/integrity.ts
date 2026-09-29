@@ -24,6 +24,7 @@ import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.
 import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
 import { findHierarchyLinkProblems, type HierarchyLinkProblem } from '../hierarchy.js';
+import { isNamedAfterObject } from '../object-images.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
 import { nameKey } from '../names.js';
@@ -170,13 +171,14 @@ export async function validateProjectIntegrity(
 
   // Frame images: warnings for frames without one, info for unused ones
   await checkFrameImages(reader, objects, warnings, info);
+  await checkOrphanedImages(reader, [...new Set([...registeredObjects, ...objects.keys()])], info);
 
   // 13 original checks + legacy-behavior-key + legacy-event-shape +
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
   // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable,
-  // frame-image, hierarchy-link
-  const checksRun = 27;
+  // frame-image, hierarchy-link, orphaned-image
+  const checksRun = 28;
 
   return {
     valid: errors.length === 0 && unscannedFiles.length === 0,
@@ -1673,6 +1675,55 @@ async function checkFrameImages(
       suggestion: 'They can be images of deleted frames (older versions of delete_frame_from_animation left the last one behind) '
         + 'or of frames the animation had before. Check them before deleting them; add_frame_to_animation keeps such a file as .bak '
         + 'instead of writing over it.',
+    });
+  }
+}
+
+// ─── Orphaned Images ─────────────────────────────────────────
+
+/**
+ * Files directly in images/ named after no object type of the project: the
+ * editor names an object's frame images "<object>-<animation>-NNN.<ext>" and
+ * a single image "<object>.<ext>" (see object-images.ts), so such a file
+ * belongs to no object, e.g. the images of a deleted object type (older
+ * versions of delete_object left them behind). Info, one entry per name part
+ * before the first "-" or "." (the name of the object they were stored for):
+ * whether the editor or anything else uses such a file is not verified.
+ * Registered object types whose file could not be parsed count as object
+ * types; .bak files are listed as backup-file instead, and files named after
+ * an existing object type (e.g. frames past an animation's last frame, see
+ * frame-image) are not reported here. Skipped without an images/ folder.
+ */
+async function checkOrphanedImages(
+  reader: Construct3ProjectReader,
+  objectNames: string[],
+  info: IntegrityIssue[]
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(join(reader.getProjectDir(), 'images'), { withFileTypes: true });
+  } catch {
+    return; // No images/ folder
+  }
+  const groups = new Map<string, string[]>();
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.toLowerCase().endsWith('.bak')) continue;
+    if (objectNames.some(name => isNamedAfterObject(entry.name, name))) continue;
+    const stem = /^[^.-]*/.exec(entry.name)?.[0] ?? entry.name;
+    const key = nameKey(stem);
+    const list = groups.get(key);
+    if (list) list.push(`images/${entry.name}`); else groups.set(key, [`images/${entry.name}`]);
+  }
+  for (const files of groups.values()) {
+    files.sort();
+    info.push({
+      check: 'orphaned-image',
+      entity: files[0],
+      message: `${files.length} file(s) in images/ are named after no object type of the project: ${listFew(files)}. ` +
+        'Construct 3 names the frame images of an object <object>-<animation>-NNN.<ext> and a single image <object>.<ext>, ' +
+        'so no object uses them; they can be the images of a deleted object type (older versions of delete_object left them behind).',
+      suggestion: 'Check that nothing else uses them (e.g. a project file or script that loads them by path), then delete them. ' +
+        'delete_object keeps the images of the object type it deletes as .bak.',
     });
   }
 }

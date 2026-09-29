@@ -7,6 +7,11 @@ All notable changes to the Construct3 MCP Server are documented here.
 ### Added
 
 - `validate_project` check `hierarchy-link` (warning): hierarchy (scene graph) links that name no instance of the layout, and one-sided links (a parent that does not list its child, a child that names another parent or none), such as the links older versions of `delete_instance_from_layout` and `delete_layer` left behind (#38).
+- `validate_project` check `orphaned-image` (info): files in `images/` named after no object type of the project, such as the images older versions of `delete_object` left behind, one entry per object name they were stored for (#38).
+
+### Changed
+
+- `delete_object` keeps the object's image files as `<file>.bak` (`<file>.1.bak`, … when taken), as the frame tools keep the image of a deleted frame: every frame image of every animation, animation folders and JPEG frames included, or the single image of a Tiled Background and other single-image plugins. A warning names them; a file that another object type's frames use under the same name stays in place, and if the object file cannot be deleted the images are renamed back. Before, the images stayed in `images/` under their names, undocumented, where a new object of the same name wrote its placeholder over them (#38).
 
 ### Fixed
 

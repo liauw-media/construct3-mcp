@@ -66,6 +66,7 @@ import {
   behaviorTypesOf,
 } from '../construct3/instance-behaviors.js';
 import type { InstanceBehavior } from '../construct3/instance-behaviors.js';
+import { planObjectImageParking, type ObjectImageParking } from '../construct3/object-images.js';
 
 export function registerObjectTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_object ──────────────────────────────────────────
@@ -372,7 +373,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_object',
-    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by name at runtime are not detected.',
+    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by name at runtime are not detected. The frame image files (or single image) of the object in images/ are kept as <file>.bak.',
     {
       name: z.string().max(200).describe('Object name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -434,9 +435,30 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         }
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
+        // Its frame images (or single image) lose their user: kept as .bak, like
+        // the image of a deleted frame. Renamed first, renamed back when the
+        // object file cannot be deleted.
+        const images = await planDeletedObjectImages(reader, writer, args.name);
+        if (images.parking) await writer.renameImageFiles(images.parking.renames);
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
-        const backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
+        let backupPath: string;
+        try {
+          backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
+        } catch (error) {
+          const renames = images.parking?.renames ?? [];
+          if (renames.length > 0) {
+            const cause = error instanceof Error ? error.message : String(error);
+            try {
+              await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })).reverse());
+            } catch (e) {
+              throw new Error(`${cause}. Renaming its image files back from .bak failed too: ${e instanceof Error ? e.message : String(e)}`);
+            }
+            throw new Error(`${cause}. Its image files were renamed back from .bak.`);
+          }
+          throw error;
+        }
         await writer.removeFromProject('objectTypes', args.name);
+        warnings.push(...images.warnings);
 
         const result: WriteResult = {
           success: true,
@@ -861,6 +883,49 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
       }
     }
   );
+}
+
+/**
+ * How delete_object keeps the image files of the object type it deletes (see
+ * planObjectImageParking), with the warnings to return; no plan when the
+ * object type's file cannot be parsed (its images are unknown).
+ */
+async function planDeletedObjectImages(
+  reader: Construct3ProjectReader,
+  writer: Construct3ProjectWriter,
+  name: string,
+): Promise<{ parking?: ObjectImageParking; warnings: string[] }> {
+  let obj: ObjectType;
+  try {
+    obj = await reader.readObjectType(name);
+  } catch (error) {
+    if (classifyReadError(error) === 'E_FILE_NOT_FOUND') return { warnings: [] };
+    return {
+      warnings: [`The object type's file could not be parsed, so its image files in images/ are unknown and were left as they are. ` +
+        'validate_project lists files in images/ named after no object type (orphaned-image).'],
+    };
+  }
+  const stored = typeof obj.name === 'string' && obj.name !== '' ? obj.name : name;
+  const objects = await reader.readAllObjectTypes();
+  const failures = reader.getReadFailures('objectTypes');
+  const others = new Map([...objects].filter(([other]) => other !== name));
+  const unparsed = (await reader.listObjectTypes())
+    .filter(other => other !== name && !objects.has(other) && failures.get(other)?.code !== 'E_FILE_NOT_FOUND');
+  const parking = planObjectImageParking(stored, obj, await writer.listImageFiles(), others, unparsed);
+
+  const warnings: string[] = [];
+  if (parking.renames.length > 0) {
+    warnings.push(`Kept the object's ${parking.renames.length} image file(s) in images/ as .bak: ${listSome(parking.renames.map(r => `"images/${r.from}" → "images/${r.to}"`), 3)}. ` +
+      'No object uses them; delete them when they are no longer needed.');
+  }
+  if (parking.shared.length > 0) {
+    warnings.push(`Left ${listSome(parking.shared.map(f => `"images/${f}"`), 3)} in place: another object type's frames use a file of the same name.`);
+  }
+  if (parking.unknownUse.length > 0) {
+    warnings.push(`Left ${listSome(parking.unknownUse.map(f => `"images/${f}"`), 3)} in place: named after an object type whose file could not be parsed, ` +
+      'which may use them.');
+  }
+  return { parking, warnings };
 }
 
 /** At most this many uses of each kind are listed in a delete_object or delete_family response. */

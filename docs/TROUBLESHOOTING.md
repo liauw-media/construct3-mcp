@@ -195,7 +195,7 @@ For undo across several steps, keep the project under git and commit before each
 3. Rename the `.bak` file to remove the `.bak` extension
 4. Restart the MCP server
 
-In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files, and `validate_project` lists them as `backup-file` info.
+In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken), and `delete_object` keeps the image files of the object it deletes the same way; their `warnings` name these files, and `validate_project` lists them as `backup-file` info. Image files that older versions of `delete_object` left in place are listed as `orphaned-image` info.
 
 ## Build Issues
 

@@ -63,7 +63,7 @@ describe('validateProjectIntegrity', () => {
     expect(result.valid).toBe(true);
     expect(result.complete).toBe(true);
     expect(result.summary.errors).toBe(0);
-    expect(result.summary.checksRun).toBe(27);
+    expect(result.summary.checksRun).toBe(28);
     expect(result.summary.entitiesScanned).toBeGreaterThan(0);
   });
 
