@@ -29,7 +29,7 @@ This guide is for Construct 3 developers who want to use the server with Claude 
 construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 71 tools, 9 resources (5 fixed ones and 4 templates that take the name of an object, event sheet, layout or manual topic) and 7 prompts for one Construct 3 project:
 
 - **Read and explain**: list objects, layouts, event sheets, families, timelines and addons, show an event sheet as a readable outline with the editor's event numbers, find where an object is used, map functions, find unused objects and assets.
-- **Check**: `validate_project` runs 26 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
+- **Check**: `validate_project` runs 27 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
 - **Edit**: create, change and delete objects, families, event sheets and events, layouts, layers, instances, animations and timelines, and change the project metadata (name, version, author, description). Names and references are checked before anything is written, and most rewritten files get a `.bak` copy (exceptions under [.bak files](#bak-files)).
 - **Prepare runtime testing**: add a "bridge" script to your project so you (or a browser-automation tool) can read variables and call functions in a running preview.
 
@@ -402,7 +402,7 @@ You don't need tool names. Ask in plain language and the AI picks the tools. The
 "Is the project OK?" calls `validate_project`:
 
 ```json
-{ "valid": true, "complete": true, "summary": { "errors": 0, "warnings": 0, "info": 0, "checksRun": 26, "entitiesScanned": 3, "unscanned": 0 }, "errors": [], "warnings": [], "info": [], "unscannedFiles": [] }
+{ "valid": true, "complete": true, "summary": { "errors": 0, "warnings": 0, "info": 0, "checksRun": 27, "entitiesScanned": 3, "unscanned": 0 }, "errors": [], "warnings": [], "info": [], "unscannedFiles": [] }
 ```
 
 ### Make changes
