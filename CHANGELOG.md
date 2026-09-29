@@ -10,10 +10,11 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ### Fixed
 
-- `add_frame_to_animation` with `index` renames the image files of the frames from that index on one index up, so every frame keeps its image, instead of writing the placeholder over the image at the index without a backup and leaving the last frame without one. JPEG, GIF and other frames keep their own extension, and mixed-case file names are found (#36).
+- `add_frame_to_animation` with `index` renames the image files of the frames from that index on one index up, so every frame keeps its image, instead of writing the placeholder over the image at the index without a backup and leaving the last frame without one. JPEG, GIF and other frames keep their own extension, mixed-case file names are found, and the names follow the object's name as stored in its file (#36).
 - `delete_frame_from_animation` keeps the deleted frame's image as `<file>.bak` and renames the image files of the frames after it one index down, instead of leaving every later frame showing its predecessor's image and the last file behind, where the next appended frame's placeholder overwrote it (#36).
 - `add_frame_to_animation` refuses an `index` greater than the frame count before writing anything, instead of appending the frame while writing its image under the index's name (#36).
-- `add_frame_to_animation`, also when appending, no longer writes over an image file that no frame uses (e.g. one left behind by a deleted frame): the file is kept as `<file>.bak` and named in `warnings`. If a later step fails, both frame tools remove the placeholder, restore the object file and rename the image files back (#36).
+- `add_frame_to_animation`, also when appending, no longer writes over an image file that no frame uses (e.g. one left behind by a deleted frame): the file is kept as `<file>.bak` and named in `warnings`. If a later step fails, both frame tools remove the placeholder (also one a failed write left part written), restore the object file and rename the image files back; when another write replaced the object file during theirs, they keep its content instead of restoring an older backup over it, and make the image files match it (#36).
+- The animation tools run one at a time. Two calls on the same Sprite in parallel could write its object file without each other's changes, and a frame insert or delete could rename image files another call was moving (#36).
 
 ## [1.9.0] - 2026-09-27
 

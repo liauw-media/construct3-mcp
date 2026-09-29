@@ -273,6 +273,33 @@ describe('delete_frame_from_animation keeps every frame\'s image', () => {
   });
 });
 
+describe('frame image names follow the object\'s stored name', () => {
+  // "./Sprite" reaches objectTypes/Sprite.json too; the editor names the images after the name in that file
+  it('delete_frame_from_animation with another path to the object file still moves the images', async () => {
+    await setupFrames(ABC);
+    await ok('delete_frame_from_animation', { objectName: './Sprite', frameIndex: 0 });
+
+    expect(await snapshot()).toEqual(images({ '000.png': 'B', '000.png.bak': 'A', '001.png': 'C' }));
+    expect(await frameIds()).toEqual([1001, 1002]);
+  });
+
+  it('add_frame_to_animation with another path to the object file moves the images and names the placeholder like the editor', async () => {
+    await setupFrames(ABC);
+    await ok('add_frame_to_animation', { objectName: './Sprite', index: 1 });
+
+    expect(await snapshot()).toEqual(images({ '000.png': 'A', '001.png': 'NEW', '002.png': 'B', '003.png': 'C' }));
+  });
+
+  it('replace_sprite_image with another path to the object file writes the frame\'s own image file', async () => {
+    await setupFrames(ABC);
+    const png = generatePlaceholderPng(2, 2);
+    labels.set(sha(png), 'REPLACED');
+    await ok('replace_sprite_image', { objectName: './Sprite', frameIndex: 1, pngBase64: png.toString('base64') });
+
+    expect(await snapshot()).toEqual(images({ '000.png': 'A', '001.png': 'REPLACED', '002.png': 'C' }));
+  });
+});
+
 describe('frame image changes are undone when a step fails', () => {
   let objectBefore: Buffer;
   let imagesBefore: Record<string, string>;
@@ -323,8 +350,31 @@ describe('frame image changes are undone when a step fails', () => {
     return register(writer, idGen);
   }
 
+  /** A server whose writer creates the placeholder file, then fails writing it (e.g. a full disk). */
+  function failingPlaceholderWrite(): MockServer {
+    class PartialPlaceholderWriter extends Construct3ProjectWriter {
+      override async writeImageFile(objectName: string, animationName: string, frameIndex: number): Promise<string> {
+        const name = `${objectName}-${animationName}-${String(frameIndex).padStart(3, '0')}.png`.toLowerCase();
+        await writeFile(join(imagesDir(), name), Buffer.alloc(0));
+        throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+      }
+    }
+    const idGen = new IdGenerator();
+    return register(new PartialPlaceholderWriter(reader, idGen), idGen);
+  }
+
   const insert = { objectName: 'Sprite', animationName: ANIMATION, index: 0 };
   const remove = { objectName: 'Sprite', animationName: ANIMATION, frameIndex: 0 };
+
+  it('add_frame_to_animation: a placeholder write that failed part way is removed before the files are renamed back', async () => {
+    for (const index of [0, 1]) {
+      const result = await failingPlaceholderWrite().callTool('add_frame_to_animation', { ...insert, index });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe('Error adding frame: ENOSPC: no space left on device, write. Nothing was changed: '
+        + 'the image files have their old names again and the placeholder image was removed.');
+      await expectUnchanged();
+    }
+  });
 
   it('add_frame_to_animation: a failed image rename renames the files back and writes nothing', async () => {
     const result = await failingRenames().callTool('add_frame_to_animation', insert);
@@ -362,6 +412,173 @@ describe('frame image changes are undone when a step fails', () => {
       expect(result.content[0].text).toContain('Nothing was changed: the image files have their old names again');
       await expectUnchanged();
     }
+  });
+});
+
+describe('frame tools called in parallel', () => {
+  /**
+   * Add animation "run" to the fixture Sprite, with a PNG frame per label
+   * (imageSpriteId 2000 + index) and its image.
+   */
+  async function addRunAnimation(runLabels: string[]): Promise<void> {
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    obj.animations.items.push({
+      name: 'run', sid: 300000000000010, speed: 5, isLooping: false, isPingPong: false, repeatCount: 1, repeatTo: 0,
+      frames: runLabels.map((_, index) => ({ width: 64, height: 64, originX: 0.5, originY: 0.5, duration: 1, imageSpriteId: 2000 + index })),
+    });
+    await writeFile(objectPath(), JSON.stringify(obj, null, '\t'));
+    for (const [index, label] of runLabels.entries()) {
+      const content = Buffer.from(`image ${label}`);
+      labels.set(sha(content), label);
+      await writeFile(join(imagesDir(), `sprite-run-${String(index).padStart(3, '0')}.png`), content);
+    }
+  }
+
+  /**
+   * Every frame of the animation shows its own image: the file at its index
+   * holds the label its imageSpriteId started with (`labelOf`; NEW for a
+   * frame added since), and no frame image file is left past the last frame.
+   */
+  async function expectFramesShowTheirImages(animationIndex: number, prefix: string, labelOf: Map<number, string>): Promise<void> {
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    const frames: Array<{ imageSpriteId: number }> = obj.animations.items[animationIndex].frames;
+    const files = await snapshot();
+    const fileAt = (index: number) => files[`${prefix}${String(index).padStart(3, '0')}.png`];
+    expect(frames.map((_, index) => fileAt(index))).toEqual(frames.map(frame => labelOf.get(frame.imageSpriteId) ?? 'NEW'));
+    expect(fileAt(frames.length)).toBeUndefined();
+  }
+
+  const call = (tool: string, args: Record<string, unknown>) =>
+    server.callTool(tool, { objectName: 'Sprite', animationName: ANIMATION, ...args });
+  const ABCD: FrameSetup[] = [{ label: 'A' }, { label: 'B' }, { label: 'C' }, { label: 'D' }];
+  const abcd = new Map([[1000, 'A'], [1001, 'B'], [1002, 'C'], [1003, 'D']]);
+
+  it('two inserts at index 0 of the same animation both keep every image', async () => {
+    await setupFrames(ABCD);
+    const results = await Promise.all([call('add_frame_to_animation', { index: 0 }), call('add_frame_to_animation', { index: 0 })]);
+
+    expect(results.map(result => result.isError ? result.content[0].text : 'ok')).toEqual(['ok', 'ok']);
+    expect(await snapshot()).toEqual(images({
+      '000.png': 'NEW', '001.png': 'NEW', '002.png': 'A', '003.png': 'B', '004.png': 'C', '005.png': 'D',
+    }));
+    await expectFramesShowTheirImages(0, PREFIX, abcd);
+  });
+
+  it('an insert and a delete in the same animation both apply, and no image is lost', async () => {
+    await setupFrames(ABCD);
+    const results = await Promise.all([call('add_frame_to_animation', { index: 0 }), call('delete_frame_from_animation', { frameIndex: 0 })]);
+
+    expect(results.map(result => result.isError ? result.content[0].text : 'ok')).toEqual(['ok', 'ok']);
+    expect(await frameIds()).toHaveLength(4);
+    await expectFramesShowTheirImages(0, PREFIX, abcd);
+    const kept = Object.values(await snapshot());
+    for (const label of ['A', 'B', 'C', 'D', 'NEW']) expect(kept).toContain(label);
+  });
+
+  it('inserts into two animations of the same Sprite both end up in the object file with their images', async () => {
+    await setupFrames(ABCD);
+    await addRunAnimation(['R0', 'R1', 'R2']);
+    const results = await Promise.all([
+      call('add_frame_to_animation', { index: 0 }),
+      call('add_frame_to_animation', { animationName: 'run', index: 0 }),
+    ]);
+
+    expect(results.map(result => result.isError ? result.content[0].text : 'ok')).toEqual(['ok', 'ok']);
+    await expectFramesShowTheirImages(0, PREFIX, abcd);
+    await expectFramesShowTheirImages(1, 'sprite-run-', new Map([[2000, 'R0'], [2001, 'R1'], [2002, 'R2']]));
+  });
+
+  it('an update_frame in parallel does not write the object back without the inserted frame', async () => {
+    await setupFrames(ABCD);
+    const results = await Promise.all([call('add_frame_to_animation', { index: 0 }), call('update_frame', { frameIndex: 3, duration: 7 })]);
+
+    expect(results.map(result => result.isError ? result.content[0].text : 'ok')).toEqual(['ok', 'ok']);
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    expect(obj.animations.items[0].frames).toHaveLength(5);
+    expect(obj.animations.items[0].frames.map((frame: { duration: number }) => frame.duration)).toContain(7);
+    await expectFramesShowTheirImages(0, PREFIX, abcd);
+  });
+});
+
+describe('another write to the object file during a frame change', () => {
+  /**
+   * A server whose writer lets another write land on the object file right
+   * after it replaced it (as a tool call outside the animation tools running
+   * in parallel would): the file then holds `other(written, before)`.
+   */
+  function withOtherWrite(other: (written: string, before: string) => string, before: string): MockServer {
+    const idGen = new IdGenerator();
+    const writer = new Construct3ProjectWriter(reader, idGen);
+    const internals = writer as unknown as { atomicWrite: (path: string, content: string | Buffer) => Promise<void> };
+    const atomicWrite = internals.atomicWrite.bind(writer);
+    internals.atomicWrite = async (path, content) => {
+      await atomicWrite(path, content);
+      if (path.endsWith('Sprite.json')) await writeFile(path, other(String(content), before));
+    };
+    return register(writer, idGen);
+  }
+
+  /** The JSON `text` with the first animation's speed set to 42 (what the other write changed). */
+  const withSpeed42 = (text: string) => {
+    const obj = JSON.parse(text);
+    obj.animations.items[0].speed = 42;
+    return JSON.stringify(obj, null, '\t');
+  };
+
+  let objectBefore: string;
+  let imagesBefore: Record<string, string>;
+
+  beforeEach(async () => {
+    await setupFrames(ABC);
+    objectBefore = await readFile(objectPath(), 'utf8');
+    imagesBefore = await snapshot();
+  });
+
+  const insert = { objectName: 'Sprite', animationName: ANIMATION, index: 0 };
+  const remove = { objectName: 'Sprite', animationName: ANIMATION, frameIndex: 0 };
+
+  it('add_frame_to_animation: a write made on the old content is kept, and the image files are renamed back to match it', async () => {
+    const result = await withOtherWrite((_written, before) => withSpeed42(before), objectBefore).callTool('add_frame_to_animation', insert);
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Another write replaced the object file during this one (a tool call running in parallel?) '
+      + 'without this call\'s change; the object file was left as that write left it. Nothing was changed: the image files have their '
+      + 'old names again and the placeholder image was removed.');
+    expect(await snapshot()).toEqual(imagesBefore);
+    expect(await readFile(objectPath(), 'utf8')).toBe(withSpeed42(objectBefore));
+  });
+
+  it('add_frame_to_animation: a write made on top of the new frame keeps it, with its images', async () => {
+    const result = await withOtherWrite(written => withSpeed42(written), objectBefore).callTool('add_frame_to_animation', insert);
+
+    expect(result.isError, result.content[0].text).toBeUndefined();
+    const data = JSON.parse(result.content[0].text);
+    expect(data.warnings).toContain('Another write changed the object file right after this one (a tool call running in parallel?). '
+      + 'The file still has the new frame, so the image files stay as renamed, but the other write may have been made on older content: '
+      + 're-read the object to check it.');
+    expect(await snapshot()).toEqual(images({ '000.png': 'NEW', '001.png': 'A', '002.png': 'B', '003.png': 'C' }));
+    const obj = JSON.parse(await readFile(objectPath(), 'utf8'));
+    expect(obj.animations.items[0].speed).toBe(42);
+    expect(obj.animations.items[0].frames).toHaveLength(4);
+  });
+
+  it('delete_frame_from_animation: a write made on the old content is kept, and the image files are renamed back to match it', async () => {
+    const result = await withOtherWrite((_written, before) => withSpeed42(before), objectBefore).callTool('delete_frame_from_animation', remove);
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('the object file was left as that write left it. Nothing was changed: '
+      + 'the image files have their old names again.');
+    expect(await snapshot()).toEqual(imagesBefore);
+    expect(await readFile(objectPath(), 'utf8')).toBe(withSpeed42(objectBefore));
+  });
+
+  it('delete_frame_from_animation: a write made on top of the deletion keeps it, with the images moved', async () => {
+    const result = await withOtherWrite(written => withSpeed42(written), objectBefore).callTool('delete_frame_from_animation', remove);
+
+    expect(result.isError, result.content[0].text).toBeUndefined();
+    expect(JSON.parse(result.content[0].text).warnings.join('\n')).toContain('The file still has the frame deletion');
+    expect(await snapshot()).toEqual(images({ '000.png': 'B', '000.png.bak': 'A', '001.png': 'C' }));
+    expect(await frameIds()).toEqual([1001, 1002]);
   });
 });
 

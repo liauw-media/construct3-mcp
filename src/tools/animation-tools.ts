@@ -5,7 +5,6 @@
  */
 
 import { z } from 'zod';
-import { unlink } from 'fs/promises';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Animation, AnimationFrame } from '../construct3/types.js';
 import { toolResult, toolError, notFoundError } from './shared.js';
@@ -28,6 +27,12 @@ import {
 import type { FrameImageShiftPlan, ImageFileRename } from '../construct3/animation-rename.js';
 
 export function registerAnimationTools({ server, reader, writer, idGen }: MutationToolDeps) {
+  // Every animation tool reads a Sprite's object file and writes it back, and
+  // several rename or write frame image files, whose names hold the frame
+  // index: they run one at a time (see withAnimationLock)
+  const oneAtATime = <A, R>(handler: (args: A) => Promise<R>) =>
+    (args: A): Promise<R> => writer.withAnimationLock(() => handler(args));
+
   // ─── add_animation_to_sprite ──────────────────────────────
 
   server.tool(
@@ -44,7 +49,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
       frameWidth: z.number().int().positive().optional().describe('Frame width in pixels (default: existing sprite width)'),
       frameHeight: z.number().int().positive().optional().describe('Frame height in pixels (default: existing sprite height)'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         // Read existing object
         let obj: ObjectType;
@@ -153,7 +158,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[add_animation_to_sprite] failed:', error);
         return toolError(`Error adding animation: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── update_animation_properties ──────────────────────────
@@ -169,7 +174,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
       isPingPong: z.boolean().optional().describe('New ping-pong setting'),
       repeatCount: z.number().int().min(1).optional().describe('New repeat count'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         // Read existing object
         let obj: ObjectType;
@@ -233,7 +238,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[update_animation_properties] failed:', error);
         return toolError(`Error updating animation: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── delete_animation ─────────────────────────────────────
@@ -245,7 +250,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
       objectName: z.string().max(200).describe('Sprite object name'),
       animationName: z.string().min(1).max(200).describe('Animation name to delete'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         let obj: ObjectType;
         try {
@@ -289,7 +294,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[delete_animation] failed:', error);
         return toolError(`Error deleting animation: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── rename_animation ─────────────────────────────────────
@@ -302,7 +307,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
       animationName: z.string().min(1).max(200).describe('Current animation name'),
       newName: z.string().min(1).max(200).describe('New animation name'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         let obj: ObjectType;
         try {
@@ -446,23 +451,24 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[rename_animation] failed:', error);
         return toolError(`Error renaming animation: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── add_frame_to_animation ───────────────────────────────
 
   server.tool(
     'add_frame_to_animation',
-    'Add a new blank frame to a Sprite animation',
+    'Add a new blank frame (placeholder PNG) to a Sprite animation, at an index or at the end. The image files of the frames '
+      + 'after the index move one index up with their frames; an unused file in the way is kept as .bak',
     {
       objectName: z.string().max(200).describe('Sprite object name'),
       animationName: z.string().min(1).max(200).describe('Animation name'),
-      index: z.number().int().min(0).optional().describe('Insert at this frame index (default: append)'),
+      index: z.number().int().min(0).optional().describe('Insert at this frame index, 0 to the frame count (default: append)'),
       width: z.number().int().positive().optional().describe('Frame width in pixels (default: matches first frame)'),
       height: z.number().int().positive().optional().describe('Frame height in pixels (default: matches first frame)'),
       duration: z.number().positive().optional().default(1).describe('Frame duration in seconds (default: 1)'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         let obj: ObjectType;
         try {
@@ -494,7 +500,8 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
 
         // Frame image files are named by frame index: the images of the frames
         // from insertAt on move one index up (see animation-rename.ts)
-        const images = planFrameImageShift(await writer.listImageFiles(), args.objectName, anim.name, anim.frames, { insertAt });
+        const imageObjectName = storedObjectName(obj, args.objectName);
+        const images = planFrameImageShift(await writer.listImageFiles(), imageObjectName, anim.name, anim.frames, { insertAt });
         if (images.clashes.length > 0) {
           return toolError(`Cannot add a frame at index ${insertAt} to "${anim.name}" on "${args.objectName}": the frame image files `
             + `after it cannot be renamed one index up (${someOf(images.clashes, 3)}). Nothing was changed. Check these files in images/.`);
@@ -517,24 +524,33 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         // placeholder PNG in the freed name, then the object; a failure there
         // undoes everything before it
         if (images.renames.length > 0) await writer.renameImageFiles(images.renames);
-        const placeholders: string[] = [];
         let backupPath: string;
+        let otherWrite = false;
         try {
-          placeholders.push(...await writer.writeImageFiles([{
-            objectName: args.objectName,
+          await writer.writeImageFiles([{
+            objectName: imageObjectName,
             animationName: anim.name,
             frameIndex: insertAt,
             pluginId: 'Sprite',
             width: 1,
             height: 1,
-          }]));
+          }]);
           backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
         } catch (error) {
-          const cause = error instanceof Error ? error.message : String(error);
-          throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, placeholders, images.renames)}`);
+          const kept = await frameChangeAfterOtherWrite(reader, args.objectName, anim.name, error,
+            frames => frames.length === frameCount + 1 && frames[insertAt]?.imageSpriteId === imageSpriteId);
+          if (kept !== true) {
+            const cause = error instanceof Error ? error.message : String(error);
+            throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, {
+              newFrameFile: images.newFrameFile, otherWrite: kept === false,
+            })}`);
+          }
+          backupPath = (error as EntityWriteError).backupPath;
+          otherWrite = true;
         }
 
         const warnings = frameImageWarnings(images, anim.name);
+        if (otherWrite) warnings.push(otherWriteKeptWarning('the new frame'));
         const result: WriteResult = {
           success: true,
           entity: args.objectName,
@@ -548,20 +564,21 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[add_frame_to_animation] failed:', error);
         return toolError(`Error adding frame: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── delete_frame_from_animation ─────────────────────────
 
   server.tool(
     'delete_frame_from_animation',
-    'Delete a frame from a Sprite animation by index (must not be the last frame)',
+    'Delete a frame from a Sprite animation by index (must not be the last frame). Its image file is kept as .bak, and the '
+      + 'image files of the frames after it move one index down',
     {
       objectName: z.string().max(200).describe('Sprite object name'),
       animationName: z.string().min(1).max(200).describe('Animation name'),
       frameIndex: z.number().int().min(0).describe('0-based frame index to delete'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         let obj: ObjectType;
         try {
@@ -594,13 +611,15 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         // is kept as .bak, the images of the frames after it move one index
         // down (see animation-rename.ts)
         const images = planFrameImageShift(
-          await writer.listImageFiles(), args.objectName, anim.name, anim.frames, { deleteAt: args.frameIndex },
+          await writer.listImageFiles(), storedObjectName(obj, args.objectName), anim.name, anim.frames, { deleteAt: args.frameIndex },
         );
         if (images.clashes.length > 0) {
           return toolError(`Cannot delete frame ${args.frameIndex} of "${anim.name}" on "${args.objectName}": the frame image files `
             + `after it cannot be renamed one index down (${someOf(images.clashes, 3)}). Nothing was changed. Check these files in images/.`);
         }
 
+        const frameCount = anim.frames.length;
+        const deletedId = anim.frames[args.frameIndex]?.imageSpriteId;
         anim.frames.splice(args.frameIndex, 1);
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
 
@@ -608,14 +627,23 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         // object; a failure there renames the image files back
         if (images.renames.length > 0) await writer.renameImageFiles(images.renames);
         let backupPath: string;
+        let otherWrite = false;
         try {
           backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
         } catch (error) {
-          const cause = error instanceof Error ? error.message : String(error);
-          throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, [], images.renames)}`);
+          const kept = await frameChangeAfterOtherWrite(reader, args.objectName, anim.name, error,
+            frames => frames.length === frameCount - 1
+              && (deletedId === undefined || !frames.some(frame => frame?.imageSpriteId === deletedId)));
+          if (kept !== true) {
+            const cause = error instanceof Error ? error.message : String(error);
+            throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, { otherWrite: kept === false })}`);
+          }
+          backupPath = (error as EntityWriteError).backupPath;
+          otherWrite = true;
         }
 
         const warnings = frameImageWarnings(images, anim.name);
+        if (otherWrite) warnings.push(otherWriteKeptWarning('the frame deletion'));
         const result: WriteResult = {
           success: true,
           entity: args.objectName,
@@ -629,7 +657,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[delete_frame_from_animation] failed:', error);
         return toolError(`Error deleting frame: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── update_frame ─────────────────────────────────────────
@@ -647,7 +675,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
       originX: z.number().min(0).max(1).optional().describe('Horizontal origin 0-1 (0.5 = center)'),
       originY: z.number().min(0).max(1).optional().describe('Vertical origin 0-1 (0.5 = center)'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         const hasUpdates = args.width !== undefined || args.height !== undefined ||
           args.duration !== undefined || args.originX !== undefined || args.originY !== undefined;
@@ -700,7 +728,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[update_frame] failed:', error);
         return toolError(`Error updating frame: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 
   // ─── replace_sprite_image ─────────────────────────────────
@@ -716,7 +744,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
       width: z.number().int().positive().optional().describe('Image width in pixels (updates frame metadata if provided)'),
       height: z.number().int().positive().optional().describe('Image height in pixels (updates frame metadata if provided)'),
     },
-    async (args) => {
+    oneAtATime(async (args) => {
       try {
         let obj: ObjectType;
         try {
@@ -765,7 +793,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
           return toolError(`Frame ${args.frameIndex} of animation "${args.animationName}" has no imageSpriteId. It may be a corrupted frame.`);
         }
 
-        const fileName = getImageFileName(args.objectName, args.animationName, args.frameIndex, 'Sprite');
+        const fileName = getImageFileName(storedObjectName(obj, args.objectName), args.animationName, args.frameIndex, 'Sprite');
         const filePath = resolveProjectPath(reader.getProjectDir(), 'images', fileName);
 
         const { mkdir, writeFile } = await import('fs/promises');
@@ -803,7 +831,7 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         console.error('[replace_sprite_image] failed:', error);
         return toolError(`Error replacing sprite image: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    }),
   );
 }
 
@@ -876,31 +904,80 @@ function frameImageWarnings(images: FrameImageShiftPlan, animationName: string):
 }
 
 /**
+ * The object's name as stored in its file, which the editor names its frame
+ * image files after, or `requested` (the objectName a tool was called with)
+ * when the file has none. They differ when `requested` reaches the file by
+ * another path (e.g. "./Sprite") or in another case.
+ */
+function storedObjectName(obj: ObjectType, requested: string): string {
+  return typeof obj.name === 'string' && obj.name !== '' ? obj.name : requested;
+}
+
+/**
+ * For an add_frame_to_animation or delete_frame_from_animation whose object
+ * write failed because another write to the object file landed during it (the
+ * post-write check found other valid JSON there, see
+ * EntityWriteError.changedByOtherWrite): whether the file now has this call's
+ * frame change, `hasChange` telling from the animation's frames, i.e. the
+ * other write was made on top of it. undefined for any other failure and when
+ * the file cannot be read; the change is then rolled back as usual.
+ */
+async function frameChangeAfterOtherWrite(
+  reader: MutationToolDeps['reader'],
+  objectName: string,
+  animationName: string,
+  error: unknown,
+  hasChange: (frames: ReadonlyArray<{ imageSpriteId?: unknown } | null | undefined>) => boolean,
+): Promise<boolean | undefined> {
+  if (!(error instanceof EntityWriteError) || !error.changedByOtherWrite) return undefined;
+  try {
+    const current = await reader.readObjectType(objectName);
+    const anim = findAnimation<{ frames?: unknown }>(current.animations, animationName)?.animation;
+    return anim !== undefined && Array.isArray(anim.frames) && hasChange(anim.frames);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Warning for a frame change that another write kept (frameChangeAfterOtherWrite). */
+function otherWriteKeptWarning(change: string): string {
+  return `Another write changed the object file right after this one (a tool call running in parallel?). The file still has ${change}, `
+    + 'so the image files stay as renamed, but the other write may have been made on older content: re-read the object to check it.';
+}
+
+/**
  * Undo an add_frame_to_animation or delete_frame_from_animation whose writes
  * after the image renames failed: put back the object file from its backup
- * when its write failed after replacing it, remove the placeholder images
- * written, then rename the image files back, last first. Returns a sentence
- * for the error message.
+ * when its write failed after replacing it, remove the new frame's
+ * placeholder image (`newFrameFile`), then rename the image files back, last
+ * first. The placeholder's name was free before the call (see
+ * planFrameImageShift), so a file there, also one a failed write left part
+ * written, is removed. With `otherWrite`, another write replaced the object
+ * file during this one with content that lacks this call's change: the file
+ * is left as that write left it, and the image files are renamed back to
+ * match it. Returns a sentence for the error message.
  */
 async function rollBackFrameChange(
   writer: MutationToolDeps['writer'],
   error: unknown,
-  placeholders: string[],
   renames: ImageFileRename[],
+  options: { newFrameFile?: string; otherWrite?: boolean } = {},
 ): Promise<string> {
   const failed: string[] = [];
-  if (error instanceof EntityWriteError) {
+  const restore = error instanceof EntityWriteError && !options.otherWrite;
+  if (restore) {
     try {
       await writer.restoreEntityFile(error.backupPath);
     } catch {
       failed.push(error.backupPath.replace(/\.bak$/, ''));
     }
   }
-  for (const path of placeholders) {
+  let placeholderRemoved = false;
+  if (options.newFrameFile !== undefined) {
     try {
-      await unlink(path);
-    } catch (e) {
-      if (!(e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT')) failed.push(path);
+      placeholderRemoved = await writer.deleteImageFile(options.newFrameFile);
+    } catch {
+      failed.push(`images/${options.newFrameFile}`);
     }
   }
   if (renames.length > 0) {
@@ -910,17 +987,21 @@ async function rollBackFrameChange(
       failed.push(`image files (${e instanceof Error ? e.message : String(e)})`);
     }
   }
+  const otherWrite = options.otherWrite
+    ? 'Another write replaced the object file during this one (a tool call running in parallel?) without this call\'s change; '
+      + 'the object file was left as that write left it. '
+    : '';
   if (failed.length > 0) {
-    return `Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
+    return `${otherWrite}Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
   }
   const undone = [
     ...(renames.length > 0 ? ['the image files have their old names again'] : []),
-    ...(placeholders.length > 0 ? ['the placeholder image was removed'] : []),
-    ...(error instanceof EntityWriteError ? ['the object file was restored from its backup'] : []),
+    ...(placeholderRemoved ? ['the placeholder image was removed'] : []),
+    ...(restore ? ['the object file was restored from its backup'] : []),
   ];
-  return undone.length === 0
+  return otherWrite + (undone.length === 0
     ? 'Nothing was changed.'
-    : `Nothing was changed: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`;
+    : `Nothing was changed: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`);
 }
 
 /**
