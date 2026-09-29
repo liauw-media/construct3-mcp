@@ -210,8 +210,17 @@ function mainScriptFile(projectDir: string, mainScript: string): string {
   return resolveProjectPath(projectDir, 'scripts', ...mainScript.split('/'));
 }
 
-const BRIDGE_IMPORT_LINE = new RegExp(`^[^\\S\\r\\n]*import\\s+["'][^"']*${BRIDGE_FILENAME.replace(/[.]/gu, '\\.')}["'];?[^\\r\\n]*(?:\\r?\\n)?`, 'mu');
-const MARKED_IMPORT_LINE = new RegExp(`^import "[^"]*${BRIDGE_FILENAME.replace(/[.]/gu, '\\.')}"; ${BRIDGE_IMPORT_MARKER.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?:\\r?\\n)?`, 'gmu');
+const BRIDGE_FILE_PATTERN = BRIDGE_FILENAME.replace(/[.]/gu, '\\.');
+/** A script that already imports the bridge, in whatever form. */
+const BRIDGE_IMPORT_LINE = new RegExp(`^[^\\S\\r\\n]*import\\s+["'][^"']*${BRIDGE_FILE_PATTERN}["'];?[^\\r\\n]*(?:\\r?\\n)?`, 'mu');
+/**
+ * A line that only imports the bridge for its effect: the marked line
+ * inject_runtime_bridge writes, or the line v1.9.2's instructions had users
+ * type (`import "./c3-runtime-bridge.js";`), with at most a comment after it.
+ */
+const BRIDGE_IMPORT_ONLY_LINES = new RegExp(`^[^\\S\\r\\n]*import\\s*["'][^"'\\r\\n]*${BRIDGE_FILE_PATTERN}["'][^\\S\\r\\n]*;?[^\\S\\r\\n]*(?:\\/\\/[^\\r\\n]*)?(?:\\r?\\n|$)`, 'gmu');
+/** Any other use of the bridge file in a script: `import x from`, `export ... from`, `import(...)`. */
+const BRIDGE_REFERENCE = new RegExp(`(?:\\bfrom|\\bimport)\\s*\\(?\\s*["'][^"'\\r\\n]*${BRIDGE_FILE_PATTERN}["']`, 'u');
 
 /** Add `import "<...>/c3-runtime-bridge.js";` as the first line of the main script, unless it imports the bridge already. */
 async function addBridgeImport(projectDir: string, mainScript: string): Promise<boolean> {
@@ -227,19 +236,53 @@ async function addBridgeImport(projectDir: string, mainScript: string): Promise<
   return true;
 }
 
-/** Remove the import line inject_runtime_bridge added to the main script (the marked line only). */
-async function removeBridgeImport(projectDir: string, mainScript: string): Promise<boolean> {
-  const file = mainScriptFile(projectDir, mainScript);
-  let text: string;
+/** Script files under scripts/ (paths relative to it, with "/"), except the bridge itself. */
+async function scriptFiles(scriptsDir: string, prefix = '', depth = 0): Promise<string[]> {
+  if (depth > 32) return [];
+  let entries;
   try {
-    text = await readFile(file, 'utf-8');
+    entries = await readdir(prefix ? join(scriptsDir, ...prefix.split('/')) : scriptsDir, { withFileTypes: true });
   } catch {
-    return false;
+    return [];
   }
-  const without = text.replace(MARKED_IMPORT_LINE, '');
-  if (without === text) return false;
-  await writeFile(file, without, 'utf-8');
-  return true;
+  const found: string[] = [];
+  for (const entry of entries) {
+    const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) found.push(...await scriptFiles(scriptsDir, path, depth + 1));
+    else if (entry.isFile() && /\.(?:m?js|ts)$/iu.test(entry.name) && path !== BRIDGE_FILENAME) found.push(path);
+  }
+  return found;
+}
+
+/**
+ * The scripts that import the bridge, with their text once those import
+ * lines are gone (byte order mark and line endings kept). Throws, before
+ * anything is written, when a script uses the bridge in a way that cannot
+ * be taken out line by line: after the bridge file is deleted, that script
+ * would import a file that no longer exists and the game would not load.
+ */
+async function planImportRemoval(projectDir: string): Promise<Array<{ path: string; file: string; text: string }>> {
+  const scriptsDir = join(projectDir, 'scripts');
+  const changes: Array<{ path: string; file: string; text: string }> = [];
+  const blocking: string[] = [];
+  for (const path of await scriptFiles(scriptsDir)) {
+    const file = resolveProjectPath(projectDir, 'scripts', ...path.split('/'));
+    let text: string;
+    try {
+      text = await readFile(file, 'utf-8');
+    } catch {
+      continue;
+    }
+    if (!text.includes(BRIDGE_FILENAME)) continue;
+    const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
+    const without = bom + text.slice(bom.length).replace(BRIDGE_IMPORT_ONLY_LINES, '');
+    if (BRIDGE_REFERENCE.test(without)) blocking.push(`scripts/${path}`);
+    else if (without !== text) changes.push({ path, file, text: without });
+  }
+  if (blocking.length > 0) {
+    throw new Error(`Nothing was changed: ${blocking.join(', ')} ${blocking.length === 1 ? 'uses' : 'use'} the bridge in a way remove_runtime_bridge cannot take out (only a line that just imports it, such as the one inject_runtime_bridge adds, is removed). Without the bridge file the game would not load. Remove that use of ${BRIDGE_FILENAME}, then call remove_runtime_bridge again.`);
+  }
+  return changes;
 }
 
 /**
@@ -290,21 +333,25 @@ async function installBridge(projectDir: string, c3projPath: string): Promise<Br
   return { loadedAs, mainScript: loadedAs === 'import' ? mainScript : undefined, registered, importAdded };
 }
 
-/** Take the bridge out again: its import line in the main script, its entry, its file. */
-async function uninstallBridge(projectDir: string, c3projPath: string): Promise<{ entries: number; importRemoved: boolean }> {
+/**
+ * Take the bridge out again: the lines importing it (the marked line
+ * inject_runtime_bridge added, or one typed by hand), its entry, its file.
+ * Refuses before writing anything while a script uses the bridge otherwise.
+ */
+async function uninstallBridge(projectDir: string, c3projPath: string): Promise<{ entries: number; importRemoved: boolean; scriptsChanged: string[] }> {
+  const imports = await planImportRemoval(projectDir);
+  const raw = await readFile(c3projPath, 'utf-8');
+  const c3proj = parseJsonText(raw) as Record<string, unknown>;
+  const scripts = (c3proj.rootFileFolders as Record<string, ScriptFolder> | undefined)?.script;
+  for (const change of imports) await writeFile(change.file, change.text, 'utf-8');
+  const entries = takeBridgeEntries(scripts).length;
+  if (entries > 0) await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
   try {
     await unlink(join(projectDir, getBridgeScriptPath()));
   } catch {
     // no bridge file
   }
-  const raw = await readFile(c3projPath, 'utf-8');
-  const c3proj = parseJsonText(raw) as Record<string, unknown>;
-  const scripts = (c3proj.rootFileFolders as Record<string, ScriptFolder> | undefined)?.script;
-  const mainScript = findMainScript(scripts);
-  const importRemoved = mainScript ? await removeBridgeImport(projectDir, mainScript) : false;
-  const entries = takeBridgeEntries(scripts).length;
-  if (entries > 0) await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
-  return { entries, importRemoved };
+  return { entries, importRemoved: imports.length > 0, scriptsChanged: imports.map(change => change.path) };
 }
 
 function loadingMessage(install: BridgeInstall): string {
@@ -352,7 +399,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'remove_runtime_bridge',
-    'Remove the runtime bridge from the project: the script file, its entry in project.c3proj and the import line inject_runtime_bridge added to the main script. Use this to clean up after testing.',
+    'Remove the runtime bridge from the project: the script file, its entry in project.c3proj, and every line in the project\'s scripts that only imports it (the one inject_runtime_bridge added to the main script, or one typed by hand). Refuses, changing nothing, while a script uses the bridge in another way (such as `import * as b from`). Use this to clean up after testing.',
     {},
     async () => {
       try {
@@ -364,6 +411,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           removed: true,
           entriesRemoved: removed.entries,
           importRemoved: removed.importRemoved,
+          scriptsChanged: removed.scriptsChanged,
           message: 'Runtime bridge removed from project.',
         }, { projectWritten: true });
       } catch (error) {

@@ -171,6 +171,52 @@ describe('inject_runtime_bridge and remove_runtime_bridge on script files as use
     expect(prepared.checks.find((c: { check: string }) => c.check === 'runtimeBridge').status).toBe('warning');
     expect(await readFile(mainPath, 'utf8')).toBe(original);
   });
+
+  it('restores a main script with a byte order mark byte for byte', async () => {
+    const dir = await copyFixture('minimal-project');
+    const original = '\uFEFF// game\r\nrunOnStartup(async (runtime) => {});\r\n';
+    const mainPath = await addRootMainScript(dir, original);
+    const server = await tools(dir);
+
+    expect(payload(await server.callTool('inject_runtime_bridge', {}))).toMatchObject({ loadedAs: 'import', importAdded: true });
+    const injected = await readFile(mainPath, 'utf8');
+    expect(injected.startsWith('\uFEFFimport "./c3-runtime-bridge.js"; //')).toBe(true);
+
+    const removed = payload(await server.callTool('remove_runtime_bridge', {}));
+    expect(removed).toMatchObject({ entriesRemoved: 1, importRemoved: true });
+    expect(await readFile(mainPath, 'utf8')).toBe(original);
+    expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(false);
+  });
+
+  it('removes the import line v1.9.2 had users type into the main script, with the file it imports', async () => {
+    const dir = await copyFixture('minimal-project');
+    const rest = 'runOnStartup(async (runtime) => {});\n';
+    const mainPath = await addRootMainScript(dir, `import "./c3-runtime-bridge.js";\n${rest}`);
+    const server = await tools(dir);
+
+    expect(payload(await server.callTool('inject_runtime_bridge', {}))).toMatchObject({ loadedAs: 'import', importAdded: false });
+    const removed = payload(await server.callTool('remove_runtime_bridge', {}));
+    expect(removed).toMatchObject({ entriesRemoved: 1, importRemoved: true, scriptsChanged: ['main.js'] });
+    expect(await readFile(mainPath, 'utf8')).toBe(rest);
+    expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(false);
+  });
+
+  it('refuses, changing nothing, while a script uses the bridge in a way it cannot take out', async () => {
+    const dir = await copyFixture('minimal-project');
+    const mainPath = await addRootMainScript(dir, 'runOnStartup(async (runtime) => {});\n');
+    const server = await tools(dir);
+    payload(await server.callTool('inject_runtime_bridge', {}));
+    await writeFile(join(dir, 'scripts', 'helper.js'), 'import * as bridge from "./c3-runtime-bridge.js";\nexport const b = bridge;\n', 'utf8');
+    const mainBefore = await readFile(mainPath, 'utf8');
+    const projectBefore = await readFile(join(dir, 'project.c3proj'), 'utf8');
+
+    const refused = await server.callTool('remove_runtime_bridge', {});
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('helper.js');
+    expect(await readFile(mainPath, 'utf8')).toBe(mainBefore);
+    expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(projectBefore);
+    expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(true);
+  });
 });
 
 describe('export_for_preview', () => {
