@@ -38,8 +38,10 @@ runOnStartup(async (runtime) => {
   const bridge = {
     // Pending commands from external tools
     _queue: [],
-    // Results keyed by command ID
+    // Results keyed by command ID, and when each was stored; a result
+    // nobody collects within RESULT_TTL_MS is dropped on a later tick.
     _results: {},
+    _resultTimes: {},
     // Auto-incrementing command ID
     _nextId: 1,
 
@@ -127,8 +129,34 @@ runOnStartup(async (runtime) => {
     // External tools poll this to get results
     getResult(id) {
       const r = this._results[id];
-      if (r) delete this._results[id]; // consume once
+      if (r) { delete this._results[id]; delete this._resultTimes[id]; } // consume once
       return r ?? null;
+    },
+
+    // Withdraw a command whose caller stopped waiting: "queued" when it had
+    // not run (it now never will), "result" when it ran and its result was
+    // discarded, false for an unknown id.
+    cancel(id) {
+      const index = this._queue.findIndex((cmd) => cmd.id === id);
+      if (index >= 0) { this._queue.splice(index, 1); return "queued"; }
+      if (Object.prototype.hasOwnProperty.call(this._results, id)) {
+        delete this._results[id];
+        delete this._resultTimes[id];
+        return "result";
+      }
+      return false;
+    },
+
+    _store(id, result) {
+      this._results[id] = result;
+      this._resultTimes[id] = Date.now();
+    },
+
+    _expireResults() {
+      const cutoff = Date.now() - 60000;
+      for (const id of Object.keys(this._resultTimes)) {
+        if (this._resultTimes[id] < cutoff) { delete this._results[id]; delete this._resultTimes[id]; }
+      }
     },
 
     // Current runtime state snapshot
@@ -321,11 +349,12 @@ runOnStartup(async (runtime) => {
           default:
             result = { error: "Unknown command: " + cmd.type };
         }
-        bridge._results[cmd.id] = { ok: true, value: result };
+        bridge._store(cmd.id, { ok: true, value: result });
       } catch (e) {
-        bridge._results[cmd.id] = { ok: false, error: String(e) };
+        bridge._store(cmd.id, { ok: false, error: String(e) });
       }
     }
+    bridge._expireResults();
     // Commands first, so a subscription made this tick records its baseline
     // and starts observing on the next one instead of reporting a false change.
     bridge._poll();

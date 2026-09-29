@@ -836,7 +836,34 @@ export class RuntimeConnectionManager {
       if (waitMs > 0) await delay(waitMs);
     }
 
-    throw new Error(`Runtime bridge command timed out after ${options.timeoutMs}ms`);
+    const withdrawn = await this.withdrawCommand(connection, commandId);
+    throw new Error(`Runtime bridge command timed out after ${options.timeoutMs}ms; ${withdrawn}`);
+  }
+
+  /**
+   * Withdraw a command the caller stopped waiting for, so it does not run
+   * later (a game that does not tick, in a background tab for instance,
+   * runs its queued commands once it ticks again). Returns what happened, as
+   * the second half of the timeout message.
+   */
+  private async withdrawCommand(connection: CdpConnection, commandId: number): Promise<string> {
+    const stale = "it may still run later (the game's bridge cannot withdraw commands; inject the current bridge)";
+    if (!connection.isOpen()) return stale;
+    try {
+      const answer = await connection.evaluateJson<{ cancelled?: unknown }>(`(() => {
+        const bridge = globalThis.__c3bridge;
+        if (!bridge || typeof bridge.cancel !== "function") return JSON.stringify({ cancelled: "unsupported" });
+        return JSON.stringify({ cancelled: bridge.cancel(${commandId}) });
+      })()`, 1_000);
+      if (answer.cancelled === "queued") {
+        return "it had not run yet and was withdrawn, so it will not run (a game that does not tick, such as one in a background tab, runs no commands)";
+      }
+      if (answer.cancelled === "result") return "it ran after all, too late; its result was discarded";
+      if (answer.cancelled === false) return "the bridge no longer knew it (the page may have reloaded)";
+      return stale;
+    } catch {
+      return stale;
+    }
   }
 
   async waitForCondition(options: WaitForConditionOptions): Promise<WaitForConditionResult> {

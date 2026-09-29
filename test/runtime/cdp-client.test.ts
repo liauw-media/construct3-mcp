@@ -20,6 +20,8 @@ interface FakeCdpOptions {
   resultResponseDelayMs?: number;
   /** Answer Page.captureScreenshot with this many image bytes instead of the echoed parameters. */
   screenshotBytes?: number;
+  /** What bridge.cancel(id) answers; "absent" plays a bridge without cancel. */
+  cancelAnswer?: "queued" | "result" | false | "absent";
 }
 
 interface FakeCdp {
@@ -31,6 +33,8 @@ interface FakeCdp {
   cdpCommands: () => Array<{ method: string; params: Record<string, unknown> }>;
   /** How many page expressions (wait_for_condition type "expression") were evaluated. */
   expressionCount: () => number;
+  /** The command IDs bridge.cancel was called with. */
+  cancelled: () => number[];
   close(): Promise<void>;
 }
 
@@ -38,6 +42,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
   let port = 0;
   let stateChecks = 0;
   let expressionChecks = 0;
+  const cancelledIds: number[] = [];
   let nextCommandId = 17;
   const resultChecks = new Map<number, number>();
   const submittedResults = new Map<number, { ok: boolean; value?: unknown; error?: string }>();
@@ -132,6 +137,9 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
           options.bridgeResult ?? { ok: true, value: commandValue },
         );
         value = JSON.stringify({ id: commandId });
+      } else if (expression.includes("bridge.cancel")) {
+        cancelledIds.push(Number(expression.match(/bridge\.cancel\((\d+)\)/u)?.[1]));
+        value = JSON.stringify(options.cancelAnswer === "absent" ? { cancelled: "unsupported" } : { cancelled: options.cancelAnswer ?? "queued" });
       } else if (expression.includes("bridge.getResult")) {
         const commandId = Number(expression.match(/bridge\.getResult\((\d+)\)/u)?.[1]);
         const checks = (resultChecks.get(commandId) ?? 0) + 1;
@@ -181,6 +189,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     activeConnectionCount: () => sockets.size,
     commandCount: (command) => commandCounts.get(command) ?? 0,
     expressionCount: () => expressionChecks,
+    cancelled: () => [...cancelledIds],
     cdpCommands: () => cdpCommands.map((command) => ({
       method: command.method,
       params: { ...command.params },
@@ -476,6 +485,25 @@ describe("call_bridge", () => {
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("timed out after 120ms");
+    // The command is withdrawn, so it does not run later when the game ticks again.
+    expect(fake.cancelled()).toEqual([17]);
+    expect(result.content[0].text).toContain("withdrawn");
+  });
+
+  it("says when a timed-out command ran after all, or may still run on an older bridge", async () => {
+    for (const [cancelAnswer, expected] of [
+      ["result", "ran after all"],
+      ["absent", "may still run"],
+    ] as const) {
+      const fake = await startFakeCdp({ resultAfter: Number.MAX_SAFE_INTEGER, cancelAnswer });
+      openFakes.push(fake);
+      const { server, controller } = registerConnectionTools();
+      openControllers.push(controller);
+      const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+      const result = await server.callTool("call_bridge", { connectionId: connected.connectionId, command: "ping", pollIntervalMs: 10, timeoutMs: 120 });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(expected);
+    }
   });
 
   it("reports the command timeout when a poll expires at the deadline", async () => {
@@ -495,8 +523,8 @@ describe("call_bridge", () => {
       timeoutMs: 120,
     });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toBe(
-      "Failed to call runtime bridge: Runtime bridge command timed out after 120ms",
+    expect(result.content[0].text).toMatch(
+      /^Failed to call runtime bridge: Runtime bridge command timed out after 120ms; it had not run yet and was withdrawn/u,
     );
   });
 
