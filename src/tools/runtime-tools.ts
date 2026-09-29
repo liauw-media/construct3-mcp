@@ -455,7 +455,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           return toolError('subscribe_events with eventType "globalVarChange" needs filter.variable, the global variable to watch.');
         }
         const result = await subscriptionCall(connectionId, 'subscribeEvents', { eventType, filter: filter ?? {}, bufferSize });
-        return toolResult({ subscription_id: result.subscription_id, eventType, filter: filter ?? {}, bufferSize }, { projectWritten: false });
+        return toolResult({ subscriptionId: result.subscriptionId, eventType, filter: filter ?? {}, bufferSize }, { projectWritten: false });
       } catch (error) {
         console.error('[subscribe_events] failed:', error);
         return toolError(`Failed to subscribe: ${error instanceof Error ? error.message : String(error)}`);
@@ -468,7 +468,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
     'Read the events a subscription buffered since the last read, oldest first: { type, name, value, previousValue (global and layout changes), timestamp, tick }. Clears the buffer unless clear is false.',
     {
       connectionId: z.string().uuid().describe('Connection ID returned by connect_to_game'),
-      subscriptionId: z.string().min(1).max(100).describe('The subscription_id returned by subscribe_events'),
+      subscriptionId: z.string().min(1).max(100).describe('The subscriptionId returned by subscribe_events'),
       clear: z.boolean().optional().default(true).describe('Empty the buffer after reading (default true); false leaves the events for a later read'),
     },
     async ({ connectionId, subscriptionId, clear }) => {
@@ -487,12 +487,12 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
     'Stop a subscription and release its buffer. An unknown subscription is an error, not a silent success.',
     {
       connectionId: z.string().uuid().describe('Connection ID returned by connect_to_game'),
-      subscriptionId: z.string().min(1).max(100).describe('The subscription_id returned by subscribe_events'),
+      subscriptionId: z.string().min(1).max(100).describe('The subscriptionId returned by subscribe_events'),
     },
     async ({ connectionId, subscriptionId }) => {
       try {
         const result = await subscriptionCall(connectionId, 'unsubscribeEvents', { subscriptionId });
-        return toolResult({ subscription_id: result.subscription_id, unsubscribed: result.unsubscribed === true }, { projectWritten: false });
+        return toolResult({ subscriptionId: result.subscriptionId, unsubscribed: result.unsubscribed === true }, { projectWritten: false });
       } catch (error) {
         console.error('[unsubscribe_events] failed:', error);
         return toolError(`Failed to unsubscribe: ${error instanceof Error ? error.message : String(error)}`);
@@ -523,8 +523,8 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
         });
         return toolResult({
           met: result.met,
-          elapsed_ms: result.elapsedMs,
-          final_value: result.finalValue,
+          elapsedMs: result.elapsedMs,
+          finalValue: result.finalValue,
         }, { projectWritten: false });
       } catch (error) {
         console.error('[wait_for_condition] failed:', error);

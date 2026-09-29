@@ -324,7 +324,7 @@ runOnStartup(async (runtime) => {
             break;
 
           case "subscribeEvents":
-            result = { subscription_id: bridge.subscribe(cmd.args.eventType, cmd.args.filter, cmd.args.bufferSize) };
+            result = { subscriptionId: bridge.subscribe(cmd.args.eventType, cmd.args.filter, cmd.args.bufferSize) };
             break;
 
           case "readEvents": {
@@ -338,7 +338,7 @@ runOnStartup(async (runtime) => {
               result = { error: "Unknown subscription: " + cmd.args.subscriptionId };
               break;
             }
-            result = { subscription_id: cmd.args.subscriptionId, unsubscribed: true };
+            result = { subscriptionId: cmd.args.subscriptionId, unsubscribed: true };
             break;
           }
 

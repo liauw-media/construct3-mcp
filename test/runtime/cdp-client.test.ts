@@ -582,7 +582,7 @@ describe("wait_for_condition", () => {
         timeoutMs: 500,
       }));
       expect(result.met).toBe(true);
-      expect(result.elapsed_ms).toBeGreaterThanOrEqual(0);
+      expect(result.elapsedMs).toBeGreaterThanOrEqual(0);
     }
     expect(fake.commandCount("getGlobalVar")).toBe(comparisons.length);
   });
@@ -603,7 +603,7 @@ describe("wait_for_condition", () => {
       pollIntervalMs: 10,
       timeoutMs: 500,
     }));
-    expect(result).toMatchObject({ met: true, final_value: 5 });
+    expect(result).toMatchObject({ met: true, finalValue: 5 });
     expect(fake.commandCount("getGlobalVar")).toBe(3);
   });
 
@@ -639,7 +639,7 @@ describe("wait_for_condition", () => {
       pollIntervalMs: 10,
       timeoutMs: 500,
     }));
-    expect(objectProperty).toMatchObject({ met: true, final_value: "10" });
+    expect(objectProperty).toMatchObject({ met: true, finalValue: "10" });
 
     const instanceVariable = parseToolResult(await server.callTool("wait_for_condition", {
       connectionId: connected.connectionId,
@@ -652,7 +652,7 @@ describe("wait_for_condition", () => {
       },
       timeoutMs: 500,
     }));
-    expect(instanceVariable).toMatchObject({ met: true, final_value: 25 });
+    expect(instanceVariable).toMatchObject({ met: true, finalValue: 25 });
 
     const layout = parseToolResult(await server.callTool("wait_for_condition", {
       connectionId: connected.connectionId,
@@ -660,7 +660,7 @@ describe("wait_for_condition", () => {
       pollIntervalMs: 10,
       timeoutMs: 500,
     }));
-    expect(layout).toMatchObject({ met: true, final_value: "Bonus" });
+    expect(layout).toMatchObject({ met: true, finalValue: "Bonus" });
 
     const expressionCall = {
       connectionId: connected.connectionId,
@@ -684,7 +684,7 @@ describe("wait_for_condition", () => {
 
     vi.stubEnv("C3MCP_ALLOW_EVAL", "1");
     const expression = parseToolResult(await server.callTool("wait_for_condition", expressionCall));
-    expect(expression).toMatchObject({ met: true, final_value: 11 });
+    expect(expression).toMatchObject({ met: true, finalValue: 11 });
   });
 
   it("returns met false with the last observed value on timeout", async () => {
@@ -704,8 +704,8 @@ describe("wait_for_condition", () => {
       timeoutMs: 120,
     }));
     expect(result.met).toBe(false);
-    expect(result.final_value).toBe("WAITING");
-    expect(result.elapsed_ms).toBeGreaterThanOrEqual(100);
+    expect(result.finalValue).toBe("WAITING");
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(100);
   });
 
   it("reports invalid comparisons and missing object properties", async () => {
@@ -754,15 +754,15 @@ describe("wait_for_condition", () => {
 });
 
 describe("subscribe_events, read_events and unsubscribe_events", () => {
-  it("travel through the retained connection with the upstream result names and defaults", async () => {
+  it("travel through the retained connection with camelCase result names and the defaults", async () => {
     const fake = await startFakeCdp({
       commandValues: {
-        subscribeEvents: [{ subscription_id: "sub-1" }],
+        subscribeEvents: [{ subscriptionId: "sub-1" }],
         readEvents: [
           { events: [{ type: "globalVarChange", name: "Score", value: 5, previousValue: 0, timestamp: 1, tick: 4 }], count: 1 },
           { events: [], count: 0 },
         ],
-        unsubscribeEvents: [{ subscription_id: "sub-1", unsubscribed: true }],
+        unsubscribeEvents: [{ subscriptionId: "sub-1", unsubscribed: true }],
       },
     });
     openFakes.push(fake);
@@ -773,7 +773,7 @@ describe("subscribe_events, read_events and unsubscribe_events", () => {
     const made = parseToolResult(await server.callTool("subscribe_events", {
       connectionId: connected.connectionId, eventType: "globalVarChange", filter: { variable: "Score" },
     }));
-    expect(made).toEqual({ subscription_id: "sub-1", eventType: "globalVarChange", filter: { variable: "Score" }, bufferSize: 100 });
+    expect(made).toEqual({ subscriptionId: "sub-1", eventType: "globalVarChange", filter: { variable: "Score" }, bufferSize: 100 });
 
     const read = parseToolResult(await server.callTool("read_events", { connectionId: connected.connectionId, subscriptionId: "sub-1", clear: false }));
     expect(read).toEqual({ events: [{ type: "globalVarChange", name: "Score", value: 5, previousValue: 0, timestamp: 1, tick: 4 }], count: 1 });
@@ -781,7 +781,7 @@ describe("subscribe_events, read_events and unsubscribe_events", () => {
     expect(cleared).toEqual({ events: [], count: 0 });
 
     const gone = parseToolResult(await server.callTool("unsubscribe_events", { connectionId: connected.connectionId, subscriptionId: "sub-1" }));
-    expect(gone).toEqual({ subscription_id: "sub-1", unsubscribed: true });
+    expect(gone).toEqual({ subscriptionId: "sub-1", unsubscribed: true });
     expect(fake.commandCount("subscribeEvents")).toBe(1);
     expect(fake.commandCount("readEvents")).toBe(2);
     expect(fake.commandCount("unsubscribeEvents")).toBe(1);

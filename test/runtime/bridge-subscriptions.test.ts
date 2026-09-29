@@ -126,7 +126,7 @@ describe('through the command queue', () => {
   it('runs commands before polling, so a subscription made this tick starts observing on the next', () => {
     h.runtime.globalVars.Score = 1;
     const made = h.command('subscribeEvents', { eventType: 'globalVarChange', filter: { variable: 'Score' } });
-    expect(made).toEqual({ ok: true, value: { subscription_id: 'sub-1' } });
+    expect(made).toEqual({ ok: true, value: { subscriptionId: 'sub-1' } });
     expect(h.command('readEvents', { subscriptionId: 'sub-1' })).toEqual({ ok: true, value: { events: [], count: 0 } });
     h.runtime.globalVars.Score = 2;
     const read = h.command('readEvents', { subscriptionId: 'sub-1', clear: false });
@@ -134,7 +134,7 @@ describe('through the command queue', () => {
     expect(read.value).toEqual({ events: [], count: 0 });
     const again = h.command('readEvents', { subscriptionId: 'sub-1' });
     expect((again.value as { count: number }).count).toBe(1);
-    expect(h.command('unsubscribeEvents', { subscriptionId: 'sub-1' })).toEqual({ ok: true, value: { subscription_id: 'sub-1', unsubscribed: true } });
+    expect(h.command('unsubscribeEvents', { subscriptionId: 'sub-1' })).toEqual({ ok: true, value: { subscriptionId: 'sub-1', unsubscribed: true } });
     expect(h.command('unsubscribeEvents', { subscriptionId: 'sub-1' })).toEqual({ ok: true, value: { error: 'Unknown subscription: sub-1' } });
     const bad = h.command('subscribeEvents', { eventType: 'globalVarChange', filter: {} });
     expect(bad.ok).toBe(false);
