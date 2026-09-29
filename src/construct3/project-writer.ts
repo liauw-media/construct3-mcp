@@ -107,6 +107,12 @@ export class ConcurrentWriteError extends Error {
   }
 }
 
+/**
+ * How often an update of project.c3proj reads the file again when it changed
+ * between the read and the write, before the update is refused.
+ */
+const MAX_PROJECT_UPDATE_ROUNDS = 3;
+
 /** Why a write to a file that changed on disk since it was read was refused. */
 function staleFileMessage(label: string): string {
   return `${label} was changed on disk after this server read it (saved in the Construct 3 editor, restored with git, ` +
@@ -230,10 +236,13 @@ export class Construct3ProjectWriter {
   }
 
   /**
-   * The same check for project.c3proj, against the version the reader loaded
-   * last. The writer runs it before each of its project.c3proj updates; tools
-   * that update project.c3proj themselves (timelines, addons, runtime bridge)
-   * run it before they read the file.
+   * Refuse (StaleFileError) when project.c3proj changed on disk since the
+   * reader loaded it, that is, during the running tool call. For the tools
+   * that update project.c3proj themselves (timelines, addons, runtime
+   * bridge) after deciding on the loaded project: they run it before their
+   * first write. The writer's own updates of project.c3proj take such a
+   * change in and merge into it instead (updateProjectFile), since they run
+   * after the call wrote other files.
    */
   async assertProjectFileCurrent(): Promise<void> {
     if (await this.reader.projectFileChanged()) {
@@ -305,14 +314,43 @@ export class Construct3ProjectWriter {
   }
 
   /**
-   * Validate, write and verify project.c3proj, keeping the text style of
-   * `original` (the content it was read from). Caller holds the project lock.
+   * Update project.c3proj under the project lock: `change` edits the parsed
+   * file and returns false when there is nothing to write. The file is
+   * backed up (once per tool call), written with its text style, read back
+   * and loaded again by the reader. Returns the backup path, or undefined
+   * when nothing was written.
+   *
+   * A change made on disk is merged, never replaced (#51): one made since the
+   * reader loaded the file is taken in first (reader.checkProjectFile(): the
+   * file is loaded again, and the caches, the index and the ID generator's
+   * scan are renewed), the file is read right before the write, and when it
+   * changes between that read and the write it is read and changed again.
+   * Only when it keeps changing is the update refused (StaleFileError).
+   * These updates run after the tool call wrote other files (registering a
+   * new entity, removing a deleted one), so refusing them for a change they
+   * can merge would leave the project half changed.
    */
-  private async writeProjectFile(projectPath: string, project: unknown, original: string): Promise<void> {
-    const json = this.validateJsonData(project, 'project.c3proj');
-    const text = applyJsonTextStyle(json, jsonTextStyleOf(original));
-    await this.atomicWrite(projectPath, text);
-    await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+  private async updateProjectFile(change: (project: any) => boolean | void): Promise<string | undefined> {
+    const projectPath = this.reader.getProjectPath();
+    return this.withProjectLock(async () => {
+      await this.reader.checkProjectFile();
+      for (let round = 0; round < MAX_PROJECT_UPDATE_ROUNDS; round++) {
+        const asRead = await statFileState(projectPath);
+        const content = await readFile(projectPath, 'utf-8');
+        const project = parseJsonText(content);
+        if (change(project) === false) return undefined;
+        const text = applyJsonTextStyle(this.validateJsonData(project, 'project.c3proj'), jsonTextStyleOf(content));
+
+        const backupPath = await this.createBackup(projectPath);
+        // Changed since the read: read it again, so that change is kept
+        if (!sameFileState(await statFileState(projectPath), asRead)) continue;
+        await this.atomicWrite(projectPath, text);
+        await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+        await this.reader.reloadProject();
+        return backupPath;
+      }
+      throw new StaleFileError(staleFileMessage('project.c3proj'));
+    });
   }
 
   /** Path of an entity's JSON file, confined to the project directory. */
@@ -437,13 +475,7 @@ export class Construct3ProjectWriter {
     name: string,
     subfolder?: string,
   ): Promise<void> {
-    return this.withProjectLock(async () => {
-      const projectPath = this.reader.getProjectPath();
-      await this.assertProjectFileCurrent();
-      await this.createBackup(projectPath);
-
-      const content = await readFile(projectPath, 'utf-8');
-      const project = parseJsonText(content);
+    await this.updateProjectFile(project => {
       const container = project[category];
 
       if (subfolder) {
@@ -456,9 +488,6 @@ export class Construct3ProjectWriter {
           container.items.push(name);
         }
       }
-
-      await this.writeProjectFile(projectPath, project, content);
-      await this.reader.reloadProject();
     });
   }
 
@@ -469,13 +498,7 @@ export class Construct3ProjectWriter {
     category: EntityCategory,
     name: string,
   ): Promise<void> {
-    return this.withProjectLock(async () => {
-      const projectPath = this.reader.getProjectPath();
-      await this.assertProjectFileCurrent();
-      await this.createBackup(projectPath);
-
-      const content = await readFile(projectPath, 'utf-8');
-      const project = parseJsonText(content);
+    await this.updateProjectFile(project => {
       const container = project[category];
 
       // Remove from root items
@@ -486,9 +509,6 @@ export class Construct3ProjectWriter {
         // Search subfolders
         this.removeFromSubfolders(container.subfolders, name);
       }
-
-      await this.writeProjectFile(projectPath, project, content);
-      await this.reader.reloadProject();
     });
   }
 
@@ -508,14 +528,7 @@ export class Construct3ProjectWriter {
       );
     }
 
-    return this.withProjectLock(async () => {
-      const projectPath = this.reader.getProjectPath();
-      await this.assertProjectFileCurrent();
-      const backupPath = await this.createBackup(projectPath);
-
-      const content = await readFile(projectPath, 'utf-8');
-      const project = parseJsonText(content);
-
+    const backupPath = await this.updateProjectFile(project => {
       // Apply updates to top-level and properties
       for (const [key, value] of Object.entries(updates)) {
         if (ALLOWED_TOP_LEVEL.has(key)) {
@@ -524,12 +537,9 @@ export class Construct3ProjectWriter {
           project.properties[key] = value;
         }
       }
-
-      await this.writeProjectFile(projectPath, project, content);
-      await this.reader.reloadProject();
-
-      return backupPath;
     });
+    // The change above never returns false, so the file was written
+    return backupPath as string;
   }
 
   /**
@@ -592,19 +602,11 @@ export class Construct3ProjectWriter {
     const knownMap = type === 'plugin' ? KNOWN_SCIRRA_PLUGINS : KNOWN_SCIRRA_BEHAVIORS;
     const displayName = knownMap[id];
 
-    return this.withProjectLock(async () => {
-      // Re-check under lock — another concurrent call may have registered it
-      const freshAddons = this.reader.getUsedAddons();
-      if (freshAddons.some(a => a.type === type && a.id === id)) return undefined;
-
-      // Auto-register the addon in c3proj
-      const projectPath = this.reader.getProjectPath();
-      await this.assertProjectFileCurrent();
-      await this.createBackup(projectPath);
-
-      const content = await readFile(projectPath, 'utf-8');
-      const project = parseJsonText(content);
-
+    // Auto-register the addon in c3proj
+    const written = await this.updateProjectFile(project => {
+      // Checked again in the file as it is now: another call running in
+      // parallel, or the editor, may have registered it meanwhile
+      if ((project.usedAddons as Addon[]).some(a => a.type === type && a.id === id)) return false;
       const newAddon: Addon = {
         type,
         id,
@@ -613,12 +615,9 @@ export class Construct3ProjectWriter {
         bundled: false,
       };
       project.usedAddons.push(newAddon);
-
-      await this.writeProjectFile(projectPath, project, content);
-      await this.reader.reloadProject();
-
-      return `Auto-registered ${type} "${id}" in usedAddons (was not previously in the project).`;
     });
+    if (written === undefined) return undefined;
+    return `Auto-registered ${type} "${id}" in usedAddons (was not previously in the project).`;
   }
 
   /**

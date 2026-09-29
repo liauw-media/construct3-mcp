@@ -8,19 +8,21 @@
  * - Changes made outside the server between two calls (git restore, a save
  *   in the Construct 3 editor) are seen by the next call.
  * - A write never replaces a change made on disk after the call read the file.
+ * - The writer's own updates of project.c3proj merge a change made on disk.
  * - The ID generator keeps its scan across the server's own writes and scans
  *   again after an external change, without handing out an ID twice.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, cp, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { MockServer } from '../mocks/mock-server.js';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { Construct3ProjectWriter } from '../../src/construct3/project-writer.js';
 import { IdGenerator } from '../../src/construct3/id-generator.js';
-import { StaleFileError, runInToolCall } from '../../src/construct3/disk-state.js';
+import { runInToolCall } from '../../src/construct3/disk-state.js';
 import { registerQueryTools } from '../../src/tools/query.js';
 import { registerAnalysisTools } from '../../src/tools/analysis.js';
 import { registerMutationTools } from '../../src/tools/mutations.js';
@@ -67,6 +69,14 @@ async function resetToSnapshot(): Promise<void> {
 
 function instanceUids(layout: Record<string, any>): number[] {
   return layout.layers[0].instances.map((i: Record<string, any>) => i.uid);
+}
+
+/** Saving project.c3proj in the editor: a new author (synchronous, so a sync reader method can do it). */
+function saveProjectInEditor(): void {
+  const path = join(dir, 'project.c3proj');
+  const project = JSON.parse(readFileSync(path, 'utf-8'));
+  project.properties.author = 'Editor';
+  writeFileSync(path, JSON.stringify(project, null, '\t'), 'utf-8');
 }
 
 beforeEach(async () => {
@@ -252,15 +262,6 @@ describe('a write never replaces a change made on disk after the call read the f
     expect([a, b].filter(r => r.isError)).toHaveLength(1);
   });
 
-  it('the writer refuses to update a project.c3proj changed since it was loaded', async () => {
-    await editJson('project.c3proj', project => { project.properties.author = 'Editor'; });
-
-    await expect(writer.addToProject('eventSheets', 'Other')).rejects.toBeInstanceOf(StaleFileError);
-    const project = await readJson('project.c3proj');
-    expect(project.properties.author).toBe('Editor');
-    expect(project.eventSheets.items).not.toContain('Other');
-  });
-
   it('a file the call wrote itself can be written again in the same call', async () => {
     await runInToolCall(async () => {
       const sheet = await reader.readEventSheet('MainSheet');
@@ -268,6 +269,81 @@ describe('a write never replaces a change made on disk after the call read the f
       await writer.writeEntityFile('eventSheets', 'MainSheet', sheet);
     });
     expect((await readJson('eventSheets/MainSheet.json')).events).toHaveLength(1);
+  });
+});
+
+// ─── project.c3proj updates of the writer merge ─────────────
+
+describe('the writer\'s own updates of project.c3proj merge a change made on disk (#51)', () => {
+  it('addToProject keeps the change, and the reader takes it in', async () => {
+    await editJson('project.c3proj', project => { project.properties.author = 'Editor'; });
+
+    await runInToolCall(async () => {
+      const epoch = reader.getDiskEpoch();
+      await writer.addToProject('eventSheets', 'Other');
+      expect(reader.getDiskEpoch()).toBe(epoch + 1);
+    });
+
+    const project = await readJson('project.c3proj');
+    expect(project.properties.author).toBe('Editor');
+    expect(project.eventSheets.items).toContain('Other');
+    expect(reader.getProject().properties.author).toBe('Editor');
+  });
+
+  it('create_event_sheet registers its sheet when project.c3proj is saved in the editor after the sheet was written', async () => {
+    const writeEntityFile = writer.writeEntityFile.bind(writer);
+    vi.spyOn(writer, 'writeEntityFile').mockImplementation(async (...args) => {
+      const backup = await writeEntityFile(...args);
+      saveProjectInEditor();
+      return backup;
+    });
+
+    await expectSuccess('create_event_sheet', { name: 'Other' });
+
+    const project = await readJson('project.c3proj');
+    expect(project.properties.author).toBe('Editor');
+    expect(project.eventSheets.items).toContain('Other');
+    expect(existsSync(join(dir, 'eventSheets', 'Other.json'))).toBe(true);
+    expect((await expectSuccess('validate_project')).data.valid).toBe(true);
+  });
+
+  it('delete_event_sheet unregisters its sheet when project.c3proj is saved in the editor after the sheet was deleted', async () => {
+    await expectSuccess('create_event_sheet', { name: 'Other' });
+    const deleteEntityFile = writer.deleteEntityFile.bind(writer);
+    vi.spyOn(writer, 'deleteEntityFile').mockImplementation(async (...args) => {
+      const backup = await deleteEntityFile(...args);
+      saveProjectInEditor();
+      return backup;
+    });
+
+    await expectSuccess('delete_event_sheet', { name: 'Other' });
+
+    const project = await readJson('project.c3proj');
+    expect(project.properties.author).toBe('Editor');
+    expect(project.eventSheets.items).not.toContain('Other');
+    expect(existsSync(join(dir, 'eventSheets', 'Other.json'))).toBe(false);
+    expect((await expectSuccess('validate_project')).data.valid).toBe(true);
+  });
+
+  it('a change saved between the update\'s read and its write is read again and kept', async () => {
+    // The backup is made after the read, right before the write
+    const writerInternals = writer as unknown as { createBackup: (path: string) => Promise<string> };
+    const createBackup = writerInternals.createBackup.bind(writer);
+    let saved = false;
+    vi.spyOn(writerInternals, 'createBackup').mockImplementation(async (path: string) => {
+      const backup = await createBackup(path);
+      if (!saved && path.endsWith('project.c3proj')) {
+        saved = true;
+        saveProjectInEditor();
+      }
+      return backup;
+    });
+
+    await runInToolCall(() => writer.addToProject('eventSheets', 'Other'));
+
+    const project = await readJson('project.c3proj');
+    expect(project.properties.author).toBe('Editor');
+    expect(project.eventSheets.items).toContain('Other');
   });
 });
 
