@@ -141,7 +141,7 @@ export async function analyzePerformance(
       message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (on any layer or sub-layer, including non-world instances)` +
         (possiblyUsed > 0 ? `; ${possiblyUsed} more possibly used in files that could not be parsed (find_orphaned_objects lists them as possiblyUsed)` : ''),
       suggestion: 'Use find_orphaned_objects to list them. Before removing one, check what this analysis cannot see: ' +
-        'project script files, objects created by name at runtime, and script references it does not recognise.',
+        'project script files, objects created by a name built at runtime, and script references it does not recognise.',
     });
   }
 

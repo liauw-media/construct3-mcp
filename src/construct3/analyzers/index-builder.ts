@@ -21,7 +21,11 @@
  * - script: runtime.objects.Name or runtime.objects["Name"] (any `objects`
  *   property, e.g. this.runtime.objects) in script actions and script events.
  *   Dynamic lookups (runtime.objects[name]), destructuring and project script
- *   files are not analysed.
+ *   files are not analysed;
+ * - create-by-name: the name System "Create object (by name)" creates when it
+ *   is one string literal ("object-name": "\"Bullet\""), matched ignoring
+ *   case as the runtime looks it up (createByNameTarget, the rule
+ *   get_asset_usage uses). A name built by an expression is not analysed.
  * Only names of existing object types and families are recorded this way, so
  * these references never show up as broken references; the exception are the
  * object parameter keys below, whose values name an object type or family in
@@ -81,6 +85,7 @@ import type {
   FileFolderSubfolder,
 } from '../types.js';
 import {
+  createByNameTarget,
   functionsObjectName,
   findExpressionCalls,
   mappedFunctionName,
@@ -536,6 +541,8 @@ export class ProjectIndex {
 
   /** Object type and family names that parameters, expressions and scripts can refer to */
   private referableNames: Set<string> = new Set();
+  /** Lower-cased object type or family name → the name (for names matched ignoring case) */
+  private referableNamesLower: Map<string, string> = new Map();
   /** Event variable and function parameter names declared in any event sheet */
   private variableNames: Set<string> = new Set();
   /** SID → name of every object type and family (for object properties that store a SID) */
@@ -570,6 +577,9 @@ export class ProjectIndex {
     this.allObjects = await reader.listObjectTypes();
     this.allLayouts = await reader.listLayouts();
     this.referableNames = new Set([...this.allObjects, ...(await reader.listFamilies())]);
+    for (const name of this.referableNames) {
+      if (!this.referableNamesLower.has(name.toLowerCase())) this.referableNamesLower.set(name.toLowerCase(), name);
+    }
 
     // Instance variables and behaviors of object types and families (for the uses found in events).
     // Each bulk read's failures are taken right away: a reload by a concurrent call clears them.
@@ -785,6 +795,11 @@ export class ProjectIndex {
     }
     this.indexParameters(sheetName, stdAction.parameters, path, stdAction.objectClass);
     this.indexMemberReferences(sheetName, action as unknown as Record<string, unknown>, path, eventPath, 'action');
+
+    // System "Create object (by name)" with a literal name creates that object type (or a family member)
+    const created = createByNameTarget(record);
+    const createdName = typeof created === 'string' ? this.referableNamesLower.get(created.toLowerCase()) : undefined;
+    if (createdName !== undefined) this.addObjectReference(createdName, sheetName, path, 'create-by-name');
 
     // Check for function calls
     if (typeof stdAction.callFunction === 'string' && stdAction.callFunction) {

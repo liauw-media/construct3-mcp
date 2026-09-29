@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, cp, rm, readFile, writeFile, stat } from 'fs/promises';
+import { mkdtemp, cp, rm, mkdir, readFile, writeFile, stat } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { MockServer } from '../mocks/mock-server.js';
@@ -194,5 +194,84 @@ describe('analyze_performance every-tick count', () => {
     const counts: Record<string, number> = {};
     for (const name of Object.keys(cases)) counts[name] = await everyTickCount(name);
     expect(counts).toEqual(Object.fromEntries(Object.entries(cases).map(([name, c]) => [name, c.expected])));
+  });
+});
+
+// ─── Create object (by name) with a literal name (#38 item 9) ─
+
+/** System "Create object (by name)" as the editor saves it; `objectName` is the expression. */
+const createByName = (objectName: string) => ({
+  id: 'create-object-by-name', objectClass: 'System', sid: sid(),
+  parameters: { 'object-name': objectName, layer: '"Main"', x: '0', y: '0', 'create-hierarchy': false, 'template-name': '""' },
+});
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(join(tmpDir, path));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe('System "Create object (by name)" with a literal name', () => {
+  it('counts as a use in find_orphaned_objects, get_object_dependencies and the delete_object check, as in get_asset_usage', async () => {
+    await addSprite('Bullet');
+    await addSprite('Spare');
+    await addSheet('Spawner', [block([trigger()], [], { actions: [createByName('"Bullet"')] })]);
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects');
+    expect(orphans.orphanedObjects.map((o: { name: string }) => o.name)).toEqual(['Spare']);
+
+    const deps = await call('get_object_dependencies', { object: 'Bullet' });
+    expect(deps.object.referencedIn.eventSheets).toEqual(['Spawner']);
+    expect(deps.object.referenceCount).toBe(1);
+    const projectWide = await call('get_object_dependencies', { detail: 'full' });
+    expect(projectWide.projectWide.orphanedObjects).toEqual(['Spare']);
+
+    const assets = await call('get_asset_usage', { type: 'image', detail: 'full' });
+    expect(assets.assets.find((a: { name: string }) => a.name === 'Bullet').status).toBe('used');
+
+    const validation = await call('validate_project');
+    const orphanInfo = validation.info.filter((i: { check: string }) => i.check === 'orphaned-object').map((i: { entity: string }) => i.entity);
+    expect(orphanInfo).toEqual(['objectTypes/Spare']);
+
+    const refused = await call('delete_object', { name: 'Bullet' });
+    expect(refused.action).toBe('delete_blocked');
+    expect(refused.references.eventSheets).toEqual(['Spawner']);
+    expect(await exists('objectTypes/Bullet.json')).toBe(true);
+
+    const forced = await call('delete_object', { name: 'Bullet', force: true });
+    expect(forced.success).toBe(true);
+    // validate_project cannot report a name in a string literal once the object is gone
+    expect(forced.warnings.join(' ')).toMatch(/will not report its 1 use\(s\) in expressions, scripts and Create object \(by name\)/);
+  });
+
+  it('matches the name ignoring case, as the runtime looks it up, and counts a family created by name for its members', async () => {
+    await addSprite('Bullet');
+    await addSprite('Shard');
+    await mkdir(join(tmpDir, 'families'), { recursive: true });
+    await writeJson('families/Debris.json', {
+      name: 'Debris', 'plugin-id': 'Sprite', sid: sid(), instanceVariables: [], behaviorTypes: [], effectTypes: [], members: ['Shard'],
+    });
+    const project = await readJson('project.c3proj');
+    project.families.items.push('Debris');
+    await writeJson('project.c3proj', project);
+    await addSheet('Spawner', [block([trigger()], [], { actions: [createByName(' "bullet" '), createByName('"DEBRIS"')] })]);
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects');
+    expect(orphans.orphanedObjects).toEqual([]);
+    expect((await call('delete_object', { name: 'Shard' })).action).toBe('delete_blocked');
+  });
+
+  it('does not count a name built by an expression, or a literal inside a longer expression', async () => {
+    await addSprite('Bullet');
+    await addSheet('Spawner', [block([trigger()], [], { actions: [createByName('"Bul" & "let"'), createByName('LevelName & "Bullet"')] })]);
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects');
+    expect(orphans.orphanedObjects.map((o: { name: string }) => o.name)).toEqual(['Bullet']);
   });
 });

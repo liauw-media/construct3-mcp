@@ -491,10 +491,11 @@ export interface ObjectReference {
   /**
    * How the object is used: as the object of a condition/action, as a whole
    * parameter value (object parameters), inside a parameter expression
-   * ("Name.X"), from a script action/event (runtime.objects.Name), or as the
-   * object a custom action block defines a custom action for.
+   * ("Name.X"), from a script action/event (runtime.objects.Name), as the
+   * object a custom action block defines a custom action for, or as the
+   * literal name System "Create object (by name)" creates.
    */
-  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script' | 'custom-action';
+  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script' | 'custom-action' | 'create-by-name';
 }
 
 /** Node in the event sheet flow graph */
