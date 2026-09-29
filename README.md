@@ -176,9 +176,9 @@ Event SIDs are not always unique in editor-saved sheets. The tools that find an 
 | `update_animation_properties` | Update animation speed, looping, ping-pong, repeat count |
 | `rename_animation` | Rename an animation with its frame image files and the layout instances starting with it |
 | `delete_animation` | Delete an animation (never the last one) |
-| `add_frame_to_animation` | Add a blank frame (placeholder PNG) at an index |
+| `add_frame_to_animation` | Add a blank frame (placeholder PNG) at an index; later frame images move up with their frames |
 | `update_frame` | Update a frame's duration, size or origin |
-| `delete_frame_from_animation` | Delete a frame by index (never the last one) |
+| `delete_frame_from_animation` | Delete a frame by index (never the last one); its image is kept as `.bak`, later frame images move down |
 | `replace_sprite_image` | Replace a frame's image with base64 PNG data |
 
 **Timelines**
@@ -245,7 +245,7 @@ Steps 2, 4 and 5 apply in full to writes that go through the project writer: obj
 - `register_addon` and `unregister_addon` replace `project.c3proj` through a temp file, with no `.bak` backup and no read-back check.
 - The timeline tools back up the timeline file and `project.c3proj` and write through a temp file, but do not read the result back.
 - The runtime tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) write `project.c3proj` and the bridge script in place, with no backup or read-back check.
-- PNG images are written without a backup.
+- PNG images are written without a backup, except that the frame tools keep a file they would replace or remove as `.bak` (see *Frame images move with their frames* below).
 
 **Close and reopen the project in Construct 3 before saving there.** The editor keeps an open project in memory, so saving from a session that was opened before these edits can overwrite them. Its Project Bar reload (F9) re-reads script files only, not event sheets, layouts or `project.c3proj`. Every response that reports a completed write carries this reminder as `editorNote`. Error responses do not, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
@@ -255,10 +255,11 @@ Additional safeguards:
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
 - **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs, named like the editor names them: `images/<object>-<animation>-000.png`, all lowercase. Batch writes roll back on failure.
+- **Frame images move with their frames** — The editor names a frame's image file after the frame's index, so `add_frame_to_animation` with an `index` and `delete_frame_from_animation` rename the image files of the later frames one index up or down (JPEG and other formats keep their extension). The deleted frame's image, and any unused file whose name a moved image or new placeholder needs, are kept as `<file>.bak` instead of being deleted or replaced. If a write fails, the placeholder is removed, the object file restored and the image files renamed back; when another write replaced the object file in the meantime, its content is kept and the image files are made to match it. The animation tools run one at a time, so parallel calls on one Sprite cannot move each other's images or write its object without each other's frames. `validate_project` reports frames without an image file (`frame-image`) and lists the `.bak` files in `images/` (`backup-file`).
 - **Layout instance sync** — Like the editor, every layout instance carries an entry for each behavior of its object type and of the families it belongs to, with the built-in behaviors' default property values. `add_instance_to_layout` writes these entries; adding or removing a behavior (`update_object_properties`) or changing family membership (`update_family`, `delete_family`) updates the existing instances. Behavior or variable changes also make sure every instance of the object has the `behaviors` and `instanceVariables` dicts C3 expects.
 - **Names compared like the editor** — Create and rename tools refuse a name that differs from an existing one only in case where Construct 3 compares names ignoring case: event sheets and layouts (project-wide), object types and families, the layers of one layout (sub-layers included; the editor cannot load a layout with two such layers), the animations of one sprite (in any animation folder), and sibling project-bar folders. Timeline names are compared exactly, as the editor does, but a case variant of a timeline in the same folder is refused because both would share one file on Windows and macOS.
 - **Event variable names checked like the editor** — `add_event_to_sheet` and `update_event_variable` refuse the event variable and function parameter names the editor's variable and parameter dialogs refuse: a name that matches, ignoring case, an event variable or function parameter in its scope (for a global variable, any in the project; for a local one or a parameter, the globals, the variables and parameters of its enclosing events and those below its parent event or function), the name of a System expression (e.g. `time`, `random`), and names with whitespace, punctuation such as `-` `.` `:`, a leading underscore or only digits. Names of object types and families are allowed, as in the editor. `move_events_between_sheets` refuses a copy or move that would create such a clash, e.g. a copy of a global variable (the editor renames a pasted variable instead).
-- **No overwrite on create** — Create tools refuse to write an entity JSON file (object type, family, event sheet, layout) or a timeline file where one already exists, also one whose name differs only in case (an unregistered file, or one registered under another spelling). Nothing is backed up or replaced. Placeholder PNGs are not covered: `create_object` and the animation tools write them over an image file of the same name in `images/`, e.g. one left behind by a deleted object or animation.
+- **No overwrite on create** — Create tools refuse to write an entity JSON file (object type, family, event sheet, layout) or a timeline file where one already exists, also one whose name differs only in case (an unregistered file, or one registered under another spelling). Nothing is backed up or replaced. Placeholder PNGs are not covered: `create_object` and `add_animation_to_sprite` write them over an image file of the same name in `images/`, e.g. one left behind by a deleted object or animation; `add_frame_to_animation` renames such a file to `<file>.bak` first.
 - **File names kept** — Rewriting an existing file keeps its name on disk exactly, including case (e.g. `Layout1.json` registered as `layout1`); the `.bak` backup takes the same name.
 - **Text style preserved** — JSON is written the way Construct 3 saves it (tab indent). A file that already exists keeps its own line endings (e.g. CRLF from a git `core.autocrlf` checkout), exact trailing whitespace and BOM. A new file follows `project.c3proj`, then the first JSON file with line breaks in its target folder, then Construct 3's own style (LF, no trailing newline, no BOM). For files in Construct 3's tab layout, diffs show only the lines that changed; files indented another way (e.g. with spaces) are re-indented with tabs in full.
 
@@ -403,7 +404,7 @@ construct3-mcp/
 │   │   ├── templates.ts            # Object, event sheet, layout templates
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
-│   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes
+│   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes, frame image moves on frame insert/delete
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk

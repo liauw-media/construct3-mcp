@@ -711,6 +711,41 @@ describe('add_frame_to_animation', () => {
     const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
     expect(written.animations.items[0].frames).toHaveLength(2);
   });
+
+  it('refuses an index past the frame count before touching anything', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    const result = await server.callTool('add_frame_to_animation', { objectName: 'Hero', animationName: 'Animation 1', index: 2 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Frame index 2 is out of range. Animation "Animation 1" has 1 frame(s)');
+    expect(writer.calls).toHaveLength(0);
+  });
+
+  it('renames the image files from the index on one index up, then writes the placeholder and the object', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    writer.imageFiles = ['hero-animation 1-000.png'];
+    await server.callTool('add_frame_to_animation', { objectName: 'Hero', animationName: 'Animation 1', index: 0 });
+    expect(writer.calls.map(c => c.method)).toEqual(['listImageFiles', 'renameImageFiles', 'writeImageFiles', 'writeEntityFile']);
+    expect(writer.callsFor('renameImageFiles')[0].args[0]).toEqual([{ from: 'hero-animation 1-000.png', to: 'hero-animation 1-001.png' }]);
+    expect((writer.callsFor('writeImageFiles')[0].args[0] as Array<{ frameIndex: number }>)[0].frameIndex).toBe(0);
+  });
+
+  it('names what could not be rolled back when the rollback fails', async () => {
+    const { server, writer } = setup({ objects: new Map([['Hero', makeSpriteObj()]]) });
+    writer.imageFiles = ['hero-animation 1-000.png'];
+    writer.writeEntityFile = async () => {
+      throw new EntityWriteError(new Error('Post-write verification failed for "Hero"'), '/mock/backup/objectTypes/Hero.json.bak');
+    };
+    writer.restoreEntityFile = async () => { throw new Error('EPERM'); };
+    let renameCalls = 0;
+    writer.renameImageFiles = async () => {
+      if (++renameCalls === 2) throw new Error('EBUSY');
+    };
+
+    const result = await server.callTool('add_frame_to_animation', { objectName: 'Hero', animationName: 'Animation 1', index: 0 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Post-write verification failed for "Hero". Rolling back failed for: '
+      + '/mock/backup/objectTypes/Hero.json; image files (EBUSY).');
+  });
 });
 
 // ─── delete_frame_from_animation ─────────────────────────
@@ -746,6 +781,20 @@ describe('delete_frame_from_animation', () => {
     const written = writer.callsFor('writeEntityFile')[0].args[2] as any;
     expect(written.animations.items[0].frames).toHaveLength(1);
     expect(written.animations.items[0].frames[0].imageSpriteId).toBe(2);
+  });
+
+  it('keeps the deleted frame\'s image as .bak and renames the later ones one index down before writing the object', async () => {
+    const hero = makeSpriteObj();
+    hero.animations.items[0].frames = [0, 1, 2].map(() => ({ width: 100, height: 100, originX: 0.5, originY: 0.5 }));
+    const { server, writer } = setup({ objects: new Map([['Hero', hero]]) });
+    writer.imageFiles = ['hero-animation 1-000.png', 'hero-animation 1-001.png', 'hero-animation 1-002.png'];
+    const result = await server.callTool('delete_frame_from_animation', { objectName: 'Hero', animationName: 'Animation 1', frameIndex: 1 });
+    expect(parseResult(result).success).toBe(true);
+    expect(writer.calls.map(c => c.method)).toEqual(['listImageFiles', 'renameImageFiles', 'writeEntityFile']);
+    expect(writer.callsFor('renameImageFiles')[0].args[0]).toEqual([
+      { from: 'hero-animation 1-001.png', to: 'hero-animation 1-001.png.bak' },
+      { from: 'hero-animation 1-002.png', to: 'hero-animation 1-001.png' },
+    ]);
   });
 
   it('blocks deletion of last frame', async () => {

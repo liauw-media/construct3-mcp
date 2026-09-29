@@ -16,6 +16,7 @@ import { resetProjectIndex } from './analyzers/index-builder.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from './templates.js';
 import { generatePlaceholderPng, getImageFileName } from './png-generator.js';
 import { applyJsonTextStyle, jsonTextStyleOf, parseJsonText, resolveJsonTextStyle } from './json-format.js';
+import { simulateImageRenames } from './animation-rename.js';
 
 /** Maximum entity file size we'll write (5MB — well above any real C3 entity) */
 const MAX_WRITE_SIZE = 5 * 1024 * 1024;
@@ -75,10 +76,52 @@ export class EntityWriteError extends Error {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = 'EntityWriteError';
   }
+
+  /**
+   * The write replaced the file, but the post-write check found other valid
+   * JSON there: another write to the same file landed during this one, and
+   * the file holds that write's content (see ConcurrentWriteError).
+   */
+  get changedByOtherWrite(): boolean {
+    return this.cause instanceof ConcurrentWriteError;
+  }
+}
+
+/**
+ * The post-write check read back valid JSON other than the text written:
+ * another write to the same file (e.g. a tool call running in parallel)
+ * landed after this one.
+ */
+export class ConcurrentWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConcurrentWriteError';
+  }
+}
+
+/**
+ * A lock: the function it returns runs each `fn` after every `fn` passed to
+ * it before has finished, in call order.
+ */
+function createLock(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let tail: Promise<void> = Promise.resolve();
+  return async <T>(fn: () => Promise<T>): Promise<T> => {
+    let release!: () => void;
+    const next = new Promise<void>(resolve => { release = resolve; });
+    const prev = tail;
+    tail = next;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
 }
 
 export class Construct3ProjectWriter {
-  private projectLock: Promise<void> = Promise.resolve();
+  private readonly projectLock = createLock();
+  private readonly animationLock = createLock();
 
   constructor(
     private reader: Construct3ProjectReader,
@@ -89,16 +132,22 @@ export class Construct3ProjectWriter {
    * Serialize access to the .c3proj file to prevent lost-update races.
    */
   private async withProjectLock<T>(fn: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const next = new Promise<void>(resolve => { release = resolve; });
-    const prev = this.projectLock;
-    this.projectLock = next;
-    await prev;
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
+    return this.projectLock(fn);
+  }
+
+  /**
+   * Run `fn` after every earlier withAnimationLock call has finished. The
+   * animation tools take this lock for their whole call: each one reads a
+   * Sprite's object file, changes its animations or frames, and writes it
+   * back, and several rename or write frame image files in images/, whose
+   * names hold the frame index. Run in parallel, one could write the object
+   * back without the frames another one added, while that one had already
+   * moved the image files, or plan renames against files another one is
+   * moving and, rolling back, rename a file over one the other moved there.
+   * `fn` must read what it changes inside the lock.
+   */
+  async withAnimationLock<T>(fn: () => Promise<T>): Promise<T> {
+    return this.animationLock(fn);
   }
 
   /**
@@ -171,7 +220,7 @@ export class Construct3ProjectWriter {
       throw new Error(`Post-write verification failed for "${entityName}": file may be corrupted. A .bak backup exists. Error: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (content !== expected) {
-      throw new Error(`Post-write verification failed for "${entityName}": the file was changed by another write during this one (concurrent writes to the same file?). It holds valid JSON, but not this call's changes. Re-read it and retry.`);
+      throw new ConcurrentWriteError(`Post-write verification failed for "${entityName}": the file was changed by another write during this one (concurrent writes to the same file?). It holds valid JSON, but not this call's changes. Re-read it and retry.`);
     }
   }
 
@@ -529,6 +578,27 @@ export class Construct3ProjectWriter {
     }
   }
 
+  /**
+   * Delete a file directly in images/ (`name` relative to that folder).
+   * Returns false when there is no such file; a name that cannot be a file
+   * directly in images/ (a path separator, "." or "..") names none.
+   */
+  async deleteImageFile(name: string): Promise<boolean> {
+    let filePath: string;
+    try {
+      filePath = this.imageFilePath(name);
+    } catch {
+      return false;
+    }
+    try {
+      await unlink(filePath);
+      return true;
+    } catch (e: unknown) {
+      if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return false;
+      throw e;
+    }
+  }
+
   /** Names of the entries in the project's images/ folder (none when there is no such folder). */
   async listImageFiles(): Promise<string[]> {
     try {
@@ -540,23 +610,24 @@ export class Construct3ProjectWriter {
   }
 
   /**
-   * Rename files in images/ (`from` and `to` are names in that folder), all
-   * or nothing: when a rename fails, the files renamed before it are renamed
-   * back and the call throws. Nothing is renamed when a `to` is taken by
-   * another file, also one whose name differs only in case (on Windows and
-   * macOS that is the same file). `to` may differ from `from` only in case.
+   * Rename files in images/ (`from` and `to` are names in that folder), in
+   * order and all or nothing: when a rename fails, the files renamed before
+   * it are renamed back, last first, and the call throws. Nothing is renamed
+   * when a `to` is taken by another file at the point its rename runs, also
+   * one whose name differs only in case (on Windows and macOS that is the
+   * same file); a name an earlier rename of the list moved away is free, so
+   * files can move along a chain (002 → 003, then 001 → 002). `to` may differ
+   * from `from` only in case. To undo a call, rename each `to` back to its
+   * `from` in reverse order.
    */
   async renameImageFiles(renames: ReadonlyArray<{ from: string; to: string }>): Promise<void> {
     const moves = renames.map(r => ({ ...r, fromPath: this.imageFilePath(r.from), toPath: this.imageFilePath(r.to) }));
     const existing = moves.length > 0 ? await this.listImageFiles() : [];
-    for (const [index, move] of moves.entries()) {
-      const taken = existing.find(f => f !== move.from && f.toLowerCase() === move.to.toLowerCase());
-      if (taken !== undefined) {
-        throw new Error(`Cannot rename images/${move.from} to images/${move.to}: images/${taken} already exists. No image file was renamed.`);
-      }
-      if (moves.findIndex(m => m.to.toLowerCase() === move.to.toLowerCase()) !== index) {
-        throw new Error(`Cannot rename two files to images/${move.to}. No image file was renamed.`);
-      }
+    const [clash] = simulateImageRenames(existing, moves).clashes;
+    if (clash !== undefined) {
+      throw new Error(clash.renamedThere
+        ? `Cannot rename two files to images/${clash.to}. No image file was renamed.`
+        : `Cannot rename images/${clash.from} to images/${clash.to}: images/${clash.occupant} already exists. No image file was renamed.`);
     }
 
     const done: typeof moves = [];

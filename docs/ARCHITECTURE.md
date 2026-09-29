@@ -137,9 +137,15 @@ class Construct3ProjectWriter {
   // Addon management
   ensureAddonRegistered(type, id): Promise<string | undefined>
 
-  // Placeholder images
+  // Placeholder images and frame image files in images/
   writeImageFile(objectName, animationName, frameIndex, pluginId?, width?, height?): Promise<string>
   writeImageFiles(files): Promise<string[]>
+  listImageFiles(): Promise<string[]>
+  renameImageFiles(renames): Promise<void>
+  deleteImageFile(name): Promise<boolean>
+
+  // Runs the animation tools one at a time
+  withAnimationLock(fn): Promise<T>
 
   // Helpers
   getSubfolderForEntity(category, name): string | undefined
@@ -152,11 +158,12 @@ class Construct3ProjectWriter {
 - **Backup**: `.bak` file created before every overwrite or delete
 - **Atomic write**: Content goes to a `.tmp` file that is then renamed into place; an existing file keeps its name on disk, including its case (`atomic-write.ts`)
 - **No overwrite on create**: Create tools pass `createOnly`, so a new entity is never written over a file that already exists, also one whose name differs only in case
-- **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write. A failure once the backup exists (while or after replacing the file) throws an `EntityWriteError` carrying the backup path, so a change that spans several files can restore this one too (`restoreEntityFile`)
+- **Post-write verification**: File read back, compared with the text that was written, and re-parsed; different content that still parses is reported as a concurrent write. A failure once the backup exists (while or after replacing the file) throws an `EntityWriteError` carrying the backup path, so a change that spans several files can restore this one too (`restoreEntityFile`); its `changedByOtherWrite` tells a concurrent write (a `ConcurrentWriteError` cause) from other failures, so the caller does not restore an old backup over another write's content
 - **Project lock**: The writer's read-modify-writes of `project.c3proj` (`addToProject`, `removeFromProject`, `updateProjectProperties`, addon auto-registration) share one lock, so parallel writer calls cannot lose each other's updates
+- **Animation lock**: The animation tools run each call under `withAnimationLock()` and read the object inside it, so parallel calls cannot move each other's frame image files or write a Sprite's object file without each other's frames. Other tools that write an object file do not take it
 - **Text style**: An existing file keeps its line endings, trailing whitespace and BOM; a new file follows `project.c3proj` (`json-format.ts`)
 - **Cache invalidation**: Reader caches, project index, and ID generator all reset (for the written project only)
-- **Image rollback**: `writeImageFiles()` deletes the images it already wrote when a later one fails
+- **Image rollback**: `writeImageFiles()` deletes the images it already wrote when a later one fails; `renameImageFiles()` renames files in order (a name an earlier rename freed can be reused, so frame images can move along a chain), refuses to replace a file, and renames everything back when one rename fails
 
 Timelines, `register_addon` / `unregister_addon` and the runtime tools write outside the writer, with fewer of these steps; the README's Safety Model lists the differences. None of them takes the project lock, and the timeline and addon tools use the same `project.c3proj.tmp` file as the writer, so running them in parallel with other writes can lose or fail a `project.c3proj` update. Run them one at a time.
 
@@ -204,7 +211,7 @@ Supporting modules next to the templates:
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
 | `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
 | `construct3/instance-behaviors.ts` | The behavior entries every layout instance carries (object and family behaviors, with default property values) |
-| `construct3/animation-rename.ts` | Sprite animations in animation folders, and what renaming one changes: frame image file names, `initial-animation` of layout instances, event sheet strings naming it (counted for a warning) |
+| `construct3/animation-rename.ts` | Sprite animations in animation folders, and what renaming one changes: frame image file names, `initial-animation` of layout instances, event sheet strings naming it (counted for a warning); the frame image files that move one index up or down when a frame is inserted or deleted |
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
 | `construct3/layers.ts` | The layer tree of a layout: walks every layer and nested sub-layer and their instances (non-world instances included), finds layers and instances, compares layer names ignoring case; every walk over layers or layout instances goes through it |
 | `construct3/path-utils.ts` | `resolveProjectPath()`: joins path segments and rejects paths that leave the project folder |
