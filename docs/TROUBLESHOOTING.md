@@ -164,6 +164,14 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 - *Its own file could not be parsed* (`"textSearch": "not-searched"`): `delete_object` or `delete_family` refuses because the object type's or family's own file is over the limit or not valid JSON, so its SID is unknown. Fix the file, or delete with `force: true`
 - A file saved as UTF-16 without a byte order mark, or in UTF-16BE, cannot be searched and refuses as `unreadable`; save it as UTF-8 (the editor does)
 
+### "The check ... stopped at its traversal limit"
+
+**Cause**: `delete_event_sheet`, `delete_event_from_sheet` or `move_events_between_sheets` looks for the uses of the functions and event variables it deletes or moves by walking the events of all event sheets, and stops after 100,000 events (sub-events included). In a project that large, the uses beyond that point are unknown, so the tool refuses with `delete_blocked` or `move_blocked`, as it does for a file it could not parse. Nothing was written. A sheet that defines no function or global variable, an event that removes neither, and a move of events that declare no event variable need no such check.
+
+**Solutions**:
+- Find the uses yourself: `get_function_map` lists the call sites of a function; for a variable, search the event sheet files for its name
+- Then use `force: true`; the warning says again that the check stopped at its limit
+
 ### "Cannot generate a safe UID: project file(s) could not be scanned"
 
 **Cause**: `add_instance_to_layout` or `create_object` (for a global plugin) needs a new UID, which must be above every UID in the project. A layout or object type named in the error is registered in `project.c3proj` and exists, but could not be read at all, not even as text (e.g. a folder where the file should be, no read access, or a file too large to read into memory as text, about 512MB), so its UIDs are unknown. Nothing was written. Files over the 10MB read limit (up to that size) and files with invalid JSON do not cause this: they are scanned as text. A registered name whose file does not exist does not cause it either.

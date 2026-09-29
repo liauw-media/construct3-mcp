@@ -40,7 +40,9 @@
 
 import { findExpressionCalls, findExpressionIdentifiers, mappedFunctionName, parameterValues } from '../event-shapes.js';
 
-const MAX_NODES = 100_000;
+/** Events (sub-events included, across all event sheets) a check visits before it stops, reporting complete: false */
+export const REFERENCE_CHECK_MAX_EVENTS = 100_000;
+const MAX_NODES = REFERENCE_CHECK_MAX_EVENTS;
 const MAX_DEPTH = 50;
 
 /**

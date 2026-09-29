@@ -85,6 +85,7 @@ import {
   mapCopiedAces,
   definesFunctionsOrVariables,
   countDeleteReferences,
+  REFERENCE_CHECK_MAX_EVENTS,
   namesVisibleToOtherSheets,
   type DeleteReference,
   type DeleteReferenceKind,
@@ -135,6 +136,15 @@ const DANGLING_KIND_LABELS: Record<DeleteReferenceKind, string> = {
 };
 
 /** What happens to the uses a move takes out of their variable's scope (see findVariableReferencesLostByChange). */
+/**
+ * Why a reference check that stopped at its traversal limit refuses without
+ * force: what it did not reach is unknown, as for a file it could not parse.
+ */
+function traversalLimitReason(checked: string): string {
+  return `The check for ${checked} stopped at its traversal limit (${REFERENCE_CHECK_MAX_EVENTS.toLocaleString('en-US')} events ` +
+    'across all event sheets), so uses further on are unknown.';
+}
+
 const SCOPE_LOSS_CONSEQUENCE =
   'A variable that is not at the top level of a sheet is local: only the events beside it and below them see it. ' +
   'After loading a project, Construct 3 resolves these names and throws "cannot find event variable" when one is ' +
@@ -550,7 +560,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_sheet',
-    'Delete an event sheet from the project (checks references first; refused without force while there are any): sheets that include it, layouts bound to it, and uses in other event sheets of the functions and global variables it defines (Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name; scripts are not checked). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name, and event sheets also for those functions and global variables: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles), as does a sheet to delete that could not be parsed itself.',
+    'Delete an event sheet from the project (checks references first; refused without force while there are any): sheets that include it, layouts bound to it, and uses in other event sheets of the functions and global variables it defines (Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name; scripts are not checked). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name, and event sheets also for those functions and global variables: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles), as does a sheet to delete that could not be parsed itself or a check that stopped at its traversal limit (100,000 events).',
     {
       name: z.string().max(200).describe('Event sheet name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references; the uses of its functions and global variables left behind are listed in "references" and a warning)'),
@@ -613,12 +623,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         ];
         const unscannedBlock = blocksWithoutForce(unscanned);
         const outsideSheet = `in other event sheets than "${args.name}"`;
+        const checked = 'uses of the functions and global variables the sheet defines';
 
-        if ((hasRefs || danglingCount > 0 || unscannedBlock) && !args.force) {
+        if ((hasRefs || danglingCount > 0 || unscannedBlock || !dangling.complete) && !args.force) {
           const reasons = [
             ...(hasRefs ? ['Event sheet is still referenced.'] : []),
             ...(danglingCount > 0 ? [`${describeDanglingReferences(dangling, outsideSheet)} ${DANGLING_REFERENCE_CONSEQUENCE}`] : []),
             ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+            ...(!dangling.complete ? [traversalLimitReason(checked)] : []),
           ];
           return toolResult({
             success: false,
@@ -645,7 +657,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             `${DANGLING_REFERENCE_CONSEQUENCE} Fix them before opening the project in Construct 3.`);
         }
         if (!dangling.complete) {
-          warnings.push('The check for uses of the functions and global variables the sheet defines stopped at its traversal limit; uses further on were not checked.');
+          warnings.push(`Deleted with force=true: ${traversalLimitReason(checked)}`);
         }
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
@@ -676,7 +688,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_from_sheet',
-    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Other event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the deleted functions and global variables: a match (a possible use), or such a sheet that cannot be read at all, also refuses without force (listed in unscannedFiles). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
+    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Other event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the deleted functions and global variables: a match (a possible use), or such a sheet that cannot be read at all, also refuses without force (listed in unscannedFiles), as does a check that stopped at its traversal limit (100,000 events). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
     {
       sheetName: z.string().max(200).describe('Target event sheet, as registered (letter case included)'),
       sid: z.number().int().positive().optional().describe('SID of the event to delete (for block, group, variable, function events)'),
@@ -796,10 +808,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
         const danglingCount = countDeleteReferences(dangling);
         const unscannedBlock = blocksWithoutForce(unscanned);
-        if ((danglingCount > 0 || unscannedBlock) && !args.force) {
+        const checked = 'references to the deleted functions and variables';
+        if ((danglingCount > 0 || unscannedBlock || !dangling.complete) && !args.force) {
           const reasons = [
             ...(danglingCount > 0 ? [`${describeDanglingReferences(dangling)} ${DANGLING_REFERENCE_CONSEQUENCE}`] : []),
             ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+            ...(!dangling.complete ? [traversalLimitReason(checked)] : []),
           ];
           return toolResult({
             success: false,
@@ -818,7 +832,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
         warnings.push(...unscannedWarnings(unscanned, args.dryRun ? 'Would delete' : 'Deleted'));
         if (!dangling.complete) {
-          warnings.push('The check for references to the deleted functions and variables stopped at its traversal limit; references further on were not checked.');
+          warnings.push(`${args.dryRun ? 'Would delete' : 'Deleted'} with force=true: ${traversalLimitReason(checked)}`);
         }
 
         // Report children for groups
@@ -1078,7 +1092,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'move_events_between_sheets',
-    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet. Refuses (unless force=true) a move that takes an event variable out of the scope of events that use it, e.g. a used global variable moved into a group (targetGroupPath), where it is a local variable; the uses are listed. Other event sheets that could not be parsed are searched as text for such a global variable.',
+    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet. Refuses (unless force=true) a move that takes an event variable out of the scope of events that use it, e.g. a used global variable moved into a group (targetGroupPath), where it is a local variable; the uses are listed. Other event sheets that could not be parsed are searched as text for such a global variable; a check that stopped at its traversal limit (100,000 events) also refuses without force.',
     {
       sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from, as registered (letter case included)'),
       targetSheet: z.string().max(200).describe('Event sheet to copy/move events into, as registered (letter case included)'),
@@ -1295,12 +1309,14 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
         const unscannedBlock = blocksWithoutForce(unscanned);
         const whereLost = 'where it is no longer in scope after the move';
-        if ((lostCount > 0 || unscannedBlock) && !args.force) {
+        const checked = 'uses of the moved event variables';
+        if ((lostCount > 0 || unscannedBlock || !lost.complete) && !args.force) {
           sourceSheetData.events = sourceEvents as unknown as C3Event[];
           targetSheetData.events = targetBefore;
           const reasons = [
             ...(lostCount > 0 ? [`${describeDanglingReferences(lost, whereLost)} ${SCOPE_LOSS_CONSEQUENCE}`] : []),
             ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+            ...(!lost.complete ? [traversalLimitReason(checked)] : []),
           ];
           return toolResult({
             success: false,
@@ -1323,7 +1339,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             `${SCOPE_LOSS_CONSEQUENCE} Fix them before opening the project in Construct 3.`);
         }
         if (!lost.complete) {
-          warnings.push('The check for uses of the moved event variables stopped at its traversal limit; uses further on were not checked.');
+          warnings.push(`Moved with force=true: ${traversalLimitReason(checked)}`);
         }
         warnings.push(...unscannedWarnings(unscanned, 'Moved'));
         const sharedSids = copiedSidsWarning(args.targetSheet, targetSheetData.events as unknown as Record<string, unknown>[], copiedEvents);

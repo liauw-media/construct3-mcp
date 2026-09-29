@@ -18,6 +18,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `move_events_between_sheets` refuses to copy a function block (`deleteSource: false`, also inside a copied group): the copy would share its name with the original. Move it instead; the editor renames a pasted function (#38).
 - `add_event_to_sheet` refuses a `functionName` the editor refuses (see Fixed), so a call that worked before can now fail (#38).
 - `delete_event_sheet` returns `references.callers` and `references.variableReferences` (as `delete_event_from_sheet` does) when other sheets use the functions or global variables of the sheet, next to `includedBy` and `boundLayouts`; with `force` it returns them in `references` as well (#58).
+- `delete_event_from_sheet` refuses without `force`, also on a dry run, when its check for uses of the functions and event variables it deletes stops at its traversal limit (100,000 events, sub-events included, across all event sheets); before, it went ahead with a warning. `delete_event_sheet` and the scope check of `move_events_between_sheets` (both new, see Fixed) do the same: the uses beyond the limit are unknown, as in a file the checks could not parse, which already refused without `force` (#58, #38).
 - `add_event_to_sheet`, `delete_event_from_sheet`, `update_event_variable` and `move_events_between_sheets` take a sheet name only as registered (see Fixed), so a call with a name in another letter case that worked on Windows and macOS now fails, naming the registered sheet (#38).
 
 ### Fixed

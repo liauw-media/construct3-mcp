@@ -363,6 +363,64 @@ describe('sheet names that differ from the registered name in case (#38)', () =>
   });
 });
 
+// ─── reference checks at their traversal limit (#58, #38) ───
+
+describe('reference checks that stop at their traversal limit refuse without force (#58, #38)', () => {
+  /** A registered event sheet with more events than the checks visit (100,000), as compact JSON (about 3MB). */
+  async function addHugeSheet(name: string): Promise<void> {
+    await register(name);
+    const events = Array.from({ length: 100_001 }, () => ({ eventType: 'comment', text: '' }));
+    await writeFile(join(tmpDir, 'eventSheets', `${name}.json`), JSON.stringify({ name, events, sid: 750000000000999 }));
+  }
+  const LIMIT_REACHED = 'stopped at its traversal limit (100,000 events across all event sheets), so uses further on are unknown';
+
+  it('delete_event_sheet refuses a sheet that defines functions or globals, and deletes it with force', async () => {
+    await addSheet('Lib', [fn('Spawn', 786000000000001), variable('Score', 786000000000002)]);
+    await addSheet('Plain', [block(786000000000003, [setX('1', 786000000000004)])]);
+    await addHugeSheet('Big');
+    await startServer();
+
+    const blocked = await call('delete_event_sheet', { name: 'Lib' });
+    expect(blocked.action).toBe('delete_blocked');
+    expect(blocked.message).toContain(`The check for uses of the functions and global variables the sheet defines ${LIMIT_REACHED}`);
+    expect(await sheetExists('Lib')).toBe(true);
+
+    const forced = await call('delete_event_sheet', { name: 'Lib', force: true });
+    expect(forced.action).toBe('deleted');
+    expect(forced.warnings).toContainEqual(expect.stringContaining(`Deleted with force=true: The check for uses of the functions and global variables the sheet defines ${LIMIT_REACHED}`));
+    expect(await sheetExists('Lib')).toBe(false);
+
+    // A sheet that defines neither needs no such check
+    expect((await call('delete_event_sheet', { name: 'Plain' })).action).toBe('deleted');
+  });
+
+  it('move_events_between_sheets refuses to move an event variable into a group, and moves it with force', async () => {
+    const main = await readSheet('MainSheet');
+    main.events.unshift(variable('Score', 786000000000011));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await addSheet('Other', [group('G', 786000000000012, [])]);
+    await addHugeSheet('Big');
+    await startServer();
+    const before = await readFile(join(tmpDir, 'eventSheets', 'Other.json'), 'utf-8');
+    const move = { sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [786000000000011], deleteSource: true, targetGroupPath: 'G' };
+
+    const blocked = await call('move_events_between_sheets', move);
+    expect(blocked.action).toBe('move_blocked');
+    expect(blocked.message).toContain(`The check for uses of the moved event variables ${LIMIT_REACHED}`);
+    expect(await readFile(join(tmpDir, 'eventSheets', 'Other.json'), 'utf-8')).toBe(before);
+
+    const forced = await call('move_events_between_sheets', { ...move, force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings).toContainEqual(expect.stringContaining(`Moved with force=true: The check for uses of the moved event variables ${LIMIT_REACHED}`));
+    expect((await readSheet('Other')).events[0].children.map((e: any) => e.name)).toEqual(['Score']);
+
+    // Events that declare no variable need no such check
+    expect((await call('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [400000000000003], deleteSource: true, targetGroupPath: 'G',
+    })).success).toBe(true);
+  });
+});
+
 // ─── add_event_to_sheet results (#38) ───────────────────────
 
 describe('add_event_to_sheet returns what it created (#38)', () => {
