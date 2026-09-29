@@ -20,10 +20,13 @@ import { simulateImageRenames } from './animation-rename.js';
 import {
   currentToolCall,
   fileKey,
+  noteFileWritten,
   sameFileState,
   statFileState,
   StaleFileError,
+  type CallChange,
   type FileState,
+  type ToolCallScope,
 } from './disk-state.js';
 
 /** Maximum entity file size we'll write (5MB — well above any real C3 entity) */
@@ -113,11 +116,41 @@ export class ConcurrentWriteError extends Error {
  */
 const MAX_PROJECT_UPDATE_ROUNDS = 3;
 
-/** Why a write to a file that changed on disk since it was read was refused. */
-function staleFileMessage(label: string): string {
-  return `${label} was changed on disk after this server read it (saved in the Construct 3 editor, restored with git, ` +
-    'or written by another program or a tool call running in parallel). It was not written, so that change is kept. ' +
-    'Run the tool again: it reads the file as it is now.';
+/** What undoing a tool call's earlier changes did (see Construct3ProjectWriter.undoCallChanges). */
+interface UndoReport {
+  /** Files put back as they were before the call. */
+  restored: string[];
+  /** Files that could not be put back, with their backup (null: the file did not exist before the call). */
+  left: Array<{ label: string; backup: string | null }>;
+}
+
+/**
+ * Why a write to a file that changed on disk since it was read was refused,
+ * and, when the tool call had changed other files before, what became of
+ * those.
+ */
+function staleFileMessage(label: string, undo?: UndoReport): string {
+  const cause = `${label} was changed on disk after this server read it (saved in the Construct 3 editor, restored with git, ` +
+    'or written by another program or a tool call running in parallel). It was not written, so that change is kept.';
+  if (!undo || (undo.restored.length === 0 && undo.left.length === 0)) {
+    return `${cause} Run the tool again: it reads the file as it is now.`;
+  }
+  if (undo.left.length === 0) {
+    return `${cause} The files this tool call had already changed were put back as they were before the call ` +
+      `(${undo.restored.join(', ')}), so the call changed nothing. Run the tool again: it reads the files as they are now.`;
+  }
+  const left = undo.left.map(f => (f.backup
+    ? `${f.label} (its state from before the call is in ${f.backup})`
+    : `${f.label} (it did not exist before the call)`));
+  return `${cause} This tool call had already changed other files, and not all of them could be put back: ` +
+    (undo.restored.length > 0 ? `put back as they were before the call: ${undo.restored.join(', ')}; ` : '') +
+    `left as they are (changed on disk again after this call wrote them, or their backup was replaced): ${left.join(', ')}. ` +
+    'Check the project (validate_project, git diff) before you run the tool again.';
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && (error as { code?: unknown }).code === 'ENOENT';
 }
 
 /**
@@ -199,22 +232,119 @@ export class Construct3ProjectWriter {
     const scope = currentToolCall();
     const key = fileKey(filePath);
     const earlier = scope?.backups.get(key);
-    if (earlier !== undefined) return earlier;
+    if (earlier !== undefined) return earlier.path;
     const backupPath = filePath + '.bak';
     try {
       await stat(filePath);
     } catch (e: unknown) {
       // File doesn't exist yet (new entity) — no backup needed
-      if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') {
-        scope?.backups.set(key, backupPath);
+      if (isNotFound(e)) {
+        scope?.backups.set(key, { path: backupPath, existed: false, state: null });
         return backupPath;
       }
       throw new Error(`Cannot access file for backup: ${e instanceof Error ? e.message : String(e)}`);
     }
     // File exists — backup must succeed or we abort
     await copyFile(filePath, backupPath);
-    scope?.backups.set(key, backupPath);
+    if (scope) scope.backups.set(key, { path: backupPath, existed: true, state: await statFileState(backupPath) });
     return backupPath;
+  }
+
+  /**
+   * Record in the running tool call that it changed (wrote or deleted) a
+   * file it backed up before, so a refused write later in the call can put
+   * it back (undoCallChanges).
+   */
+  private noteCallChange(filePath: string, isProjectFile = false): void {
+    const scope = currentToolCall();
+    if (!scope) return;
+    const key = fileKey(filePath);
+    const backup = scope.backups.get(key);
+    if (backup === undefined || scope.changes.has(key)) return;
+    scope.changes.set(key, { path: filePath, label: this.projectRelative(filePath), backup, isProjectFile });
+  }
+
+  /**
+   * Undo what the running tool call changed before one of its writes was
+   * refused (#51), so the call leaves the project as it found it: each file
+   * it wrote or deleted through the writer is put back from its backup,
+   * which holds the state from before the call, last change first, and a
+   * file the call created is removed again. A file that changed on disk
+   * after the call wrote it, or whose backup another call replaced
+   * meanwhile, is left as it is. Runs outside the writer's locks; takes the
+   * lock of each file it puts back.
+   */
+  private async undoCallChanges(scope: ToolCallScope): Promise<UndoReport> {
+    const report: UndoReport = { restored: [], left: [] };
+    const changes = [...scope.changes].reverse();
+    scope.changes.clear();
+    let projectPutBack = false;
+    for (const [key, change] of changes) {
+      let putBack = false;
+      try {
+        putBack = change.isProjectFile
+          ? await this.withProjectLock(() => this.putBack(key, change, scope))
+          : await this.withFileLock(change.path, () => this.putBack(key, change, scope));
+      } catch {
+        putBack = false;
+      }
+      if (putBack) {
+        report.restored.push(change.backup.existed ? change.label : `${change.label} (deleted: the call had created it)`);
+        if (change.isProjectFile) projectPutBack = true;
+      } else {
+        report.left.push({ label: change.label, backup: change.backup.existed ? this.projectRelative(change.backup.path) : null });
+      }
+    }
+    if (projectPutBack) {
+      try {
+        await this.reader.reloadProject();
+      } catch {
+        // Not valid JSON right now: the next tool call's check loads it again
+      }
+      resetProjectIndex(this.reader);
+    }
+    return report;
+  }
+
+  /**
+   * Put one file the tool call changed back as it was before the call.
+   * False when it changed on disk since the call wrote it, or its backup no
+   * longer holds the state from before the call.
+   */
+  private async putBack(key: string, change: CallChange, scope: ToolCallScope): Promise<boolean> {
+    const asLeft = scope.reads.get(key);
+    if (asLeft === undefined || !sameFileState(await statFileState(change.path), asLeft)) return false;
+    if (!change.backup.existed) {
+      try {
+        await unlink(change.path);
+      } catch (e) {
+        if (!isNotFound(e)) throw e;
+      }
+      if (change.isProjectFile) noteFileWritten(key, null);
+      else this.afterOwnWrite(change.path, null);
+      return true;
+    }
+    if (!sameFileState(await statFileState(change.backup.path), change.backup.state)) return false;
+    const content = await readFile(change.backup.path);
+    await this.atomicWrite(change.path, content);
+    const state = await statFileState(change.path);
+    if (change.isProjectFile) noteFileWritten(key, state);
+    else this.afterOwnWrite(change.path, state, content.toString('utf-8'));
+    return true;
+  }
+
+  /**
+   * A write of the running tool call was refused as stale (StaleFileError):
+   * undo what the call changed before it (undoCallChanges) and return the
+   * refusal with what became of those files. Any other error is returned as
+   * it is. Called outside the writer's locks.
+   */
+  private async refusalAfterUndo(error: unknown): Promise<unknown> {
+    if (!(error instanceof StaleFileError) || error.undone) return error;
+    const scope = currentToolCall();
+    if (!scope || scope.changes.size === 0) return error;
+    const undo = await this.undoCallChanges(scope);
+    return new StaleFileError(staleFileMessage(error.file, undo), error.file, true);
   }
 
   /**
@@ -231,7 +361,7 @@ export class Construct3ProjectWriter {
     if (asRead === undefined) return;
     const now = await statFileState(filePath);
     if (!sameFileState(now, asRead)) {
-      throw new StaleFileError(staleFileMessage(label));
+      throw new StaleFileError(staleFileMessage(label), label);
     }
   }
 
@@ -242,11 +372,13 @@ export class Construct3ProjectWriter {
    * bridge) after deciding on the loaded project: they run it before their
    * first write. The writer's own updates of project.c3proj take such a
    * change in and merge into it instead (updateProjectFile), since they run
-   * after the call wrote other files.
+   * after the call wrote other files. Should the call have changed files
+   * through the writer before, they are put back first (undoCallChanges).
    */
   async assertProjectFileCurrent(): Promise<void> {
     if (await this.reader.projectFileChanged()) {
-      throw new StaleFileError(staleFileMessage('project.c3proj'));
+      const label = this.projectRelative(this.reader.getProjectPath());
+      throw await this.refusalAfterUndo(new StaleFileError(staleFileMessage(label), label));
     }
   }
 
@@ -332,25 +464,33 @@ export class Construct3ProjectWriter {
    */
   private async updateProjectFile(change: (project: any) => boolean | void): Promise<string | undefined> {
     const projectPath = this.reader.getProjectPath();
-    return this.withProjectLock(async () => {
-      await this.reader.checkProjectFile();
-      for (let round = 0; round < MAX_PROJECT_UPDATE_ROUNDS; round++) {
-        const asRead = await statFileState(projectPath);
-        const content = await readFile(projectPath, 'utf-8');
-        const project = parseJsonText(content);
-        if (change(project) === false) return undefined;
-        const text = applyJsonTextStyle(this.validateJsonData(project, 'project.c3proj'), jsonTextStyleOf(content));
+    const label = this.projectRelative(projectPath);
+    try {
+      return await this.withProjectLock(async () => {
+        await this.reader.checkProjectFile();
+        for (let round = 0; round < MAX_PROJECT_UPDATE_ROUNDS; round++) {
+          const asRead = await statFileState(projectPath);
+          const content = await readFile(projectPath, 'utf-8');
+          const project = parseJsonText(content);
+          if (change(project) === false) return undefined;
+          const text = applyJsonTextStyle(this.validateJsonData(project, 'project.c3proj'), jsonTextStyleOf(content));
 
-        const backupPath = await this.createBackup(projectPath);
-        // Changed since the read: read it again, so that change is kept
-        if (!sameFileState(await statFileState(projectPath), asRead)) continue;
-        await this.atomicWrite(projectPath, text);
-        await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
-        await this.reader.reloadProject();
-        return backupPath;
-      }
-      throw new StaleFileError(staleFileMessage('project.c3proj'));
-    });
+          const backupPath = await this.createBackup(projectPath);
+          // Changed since the read: read it again, so that change is kept
+          if (!sameFileState(await statFileState(projectPath), asRead)) continue;
+          await this.atomicWrite(projectPath, text);
+          const state = await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+          noteFileWritten(fileKey(projectPath), state);
+          this.noteCallChange(projectPath, true);
+          await this.reader.reloadProject();
+          return backupPath;
+        }
+        throw new StaleFileError(staleFileMessage(label), label);
+      });
+    } catch (error) {
+      // Refused as stale: first put back what the call changed before
+      throw await this.refusalAfterUndo(error);
+    }
   }
 
   /** Path of an entity's JSON file, confined to the project directory. */
@@ -400,28 +540,34 @@ export class Construct3ProjectWriter {
     // Ensure directory exists
     await mkdir(dirname(requested), { recursive: true });
     const filePath = await existingSpelling(requested);
-    return this.withFileLock(filePath, async () => {
-      await this.assertUnchangedSinceRead(filePath, this.projectRelative(filePath));
+    try {
+      return await this.withFileLock(filePath, async () => {
+        await this.assertUnchangedSinceRead(filePath, this.projectRelative(filePath));
 
-      // Keep the existing file's text style; a new file follows the project's
-      const style = await resolveJsonTextStyle(filePath, this.reader.getProjectPath(), dirname(filePath));
-      const text = applyJsonTextStyle(json, style);
+        // Keep the existing file's text style; a new file follows the project's
+        const style = await resolveJsonTextStyle(filePath, this.reader.getProjectPath(), dirname(filePath));
+        const text = applyJsonTextStyle(json, style);
 
-      const backupPath = await this.createBackup(filePath);
-      let state: FileState;
-      try {
-        await this.atomicWrite(filePath, text);
+        const backupPath = await this.createBackup(filePath);
+        let state: FileState;
+        try {
+          await this.atomicWrite(filePath, text);
 
-        // Post-write verification
-        state = await this.verifyWrittenFile(filePath, name, text);
-      } catch (error) {
-        // The file may have been replaced already: tell the caller where the backup is
-        throw new EntityWriteError(error, backupPath);
-      }
+          // Post-write verification
+          state = await this.verifyWrittenFile(filePath, name, text);
+        } catch (error) {
+          // The file may have been replaced already: tell the caller where the backup is
+          throw new EntityWriteError(error, backupPath);
+        }
 
-      this.afterOwnWrite(filePath, state, text);
-      return backupPath;
-    });
+        this.afterOwnWrite(filePath, state, text);
+        this.noteCallChange(filePath);
+        return backupPath;
+      });
+    } catch (error) {
+      // Refused as stale: first put back what the call changed before
+      throw await this.refusalAfterUndo(error);
+    }
   }
 
   /** Run `fn` after every earlier withFileLock call for the same file has finished. */
@@ -449,22 +595,28 @@ export class Construct3ProjectWriter {
     subfolder?: string,
   ): Promise<string> {
     const filePath = this.entityFilePath(category, name, subfolder);
-    return this.withFileLock(filePath, async () => {
-      await this.assertUnchangedSinceRead(filePath, this.projectRelative(filePath));
+    try {
+      return await this.withFileLock(filePath, async () => {
+        await this.assertUnchangedSinceRead(filePath, this.projectRelative(filePath));
 
-      const backupPath = await this.createBackup(filePath);
-      try {
-        await unlink(filePath);
-      } catch (e: unknown) {
-        // File already gone — that's the desired end state
-        if (!(e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT')) {
-          throw e;
+        const backupPath = await this.createBackup(filePath);
+        let deleted = true;
+        try {
+          await unlink(filePath);
+        } catch (e: unknown) {
+          // File already gone — that's the desired end state
+          if (!isNotFound(e)) throw e;
+          deleted = false;
         }
-      }
 
-      this.afterOwnWrite(filePath, null);
-      return backupPath;
-    });
+        this.afterOwnWrite(filePath, null);
+        if (deleted) this.noteCallChange(filePath);
+        return backupPath;
+      });
+    } catch (error) {
+      // Refused as stale: first put back what the call changed before
+      throw await this.refusalAfterUndo(error);
+    }
   }
 
   /**

@@ -7,7 +7,8 @@
  *   the state from before the call in project.c3proj.bak.
  * - Changes made outside the server between two calls (git restore, a save
  *   in the Construct 3 editor) are seen by the next call.
- * - A write never replaces a change made on disk after the call read the file.
+ * - A write never replaces a change made on disk after the call read the file;
+ *   a call refused that way after it changed other files puts those back.
  * - The writer's own updates of project.c3proj merge a change made on disk.
  * - The ID generator keeps its scan across the server's own writes and scans
  *   again after an external change, without handing out an ID twice.
@@ -77,6 +78,18 @@ function saveProjectInEditor(): void {
   const project = JSON.parse(readFileSync(path, 'utf-8'));
   project.properties.author = 'Editor';
   writeFileSync(path, JSON.stringify(project, null, '\t'), 'utf-8');
+}
+
+/** A comment event the editor added to an event sheet (synchronous). */
+function saveSheetInEditor(sheet: string, text = 'saved in the editor'): void {
+  const path = join(dir, 'eventSheets', `${sheet}.json`);
+  const data = JSON.parse(readFileSync(path, 'utf-8'));
+  data.events.push({ eventType: 'comment', text });
+  writeFileSync(path, JSON.stringify(data, null, '\t'), 'utf-8');
+}
+
+function projectText(): string {
+  return readFileSync(join(dir, 'project.c3proj'), 'utf-8');
 }
 
 beforeEach(async () => {
@@ -344,6 +357,118 @@ describe('the writer\'s own updates of project.c3proj merge a change made on dis
     const project = await readJson('project.c3proj');
     expect(project.properties.author).toBe('Editor');
     expect(project.eventSheets.items).toContain('Other');
+  });
+});
+
+// ─── A refused call puts back what it changed ───────────────
+
+describe('a call refused after it changed other files puts them back (#51)', () => {
+  const moveArgs = { sourceSheet: 'MainSheet', targetSheet: 'Other', sids: [400000000000003], deleteSource: true };
+
+  async function eventCount(sheet: string, sid: number): Promise<number> {
+    return (await readJson(`eventSheets/${sheet}.json`)).events.filter((e: { sid?: number }) => e.sid === sid).length;
+  }
+
+  it('move_events_between_sheets: the target sheet is put back when the source was saved in the editor', async () => {
+    await expectSuccess('create_event_sheet', { name: 'Other' });
+    const targetBefore = await readFile(join(dir, 'eventSheets', 'Other.json'), 'utf-8');
+    // The editor saves the source sheet right after the tool wrote the target
+    const writeEntityFile = writer.writeEntityFile.bind(writer);
+    vi.spyOn(writer, 'writeEntityFile').mockImplementation(async (category, name, ...rest) => {
+      const backup = await writeEntityFile(category, name, ...rest);
+      if (name === 'Other') saveSheetInEditor('MainSheet');
+      return backup;
+    });
+
+    const result = await call('move_events_between_sheets', moveArgs);
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('eventSheets/MainSheet.json was changed on disk after this server read it');
+    expect(result.text).toContain('were put back as they were before the call (eventSheets/Other.json), so the call changed nothing');
+    expect(await readFile(join(dir, 'eventSheets', 'Other.json'), 'utf-8')).toBe(targetBefore);
+    const source = await readJson('eventSheets/MainSheet.json');
+    expect(source.events.some((e: { text?: string }) => e.text === 'saved in the editor')).toBe(true);
+    expect(await eventCount('MainSheet', 400000000000003)).toBe(1);
+
+    // Run again, as the message says: the event is moved once
+    vi.mocked(writer.writeEntityFile).mockRestore();
+    const again = await expectSuccess('move_events_between_sheets', moveArgs);
+    expect(again.data.warnings ?? []).toEqual([]);
+    expect(await eventCount('Other', 400000000000003)).toBe(1);
+    expect(await eventCount('MainSheet', 400000000000003)).toBe(0);
+  });
+
+  it('update_object_properties: project.c3proj and the object are put back when a layout was saved in the editor', async () => {
+    const projectBefore = projectText();
+    const objectBefore = await readFile(join(dir, 'objectTypes', 'Sprite.json'), 'utf-8');
+    // The editor saves the layout right after the tool read it to add the new behavior's entries
+    let objectWritten = false;
+    const writeEntityFile = writer.writeEntityFile.bind(writer);
+    vi.spyOn(writer, 'writeEntityFile').mockImplementation(async (category, ...rest) => {
+      const backup = await writeEntityFile(category, ...rest);
+      if (category === 'objectTypes') objectWritten = true;
+      return backup;
+    });
+    const readAllLayouts = reader.readAllLayouts.bind(reader);
+    vi.spyOn(reader, 'readAllLayouts').mockImplementation(async () => {
+      const layouts = await readAllLayouts();
+      if (objectWritten) {
+        await editJson('layouts/Layout 1.json', layout => { layout.width = 1234; });
+        objectWritten = false;
+      }
+      return layouts;
+    });
+
+    const result = await call('update_object_properties', {
+      name: 'Sprite', addBehaviors: [{ behaviorId: 'Platform', name: 'Platform' }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('layouts/Layout 1.json was changed on disk after this server read it');
+    expect(result.text).toContain('objectTypes/Sprite.json, project.c3proj');
+    expect(projectText()).toBe(projectBefore);
+    expect(await readFile(join(dir, 'objectTypes', 'Sprite.json'), 'utf-8')).toBe(objectBefore);
+    expect((await readJson('layouts/Layout 1.json')).width).toBe(1234);
+    expect(reader.getUsedAddons().map(a => a.id)).not.toContain('Platform');
+  });
+
+  it('a file the call created is deleted again', async () => {
+    const error = await runInToolCall(async () => {
+      await writer.writeEntityFile('eventSheets', 'New', { name: 'New', events: [], sid: 900000000000002 }, undefined, { createOnly: true });
+      await writer.addToProject('eventSheets', 'New');
+      const sheet = await reader.readEventSheet('MainSheet');
+      saveSheetInEditor('MainSheet');
+      return writer.writeEntityFile('eventSheets', 'MainSheet', { ...sheet, events: [] }).then(() => undefined, (e: Error) => e);
+    });
+
+    expect(error?.message).toContain('put back as they were before the call (project.c3proj, eventSheets/New.json (deleted: the call had created it))');
+    expect(existsSync(join(dir, 'eventSheets', 'New.json'))).toBe(false);
+    expect((await readJson('project.c3proj')).eventSheets.items).toEqual(['MainSheet']);
+    expect(reader.getProject().eventSheets.items).toEqual(['MainSheet']);
+    expect((await readJson('eventSheets/MainSheet.json')).events).toHaveLength(2);
+  });
+
+  it('a file changed on disk again after the call wrote it is left as it is and named', async () => {
+    await expectSuccess('create_event_sheet', { name: 'Other' });
+    // After the target write the editor saves both sheets
+    const writeEntityFile = writer.writeEntityFile.bind(writer);
+    vi.spyOn(writer, 'writeEntityFile').mockImplementation(async (category, name, ...rest) => {
+      const backup = await writeEntityFile(category, name, ...rest);
+      if (name === 'Other') {
+        saveSheetInEditor('Other', 'target saved in the editor');
+        saveSheetInEditor('MainSheet');
+      }
+      return backup;
+    });
+
+    const result = await call('move_events_between_sheets', moveArgs);
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('left as they are (changed on disk again after this call wrote them, or their backup was replaced): '
+      + 'eventSheets/Other.json (its state from before the call is in eventSheets/Other.json.bak)');
+    expect(result.text).toContain('Check the project (validate_project, git diff)');
+    const target = await readJson('eventSheets/Other.json');
+    expect(target.events.some((e: { text?: string }) => e.text === 'target saved in the editor')).toBe(true);
   });
 });
 

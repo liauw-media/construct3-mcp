@@ -63,12 +63,39 @@ export function fileKey(path: string): string {
 
 // ─── Tool call scope ─────────────────────────────────────────
 
+/**
+ * A file's backup, made before the tool call's first write to it: `.bak`
+ * next to the file, holding its state from before the call.
+ */
+export interface CallBackup {
+  /** The backup path (`<file>.bak`), also when the file did not exist. */
+  readonly path: string;
+  /** False: there was no file before the call, so there is no backup. */
+  readonly existed: boolean;
+  /** The state of the `.bak` right after it was made: a backup made later by another call replaces it. */
+  readonly state: FileState;
+}
+
+/** A file the tool call changed (wrote or deleted) through the writer: what undoing the call puts back. */
+export interface CallChange {
+  /** The file's path, as spelled on disk. */
+  readonly path: string;
+  /** The path shown in messages ("layouts/Level 1.json"). */
+  readonly label: string;
+  /** Its backup from before the call. */
+  readonly backup: CallBackup;
+  /** project.c3proj (put back under the project lock, then loaded again). */
+  readonly isProjectFile: boolean;
+}
+
 /** What one tool call has done so far. */
 export interface ToolCallScope {
-  /** Files the call read (or wrote), by fileKey: the state it read them in (first read wins). */
+  /** Files the call read (or wrote), by fileKey: the state it read them in (first read wins; a write of its own replaces it). */
   readonly reads: Map<string, FileState>;
-  /** Files the call already backed up (or found missing before its first write), by fileKey → backup path. */
-  readonly backups: Map<string, string>;
+  /** Files the call already backed up (or found missing before its first write), by fileKey. */
+  readonly backups: Map<string, CallBackup>;
+  /** Files the call changed through the writer, by fileKey, in the order of their first change. */
+  readonly changes: Map<string, CallChange>;
   /** Readers that already checked their cached files against the disk in this call. */
   readonly checked: Set<object>;
 }
@@ -86,7 +113,7 @@ export function currentToolCall(): ToolCallScope | undefined {
  */
 export function runInToolCall<T>(fn: () => Promise<T>): Promise<T> {
   if (scopes.getStore()) return fn();
-  return scopes.run({ reads: new Map(), backups: new Map(), checked: new Set() }, fn);
+  return scopes.run({ reads: new Map(), backups: new Map(), changes: new Map(), checked: new Set() }, fn);
 }
 
 /** Remember the state a file was read in, for the running tool call (the first read of a file counts). */
@@ -109,7 +136,12 @@ export function noteFileWritten(key: string, state: FileState): void {
 export class StaleFileError extends Error {
   readonly code = 'E_STALE_FILE';
 
-  constructor(message: string) {
+  /**
+   * @param file The file as named in messages ("eventSheets/MainSheet.json").
+   * @param undone Set once the files the tool call had changed before were
+   *   put back (see Construct3ProjectWriter): the error is not undone again.
+   */
+  constructor(message: string, readonly file: string, readonly undone = false) {
     super(message);
     this.name = 'StaleFileError';
   }
