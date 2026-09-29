@@ -629,3 +629,39 @@ describe('instance variable, behavior and member removal with event sheets that 
     expect(result.unscannedFiles).toEqual([{ file: 'eventSheets/Bad', reason: 'could not be read', textSearch: 'unreadable' }]);
   });
 });
+
+// ─── rename_animation ───────────────────────────────────────
+
+describe('rename_animation with layouts that could not be parsed', () => {
+  it('warns that instances in a layout over the read cap may still start with the old name', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Walk' })]);
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/layouts\/Big \(over the 10MB read limit\).*"Walk".*NOT updated/);
+  });
+
+  it('warns about a layout it cannot read, even as text', async () => {
+    await addEnemy();
+    await addUnreadable('layouts', 'Bad');
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/layouts\/Bad \(could not be read, not even as text\)/);
+  });
+
+  it('only notes that a layout that does not name the animation was searched as text', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Idle' })]);
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    const warnings = result.warnings.join(' ');
+    expect(warnings).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text');
+    expect(warnings).not.toContain('NOT updated');
+  });
+});
