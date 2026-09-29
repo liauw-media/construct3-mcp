@@ -351,24 +351,26 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'connect_to_game',
-    'Connect to a running Construct game over Chrome DevTools Protocol. Provide a page WebSocket endpoint directly, or a host and debugging port to discover the first page target. The tool waits for globalThis.__c3bridge to become ready and keeps the connection for later runtime calls. Only browsers on this machine are reached, unless the server was started with C3MCP_ALLOW_REMOTE_CDP=1.',
+    'Connect to a running Construct game over Chrome DevTools Protocol. Provide a page WebSocket endpoint directly, or a host and debugging port: then every page of that browser is tried (or those whose URL contains urlContains) and the first whose runtime bridge answers ready is kept. The bridge is found on the page or, for a game with "Use worker" on, in the page\'s worker (bridgeContext). The tab is brought to the front; pageVisible false with a warning means it stayed hidden, where a game does not tick. The connection stays open for the other runtime tools. Only browsers on this machine are reached, unless the server was started with C3MCP_ALLOW_REMOTE_CDP=1.',
     {
       cdpEndpoint: z.string().url().refine(
         (value) => value.startsWith('ws://') || value.startsWith('wss://'),
         'cdpEndpoint must use ws:// or wss://',
       ).optional().describe('Direct CDP page WebSocket endpoint'),
-      host: z.string().min(1).max(255).optional().describe('CDP discovery host (default: localhost)'),
+      host: z.string().min(1).max(255).optional().describe('CDP discovery host (default: 127.0.0.1)'),
       port: z.number().int().min(1).max(65535).optional().describe('CDP discovery port (default: 9222)'),
+      urlContains: z.string().min(1).max(2_000).optional()
+        .describe('With host/port: only pages whose URL contains this text (e.g. "localhost:8080" or "preview")'),
       timeoutMs: z.number().int().min(100).max(60_000).optional().default(10_000)
-        .describe('Maximum time to connect and wait for the runtime bridge'),
+        .describe('Maximum time for the whole connection: discovery, opening and waiting for the runtime bridge'),
     },
-    async ({ cdpEndpoint, host, port, timeoutMs }) => {
+    async ({ cdpEndpoint, host, port, urlContains, timeoutMs }) => {
       try {
-        const target = cdpEndpoint !== undefined ? hostOfEndpoint(cdpEndpoint) : (host ?? 'localhost');
+        const target = cdpEndpoint !== undefined ? hostOfEndpoint(cdpEndpoint) : (host ?? '127.0.0.1');
         if (process.env.C3MCP_ALLOW_REMOTE_CDP !== '1' && !isLoopbackHost(target)) {
           return toolError(`Refusing to connect to "${target}": only this machine (localhost, 127.0.0.1, ::1) is allowed unless the server was started with the environment variable C3MCP_ALLOW_REMOTE_CDP=1. The runtime bridge runs script in whatever page it reaches.`);
         }
-        const connected = await connections.connect({ cdpEndpoint, host, port, timeoutMs });
+        const connected = await connections.connect({ cdpEndpoint, host, port, urlContains, timeoutMs });
         return toolResult(connected, { projectWritten: false });
       } catch (error) {
         console.error('[connect_to_game] failed:', error);

@@ -22,6 +22,21 @@ interface FakeCdpOptions {
   screenshotBytes?: number;
   /** What bridge.cancel(id) answers; "absent" plays a bridge without cancel. */
   cancelAnswer?: "queued" | "result" | false | "absent";
+  /**
+   * The page targets /json/list shows, in order (default: one page with the
+   * bridge on the page). A page's bridge can live on the page, in a
+   * dedicated worker the client reaches through Target.setAutoAttach, or
+   * nowhere; a page can be hidden, and Page.bringToFront can make it visible.
+   */
+  pages?: FakePage[];
+}
+
+interface FakePage {
+  id: string;
+  url?: string;
+  bridge?: "page" | "worker" | "none";
+  hidden?: boolean;
+  frontMakesVisible?: boolean;
 }
 
 interface FakeCdp {
@@ -35,6 +50,10 @@ interface FakeCdp {
   expressionCount: () => number;
   /** The command IDs bridge.cancel was called with. */
   cancelled: () => number[];
+  /** Connection housekeeping calls (Target.setAutoAttach, Page.bringToFront), kept apart from cdpCommands. */
+  housekeeping: () => Array<{ page: string; method: string }>;
+  /** The CDP session each bridge.submit was evaluated in ("page" for the page itself). */
+  submitSessions: () => string[];
   close(): Promise<void>;
 }
 
@@ -43,6 +62,9 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
   let stateChecks = 0;
   let expressionChecks = 0;
   const cancelledIds: number[] = [];
+  const housekeeping: Array<{ page: string; method: string }> = [];
+  const submitSessions: string[] = [];
+  const pages: FakePage[] = options.pages ?? [{ id: "page-1", url: "http://localhost/game", bridge: "page" }];
   let nextCommandId = 17;
   const resultChecks = new Map<number, number>();
   const submittedResults = new Map<number, { ok: boolean; value?: unknown; error?: string }>();
@@ -58,19 +80,19 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     }
     const targets = options.includePageTarget === false
       ? [{ id: "worker-1", type: "worker", title: "Worker" }]
-      : [{
-        id: "page-1",
+      : pages.map((page) => ({
+        id: page.id,
         type: "page",
-        title: "Construct Preview",
-        url: "http://localhost/game",
-        webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/page-1`,
-      }];
+        title: page.id === "page-1" ? "Construct Preview" : page.id,
+        url: page.url ?? "http://localhost/game",
+        webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${page.id}`,
+      }));
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(targets));
   });
 
   httpServer.on("upgrade", (request, socket, head) => {
-    if (request.url !== "/devtools/page/page-1") {
+    if (!pages.some((page) => request.url === `/devtools/page/${page.id}`)) {
       socket.destroy();
       return;
     }
@@ -79,16 +101,36 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     });
   });
 
-  webSockets.on("connection", (socket: TestWebSocket) => {
+  webSockets.on("connection", (socket: TestWebSocket, upgrade: { url?: string }) => {
     connectionCount++;
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
+    const page = pages.find((candidate) => upgrade.url === `/devtools/page/${candidate.id}`)!;
+    let visible = page.hidden !== true;
     socket.on("message", (raw: Buffer) => {
       const request = JSON.parse(raw.toString()) as {
         id: number;
         method: string;
+        sessionId?: string;
         params?: Record<string, unknown> & { expression?: string };
       };
+      const answer = (result: unknown) => socket.send(JSON.stringify({ id: request.id, result, ...(request.sessionId ? { sessionId: request.sessionId } : {}) }));
+      if (request.method === "Target.setAutoAttach" || request.method === "Page.bringToFront") {
+        housekeeping.push({ page: page.id, method: request.method });
+        answer({});
+        if (request.method === "Page.bringToFront" && page.frontMakesVisible) visible = true;
+        if (request.method === "Target.setAutoAttach" && page.bridge === "worker") {
+          socket.send(JSON.stringify({
+            method: "Target.attachedToTarget",
+            params: {
+              sessionId: "worker-session-1",
+              targetInfo: { targetId: "worker-target-1", type: "worker", url: "http://localhost/game/worker.js" },
+              waitingForDebugger: false,
+            },
+          }));
+        }
+        return;
+      }
       if (request.method !== "Runtime.evaluate") {
         cdpCommands.push({ method: request.method, params: request.params ?? {} });
         // A screenshot answers with the parameters it was given, so a test can
@@ -103,8 +145,14 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
       }
 
       const expression = request.params?.expression ?? "";
+      const context = request.sessionId === "worker-session-1" ? "worker" : "page";
+      const bridgeHere = (page.bridge ?? "page") === context;
       let value: string;
-      if (expression.includes("(0, eval)")) {
+      if (expression.includes("document.visibilityState")) {
+        value = JSON.stringify(visible ? "visible" : "hidden");
+      } else if (!bridgeHere && expression.includes("__c3bridge")) {
+        value = JSON.stringify(null);
+      } else if (expression.includes("(0, eval)")) {
         const values = options.expressionValues ?? [null];
         const expressionValue = values[Math.min(expressionChecks, values.length - 1)];
         expressionChecks++;
@@ -123,6 +171,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
           objectCount: 7,
         } : null);
       } else if (expression.includes("bridge.submit")) {
+        submitSessions.push(request.sessionId ?? "page");
         const commandLiteral = expression.match(/bridge\.submit\(("(?:\\.|[^"\\])*")/u)?.[1];
         const command = commandLiteral ? JSON.parse(commandLiteral) as string : "unknown";
         const commandIndex = commandCounts.get(command) ?? 0;
@@ -162,6 +211,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
             value,
           },
         },
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
       });
       if (expression.includes("bridge.getResult") && options.resultResponseDelayMs) {
         setTimeout(() => {
@@ -190,6 +240,8 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
     commandCount: (command) => commandCounts.get(command) ?? 0,
     expressionCount: () => expressionChecks,
     cancelled: () => [...cancelledIds],
+    housekeeping: () => [...housekeeping],
+    submitSessions: () => [...submitSessions],
     cdpCommands: () => cdpCommands.map((command) => ({
       method: command.method,
       params: { ...command.params },
@@ -312,6 +364,60 @@ describe("connect_to_game", () => {
     const allowed = await server.callTool("connect_to_game", { host: "10.1.2.3", port: 1, timeoutMs: 200 });
     expect(allowed.isError).toBe(true);
     expect(allowed.content[0].text).not.toContain("C3MCP_ALLOW_REMOTE_CDP");
+  });
+
+  it("reaches a bridge that runs in a dedicated worker, and keeps input on the page", async () => {
+    const fake = await startFakeCdp({ pages: [{ id: "page-1", bridge: "worker" }], canvasGeometry: { left: 0, top: 0, cssWidth: 100, cssHeight: 100, backingWidth: 100, backingHeight: 100, devicePixelRatio: 1, viewportWidth: 100, viewportHeight: 100 } });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+
+    const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 1_000 }));
+    expect(connected).toMatchObject({ bridgeReady: true, bridgeContext: "worker", gameState: { ready: true } });
+    const called = parseToolResult(await server.callTool("call_bridge", { connectionId: connected.connectionId, command: "ping", pollIntervalMs: 10, timeoutMs: 500 }));
+    expect(called.result).toEqual({ pong: true });
+    expect(fake.submitSessions()).toEqual(["worker-session-1"]);
+    parseToolResult(await server.callTool("simulate_input", { connectionId: connected.connectionId, action: { type: "click", x: 5, y: 5 } }));
+    expect(fake.cdpCommands().filter((c) => c.method === "Input.dispatchMouseEvent")).toHaveLength(2);
+  });
+
+  it("picks the page whose bridge is ready, or the one urlContains names, among several tabs", async () => {
+    const fake = await startFakeCdp({
+      pages: [
+        { id: "editor", url: "https://editor.construct.net/", bridge: "none" },
+        { id: "game", url: "http://localhost:8080/index.html", bridge: "page" },
+        { id: "other-game", url: "http://localhost:9090/index.html", bridge: "page" },
+      ],
+    });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+
+    const first = parseToolResult(await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, timeoutMs: 1_000 }));
+    expect(["game", "other-game"]).toContain(first.target.id);
+    const named = parseToolResult(await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, urlContains: ":9090/", timeoutMs: 1_000 }));
+    expect(named.target.id).toBe("other-game");
+
+    const none = await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, urlContains: "no-such-page", timeoutMs: 300 });
+    expect(none.isError).toBe(true);
+    expect(none.content[0].text).toContain("no-such-page");
+  });
+
+  it("brings the game tab to the front and warns when it stays hidden", async () => {
+    for (const [page, warned] of [
+      [{ id: "page-1", hidden: true, frontMakesVisible: true }, false],
+      [{ id: "page-1", hidden: true }, true],
+    ] as const) {
+      const fake = await startFakeCdp({ pages: [page] });
+      openFakes.push(fake);
+      const { server, controller } = registerConnectionTools();
+      openControllers.push(controller);
+      const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 1_000 }));
+      expect(fake.housekeeping().map((h) => h.method)).toContain("Page.bringToFront");
+      expect(connected.pageVisible).toBe(!warned);
+      if (warned) expect(connected.warning).toMatch(/hidden/u);
+      else expect(connected.warning).toBeUndefined();
+    }
   });
 
   it("accepts a direct page WebSocket endpoint", async () => {

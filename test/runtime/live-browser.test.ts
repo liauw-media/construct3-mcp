@@ -156,4 +156,28 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     expect(touches.map((e) => e.type)).toEqual(['touchstart', 'touchend']);
     expect(await bridge('MaxTouchPoints')).toBe(0);
   }, LIVE_TIMEOUT_MS);
+
+  it('runs the whole chain against a game whose runtime is in a worker', async () => {
+    const folder = await fakeExport('worker');
+    const { server } = register();
+    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+    const connected = parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: served.browser.cdpPort, timeoutMs: 15_000 }));
+    expect(connected).toMatchObject({ bridgeReady: true, bridgeContext: 'worker', pageVisible: true, gameState: { ready: true, layoutName: 'Title' } });
+    const { connectionId } = connected;
+    const call = async (command: string, args: Record<string, unknown> = {}) => parse(await server.callTool('call_bridge', { connectionId, command, args })).result;
+
+    expect(await call('callFunction', { name: 'Add', params: [2, 3] })).toBe(5);
+    const subscription = parse(await server.callTool('subscribe_events', { connectionId, eventType: 'globalVarChange', filter: { variable: 'Score' } }));
+    await call('setGlobalVar', { name: 'Score', value: 7 });
+    const waited = parse(await server.callTool('wait_for_condition', { connectionId, condition: { type: 'globalVar', name: 'Score', operator: 'eq', value: 7 }, timeoutMs: 5_000 }));
+    expect(waited).toMatchObject({ met: true, finalValue: 7 });
+    const events = parse(await server.callTool('read_events', { connectionId, subscriptionId: subscription.subscriptionId }));
+    expect(events.events.map((e: { value: unknown }) => e.value)).toEqual([7]);
+    await call('goToLayout', { name: 'Game' });
+    expect(parse(await server.callTool('wait_for_condition', { connectionId, condition: { type: 'layout', name: 'Game' }, timeoutMs: 5_000 })).met).toBe(true);
+
+    // Input and the canvas stay on the page.
+    expect(parse(await server.callTool('get_canvas_size', { connectionId }))).toMatchObject({ left: 100, top: 50, cssWidth: 640, cssHeight: 360 });
+    parse(await server.callTool('simulate_input', { connectionId, action: { type: 'click', x: 10, y: 20 }, coordinateSpace: 'canvas' }));
+  }, LIVE_TIMEOUT_MS);
 });

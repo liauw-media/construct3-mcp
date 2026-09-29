@@ -30,12 +30,20 @@ export interface ConnectToGameOptions {
   cdpEndpoint?: string;
   host?: string;
   port?: number;
+  /** Discovery only: consider only pages whose URL contains this text. */
+  urlContains?: string;
+  /** For connecting as a whole: discovery, opening and waiting for the bridge. */
   timeoutMs: number;
 }
 
 export interface ConnectedGame {
   connectionId: string;
   bridgeReady: true;
+  /** Where the bridge answered: on the page itself, or in a dedicated worker of it (Construct's "Use worker"). */
+  bridgeContext: "page" | "worker";
+  /** False when the page stayed hidden after it was brought to the front (a background tab or a minimized window). */
+  pageVisible?: boolean;
+  warning?: string;
   gameState: GameState;
   target?: {
     id?: string;
@@ -197,7 +205,13 @@ interface CdpResponse {
     code?: number;
     message?: string;
   };
+  /** Events carry a method and params instead of an id. */
+  method?: string;
+  params?: Record<string, unknown>;
+  sessionId?: string;
 }
+
+type CdpEventHandler = (method: string, params: Record<string, unknown>, sessionId: string | undefined) => void;
 
 interface RemoteObject {
   type?: string;
@@ -468,11 +482,18 @@ function formatDiscoveryHost(host: string): string {
   return host.includes(":") ? `[${host}]` : host;
 }
 
-async function discoverPageTarget(
+interface PageCandidate {
+  endpoint: string;
+  target?: ConnectedGame["target"];
+}
+
+/** The page targets a browser's debugging port lists, in its order, optionally only those whose URL contains `urlContains`. */
+async function discoverPageTargets(
   host: string,
   port: number,
   timeoutMs: number,
-): Promise<{ endpoint: string; target: ConnectedGame["target"] }> {
+  urlContains?: string,
+): Promise<PageCandidate[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const url = `http://${formatDiscoveryHost(host)}:${port}/json/list`;
@@ -488,21 +509,29 @@ async function discoverPageTarget(
       throw new Error("CDP discovery returned an invalid target list");
     }
 
-    const target = (body as CdpTarget[]).find(
+    const pages = (body as CdpTarget[]).filter(
       (candidate) => candidate.type === "page" && typeof candidate.webSocketDebuggerUrl === "string",
     );
-    if (!target?.webSocketDebuggerUrl) {
+    if (pages.length === 0) {
       throw new Error("CDP discovery found no page target with a WebSocket endpoint");
     }
+    const matching = urlContains === undefined
+      ? pages
+      : pages.filter((candidate) => typeof candidate.url === "string" && candidate.url.includes(urlContains));
+    if (matching.length === 0) {
+      throw new Error(
+        `No page's URL contains ${JSON.stringify(urlContains)}; the open pages are ${pages.map((page) => page.url ?? "(no URL)").join(", ")}`,
+      );
+    }
 
-    return {
-      endpoint: target.webSocketDebuggerUrl,
+    return matching.map((target) => ({
+      endpoint: target.webSocketDebuggerUrl!,
       target: {
         id: target.id,
         title: target.title,
         url: target.url,
       },
-    };
+    }));
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(`CDP discovery timed out after ${timeoutMs}ms`);
@@ -520,6 +549,7 @@ class CdpConnection {
   private opened = false;
   private disconnected = false;
   private onDisconnect?: () => void;
+  private readonly eventHandlers = new Set<CdpEventHandler>();
 
   constructor(endpoint: string) {
     const WebSocketImpl = webSocketClass();
@@ -529,6 +559,12 @@ class CdpConnection {
 
   setDisconnectHandler(handler: () => void): void {
     this.onDisconnect = handler;
+  }
+
+  /** Listen to CDP events (from the page, or from a session attached to it); returns the unsubscribe function. */
+  onEvent(handler: CdpEventHandler): () => void {
+    this.eventHandlers.add(handler);
+    return () => this.eventHandlers.delete(handler);
   }
 
   async open(timeoutMs: number): Promise<void> {
@@ -573,7 +609,8 @@ class CdpConnection {
     return this.opened && !this.disconnected && this.socket.readyState === this.socket.OPEN;
   }
 
-  async evaluateJson<T>(expression: string, timeoutMs = CDP_CALL_TIMEOUT_MS): Promise<T> {
+  /** Evaluate `expression`, which returns a JSON string, on the page or in the attached session `sessionId`. */
+  async evaluateJson<T>(expression: string, timeoutMs = CDP_CALL_TIMEOUT_MS, sessionId?: string): Promise<T> {
     const response = await this.request<EvaluationResult>(
       "Runtime.evaluate",
       {
@@ -582,6 +619,7 @@ class CdpConnection {
         returnByValue: true,
       },
       timeoutMs,
+      sessionId,
     );
 
     if (response.exceptionDetails) {
@@ -609,8 +647,9 @@ class CdpConnection {
     method: string,
     params: Record<string, unknown>,
     timeoutMs = CDP_CALL_TIMEOUT_MS,
+    sessionId?: string,
   ): Promise<unknown> {
-    return this.request(method, params, timeoutMs);
+    return this.request(method, params, timeoutMs, sessionId);
   }
 
   async close(): Promise<void> {
@@ -641,6 +680,7 @@ class CdpConnection {
     method: string,
     params: Record<string, unknown>,
     timeoutMs: number,
+    sessionId?: string,
   ): Promise<T> {
     if (!this.isOpen()) throw new Error("CDP connection is closed");
 
@@ -658,7 +698,7 @@ class CdpConnection {
       });
 
       try {
-        this.socket.send(JSON.stringify({ id, method, params }));
+        this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -677,7 +717,18 @@ class CdpConnection {
       return;
     }
 
-    if (typeof message.id !== "number") return;
+    if (typeof message.id !== "number") {
+      if (typeof message.method === "string") {
+        for (const handler of this.eventHandlers) {
+          try {
+            handler(message.method, message.params ?? {}, message.sessionId);
+          } catch {
+            // a listener's failure is not the connection's
+          }
+        }
+      }
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
 
@@ -714,44 +765,110 @@ class CdpConnection {
 
 interface StoredConnection {
   cdp: CdpConnection;
+  /** The attached worker session the bridge answers in; undefined when it runs on the page. */
+  bridgeSessionId?: string;
 }
+
+interface FoundBridge {
+  state: GameState;
+  sessionId?: string;
+}
+
+const HIDDEN_PAGE_WARNING = "The game page is hidden (a background tab or a minimized window) and stayed hidden after it was brought to the front. A hidden page runs no animation frames, so the game does not tick: bridge calls time out and mouse moves can hang. Show the tab or window, or use a separate browser window for the game.";
 
 export class RuntimeConnectionManager {
   private readonly connections = new Map<string, StoredConnection>();
 
   async connect(options: ConnectToGameOptions): Promise<ConnectedGame> {
-    if (options.cdpEndpoint && (options.host !== undefined || options.port !== undefined)) {
-      throw new Error("Provide either cdpEndpoint or host/port, not both");
+    if (options.cdpEndpoint && (options.host !== undefined || options.port !== undefined || options.urlContains !== undefined)) {
+      throw new Error("Provide either cdpEndpoint or host/port (with urlContains), not both");
     }
+    const deadline = Date.now() + options.timeoutMs;
+    const remaining = () => Math.max(1, deadline - Date.now());
 
-    let endpoint = options.cdpEndpoint;
-    let target: ConnectedGame["target"];
-    if (!endpoint) {
-      const discovered = await discoverPageTarget(
-        options.host ?? "localhost",
-        options.port ?? 9222,
-        options.timeoutMs,
+    const candidates: PageCandidate[] = options.cdpEndpoint
+      ? [{ endpoint: options.cdpEndpoint }]
+      : await discoverPageTargets(options.host ?? "127.0.0.1", options.port ?? 9222, remaining(), options.urlContains);
+
+    // Every candidate page is tried at once; the first whose bridge answers
+    // ready wins, so a browser with the editor or other tabs open still
+    // reaches the game's tab.
+    const opened: CdpConnection[] = [];
+    const failures: Error[] = [];
+    let winner: { connection: CdpConnection; found: FoundBridge; candidate: PageCandidate } | undefined;
+    await new Promise<void>((resolve) => {
+      let pending = candidates.length;
+      const settle = () => { if (--pending === 0) resolve(); };
+      for (const candidate of candidates) {
+        void (async () => {
+          try {
+            const connection = new CdpConnection(candidate.endpoint);
+            opened.push(connection);
+            await connection.open(remaining());
+            const found = await this.findBridge(connection, deadline, () => winner !== undefined);
+            if (found && !winner) {
+              winner = { connection, found, candidate };
+              resolve();
+            }
+          } catch (error) {
+            failures.push(error instanceof Error ? error : new Error(String(error)));
+          } finally {
+            settle();
+          }
+        })();
+      }
+    });
+    for (const connection of opened) if (connection !== winner?.connection) connection.terminate();
+
+    if (!winner) {
+      if (failures.length === candidates.length) throw failures[0];
+      const pages = candidates.map((candidate) => candidate.target?.url ?? candidate.endpoint).join(", ");
+      throw new Error(
+        `Runtime bridge was not ready after ${options.timeoutMs}ms in ${candidates.length === 1 ? "the page" : `any of ${candidates.length} pages`} (${pages}). Inject the bridge (inject_runtime_bridge) before exporting or previewing, check the game has started, and pick its tab with urlContains or cdpEndpoint if the browser shows several.`,
       );
-      endpoint = discovered.endpoint;
-      target = discovered.target;
     }
 
-    const connection = new CdpConnection(endpoint);
+    const { connection, found, candidate } = winner;
+    const connectionId = randomUUID();
+    connection.setDisconnectHandler(() => this.connections.delete(connectionId));
+    if (found.sessionId) {
+      // A worker that ends (the page reloaded or closed) takes the bridge with it.
+      connection.onEvent((method, params) => {
+        if (method === "Target.detachedFromTarget" && params.sessionId === found.sessionId) {
+          this.connections.delete(connectionId);
+          connection.terminate();
+        }
+      });
+    }
+    this.connections.set(connectionId, { cdp: connection, bridgeSessionId: found.sessionId });
+    const pageVisible = await this.bringToFront(connection);
+    return {
+      connectionId,
+      bridgeReady: true,
+      bridgeContext: found.sessionId ? "worker" : "page",
+      pageVisible,
+      ...(pageVisible === false ? { warning: HIDDEN_PAGE_WARNING } : {}),
+      gameState: found.state,
+      target: candidate.target,
+    };
+  }
+
+  /**
+   * Bring the game's tab to the front (Page.bringToFront), then report
+   * whether the page is visible: a hidden page does not tick. Undefined
+   * when the page could not tell.
+   */
+  private async bringToFront(connection: CdpConnection): Promise<boolean | undefined> {
     try {
-      await connection.open(options.timeoutMs);
-      const gameState = await this.waitForBridge(connection, options.timeoutMs);
-      const connectionId = randomUUID();
-      connection.setDisconnectHandler(() => this.connections.delete(connectionId));
-      this.connections.set(connectionId, { cdp: connection });
-      return {
-        connectionId,
-        bridgeReady: true,
-        gameState,
-        target,
-      };
-    } catch (error) {
-      connection.terminate();
-      throw error;
+      await connection.command("Page.bringToFront", {}, 2_000);
+    } catch {
+      // not every target can be activated; visibility still tells
+    }
+    try {
+      const state = await connection.evaluateJson<unknown>("JSON.stringify(document.visibilityState)", 2_000);
+      return state === "hidden" ? false : state === "visible" ? true : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -764,7 +881,7 @@ export class RuntimeConnectionManager {
   }
 
   async callBridge(options: BridgeCallOptions): Promise<BridgeCallResult> {
-    const connection = this.getConnection(options.connectionId);
+    const { cdp: connection, bridgeSessionId } = this.getStored(options.connectionId);
     const startedAt = Date.now();
     const submitExpression = `(() => {
       const bridge = globalThis.__c3bridge;
@@ -777,6 +894,7 @@ export class RuntimeConnectionManager {
     const submitted = await connection.evaluateJson<{ id?: unknown; error?: string }>(
       submitExpression,
       Math.min(CDP_CALL_TIMEOUT_MS, options.timeoutMs),
+      bridgeSessionId,
     );
     if (submitted.error) throw new Error(submitted.error);
     if (typeof submitted.id !== "number" || !Number.isSafeInteger(submitted.id)) {
@@ -802,6 +920,7 @@ export class RuntimeConnectionManager {
         polled = await connection.evaluateJson(
           pollExpression,
           Math.max(1, Math.min(CDP_CALL_TIMEOUT_MS, remaining)),
+          bridgeSessionId,
         );
       } catch (error) {
         // A poll clamped to the remaining budget can expire at the deadline;
@@ -836,7 +955,7 @@ export class RuntimeConnectionManager {
       if (waitMs > 0) await delay(waitMs);
     }
 
-    const withdrawn = await this.withdrawCommand(connection, commandId);
+    const withdrawn = await this.withdrawCommand(connection, commandId, bridgeSessionId);
     throw new Error(`Runtime bridge command timed out after ${options.timeoutMs}ms; ${withdrawn}`);
   }
 
@@ -846,7 +965,7 @@ export class RuntimeConnectionManager {
    * runs its queued commands once it ticks again). Returns what happened, as
    * the second half of the timeout message.
    */
-  private async withdrawCommand(connection: CdpConnection, commandId: number): Promise<string> {
+  private async withdrawCommand(connection: CdpConnection, commandId: number, sessionId: string | undefined): Promise<string> {
     const stale = "it may still run later (the game's bridge cannot withdraw commands; inject the current bridge)";
     if (!connection.isOpen()) return stale;
     try {
@@ -854,7 +973,7 @@ export class RuntimeConnectionManager {
         const bridge = globalThis.__c3bridge;
         if (!bridge || typeof bridge.cancel !== "function") return JSON.stringify({ cancelled: "unsupported" });
         return JSON.stringify({ cancelled: bridge.cancel(${commandId}) });
-      })()`, 1_000);
+      })()`, 1_000, sessionId);
       if (answer.cancelled === "queued") {
         return "it had not run yet and was withdrawn, so it will not run (a game that does not tick, such as one in a background tab, runs no commands)";
       }
@@ -1085,12 +1204,16 @@ export class RuntimeConnectionManager {
   }
 
   private getConnection(connectionId: string): CdpConnection {
+    return this.getStored(connectionId).cdp;
+  }
+
+  private getStored(connectionId: string): StoredConnection {
     const stored = this.connections.get(connectionId);
     if (!stored || !stored.cdp.isOpen()) {
       this.connections.delete(connectionId);
       throw new Error(`Unknown or closed connection: ${connectionId}`);
     }
-    return stored.cdp;
+    return stored;
   }
 
   private async readConditionValue(
@@ -1099,12 +1222,13 @@ export class RuntimeConnectionManager {
     timeoutMs: number,
   ): Promise<unknown> {
     if (condition.type === "expression") {
-      const connection = this.getConnection(connectionId);
+      // Evaluated where the bridge runs (the page, or the worker hosting the game).
+      const { cdp: connection, bridgeSessionId } = this.getStored(connectionId);
       const expression = `(async () => {
         const value = await (0, eval)(${scriptLiteral(condition.expr)});
         return JSON.stringify({ value: value === undefined ? null : value });
       })()`;
-      const evaluated = await connection.evaluateJson<{ value: unknown }>(expression, timeoutMs);
+      const evaluated = await connection.evaluateJson<{ value: unknown }>(expression, timeoutMs, bridgeSessionId);
       return evaluated.value;
     }
 
@@ -1189,32 +1313,59 @@ export class RuntimeConnectionManager {
     });
   }
 
-  private async waitForBridge(connection: CdpConnection, timeoutMs: number): Promise<GameState> {
-    const startedAt = Date.now();
+  /**
+   * Poll until a bridge answers ready, on the page itself or in one of its
+   * dedicated workers (Construct runs the runtime in a worker with "Use
+   * worker" on). Workers are reached through Target.setAutoAttach with flat
+   * sessions. Returns undefined at the deadline, or once `stop` says another
+   * page won.
+   */
+  private async findBridge(connection: CdpConnection, deadline: number, stop: () => boolean): Promise<FoundBridge | undefined> {
     const expression = `(() => {
       const bridge = globalThis.__c3bridge;
       if (!bridge || typeof bridge.getState !== "function") return JSON.stringify(null);
       return JSON.stringify(bridge.getState());
     })()`;
-
-    while (Date.now() - startedAt < timeoutMs) {
-      const remaining = timeoutMs - (Date.now() - startedAt);
+    const workers = new Set<string>();
+    const stopListening = connection.onEvent((method, params, sessionId) => {
+      if (sessionId !== undefined) return;
+      const attachedSession = typeof params.sessionId === "string" ? params.sessionId : undefined;
+      if (!attachedSession) return;
+      if (method === "Target.attachedToTarget" && (params.targetInfo as { type?: unknown } | undefined)?.type === "worker") {
+        workers.add(attachedSession);
+      } else if (method === "Target.detachedFromTarget") {
+        workers.delete(attachedSession);
+      }
+    });
+    try {
       try {
-        const state = await connection.evaluateJson<GameState | null>(
-          expression,
-          Math.max(1, Math.min(CDP_CALL_TIMEOUT_MS, remaining)),
-        );
-        if (state?.ready === true) return state;
+        await connection.command("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, Math.max(1, Math.min(CDP_CALL_TIMEOUT_MS, deadline - Date.now())));
       } catch (error) {
         if (!connection.isOpen()) throw error;
+        // without auto-attach only the page itself is checked
       }
-
-      const waitMs = Math.min(BRIDGE_POLL_INTERVAL_MS, timeoutMs - (Date.now() - startedAt));
-      if (waitMs > 0) await delay(waitMs);
+      while (!stop() && Date.now() < deadline) {
+        for (const sessionId of [undefined, ...workers]) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0 || stop()) break;
+          try {
+            const state = await connection.evaluateJson<GameState | null>(
+              expression,
+              Math.max(1, Math.min(CDP_CALL_TIMEOUT_MS, remaining)),
+              sessionId,
+            );
+            if (state?.ready === true) return { state, sessionId };
+          } catch (error) {
+            if (!connection.isOpen()) throw error;
+          }
+        }
+        const waitMs = Math.min(BRIDGE_POLL_INTERVAL_MS, deadline - Date.now());
+        if (waitMs > 0) await delay(waitMs);
+      }
+      return undefined;
+    } finally {
+      stopListening();
     }
-
-    throw new Error(
-      `Runtime bridge was not ready after ${timeoutMs}ms. Inject the bridge and launch the game in DOM mode.`,
-    );
   }
 }
+
