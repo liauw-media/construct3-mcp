@@ -8,8 +8,9 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { findChrome } from '../../src/runtime/preview-server.js';
 import { registerRuntimeTools, type RuntimeToolController } from '../../src/tools/runtime-tools.js';
 import { MockServer } from '../mocks/mock-server.js';
@@ -35,6 +36,7 @@ const controllers: RuntimeToolController[] = [];
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   while (controllers.length > 0) await controllers.pop()!.close();
   while (cleanups.length > 0) await cleanups.pop()!();
 });
@@ -179,5 +181,30 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     // Input and the canvas stay on the page.
     expect(parse(await server.callTool('get_canvas_size', { connectionId }))).toMatchObject({ left: 100, top: 50, cssWidth: 640, cssHeight: 360 });
     parse(await server.callTool('simulate_input', { connectionId, action: { type: 'click', x: 10, y: 20 }, coordinateSpace: 'canvas' }));
+  }, LIVE_TIMEOUT_MS);
+
+  it('runs the whole chain against a game on the page, cross-origin isolated, with a screenshot over 4 MiB', async () => {
+    vi.stubEnv('C3MCP_ALLOW_EVAL', '1');
+    const folder = await fakeExport('dom');
+    const { server } = register();
+    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true, crossOriginIsolated: true, windowWidth: 1920, windowHeight: 1200 }));
+    expect(served.url).toBe(`http://127.0.0.1:${served.port}/`);
+    const connected = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+    expect(connected).toMatchObject({ bridgeContext: 'page', pageVisible: true, gameState: { ready: true } });
+    const { connectionId } = connected;
+    const expression = async (expr: string) => parse(await server.callTool('wait_for_condition', { connectionId, condition: { type: 'expression', expr, operator: 'neq', value: '__never__' }, timeoutMs: 5_000 })).finalValue;
+
+    expect(await expression('globalThis.crossOriginIsolated')).toBe(true);
+    const custom = parse(await server.callTool('subscribe_events', { connectionId, eventType: 'custom', filter: { name: 'Bonus' } }));
+    parse(await server.callTool('call_bridge', { connectionId, command: 'callFunction', args: { name: 'Bonus', params: [3] } }));
+    const events = parse(await server.callTool('read_events', { connectionId, subscriptionId: custom.subscriptionId }));
+    expect(events.events).toEqual([expect.objectContaining({ type: 'custom', name: 'Bonus', value: { n: 3 } })]);
+
+    // Random pixels do not compress: the PNG of a 1920x1080 noise canvas is over 4 MiB as base64.
+    await expression('__noise(1920, 1080)');
+    const shot = parse(await server.callTool('screenshot_game', { connectionId, outputPath: join(folder, 'shots', 'noise.png'), canvasOnly: true }));
+    expect(shot.bytes * 4 / 3).toBeGreaterThan(4 * 1024 * 1024);
+    expect(parse(await server.callTool('call_bridge', { connectionId, command: 'ping' })).result).toMatchObject({ pong: true });
+    parse(await server.callTool('disconnect_from_game', { connectionId }));
   }, LIVE_TIMEOUT_MS);
 });
