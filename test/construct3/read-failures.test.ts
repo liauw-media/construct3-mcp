@@ -457,7 +457,8 @@ describe('Read failures survive a project reload during the bulk read (real file
     const [resultA, resultB] = await Promise.all([a, b]);
     expect(resultA).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
     expect(resultB).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
-    expect(scans).toBe(1);
+    // One project scan, then each call tries Bad once more before it refuses
     expect(familyReads).toBe(1);
+    expect(scans).toBe(3);
   });
 });

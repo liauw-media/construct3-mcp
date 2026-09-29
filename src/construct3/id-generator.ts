@@ -88,9 +88,40 @@ export class IdGenerator {
     }
   }
 
-  /** Whether the scan for the reader's current disk state is done (no ID request would scan). */
-  isInitializedFor(reader: Construct3ProjectReader): boolean {
-    return this.scannedEpoch !== undefined && this.scannedEpoch === diskEpochOf(reader);
+  /**
+   * Scan again the files the last scan could not read at all (a lock held by
+   * a virus scanner, a sync client or the editor, no read access, a folder
+   * in the file's place). Their state on disk may not have changed when they
+   * become readable again, so no external change is seen for them: without
+   * this, UID minting would stay refused until the server restarts. A file
+   * that is gone or no longer registered holds no UIDs any more.
+   */
+  private async rescanUnscanned(reader: Construct3ProjectReader): Promise<void> {
+    const generation = this.generation;
+    const epoch = this.scannedEpoch;
+    const project = reader.getProject();
+    const ids = new IdCollector();
+    const still: string[] = [];
+    for (const entry of this.unscannedEntities) {
+      // "category/name": the category holds no "/"
+      const slash = entry.indexOf('/');
+      const category = entry.slice(0, slash) as 'objectTypes' | 'layouts';
+      const name = entry.slice(slash + 1);
+      if (!entityFolderPaths(project[category]).has(name)) continue;
+      try {
+        const scan = await reader.scanEntityIdsRaw(category, name);
+        ids.uid(scan.highestUid);
+        for (const sid of scan.sids) ids.sid(sid);
+      } catch (error) {
+        if (isFileNotFoundError(error)) continue;
+        still.push(entry);
+      }
+    }
+    // A reset or a new scan ran meanwhile: its result stands
+    if (generation !== this.generation || epoch !== this.scannedEpoch) return;
+    for (const sid of ids.sids) this.existingSids.add(sid);
+    if (ids.highestUid > this.highestUid) this.highestUid = ids.highestUid;
+    this.unscannedEntities = still;
   }
 
   private async scan(reader: Construct3ProjectReader, epoch: number): Promise<void> {
@@ -241,6 +272,8 @@ export class IdGenerator {
    */
   async generateUid(reader: Construct3ProjectReader): Promise<number> {
     await this.initialize(reader);
+    // Files the scan could not read may be readable by now
+    if (this.unscannedEntities.length > 0) await this.rescanUnscanned(reader);
     if (this.unscannedEntities.length > 0) {
       throw new Error(
         `Cannot generate a safe UID: project file(s) could not be scanned for existing UIDs ` +

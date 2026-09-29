@@ -645,6 +645,53 @@ describe('the ID generator keeps its scan across the server\'s own writes (#38)'
     expect(scans).not.toHaveBeenCalled();
   });
 
+  it('a layout that could not be read at the first scan is tried again at the next UID request', async () => {
+    // A registered layout with invalid JSON, so its UIDs are scanned as text, and a
+    // lock (virus scanner, sync client) on it during the first scan only
+    await writeFile(join(dir, 'layouts', 'Broken.json'), '{ "name": "Broken", "layers": [{ "instances": [{ "uid": 41, "sid": 500000000000041 }] }] ,,,', 'utf-8');
+    await editJson('project.c3proj', project => { project.layouts.items.push('Broken'); });
+    await reader.syncWithDisk();
+    const scanEntityIdsRaw = reader.scanEntityIdsRaw.bind(reader);
+    let locked = true;
+    vi.spyOn(reader, 'scanEntityIdsRaw').mockImplementation(async (category, name) => {
+      if (locked && name === 'Broken') {
+        throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${name}.json'`), { code: 'EBUSY' });
+      }
+      return scanEntityIdsRaw(category, name);
+    });
+
+    await runInToolCall(async () => {
+      await expect(idGen.generateUid(reader)).rejects.toThrow(/Cannot generate a safe UID.*layouts\/Broken/);
+    });
+    locked = false;
+
+    // The file is readable again; its state on disk did not change
+    await runInToolCall(async () => {
+      expect(await idGen.generateUid(reader)).toBe(42);
+    });
+  });
+
+  it('a layout that could not be read stops blocking UIDs once it is deleted', async () => {
+    await writeFile(join(dir, 'layouts', 'Broken.json'), '{ "name": "Broken" ,,,', 'utf-8');
+    await editJson('project.c3proj', project => { project.layouts.items.push('Broken'); });
+    await reader.syncWithDisk();
+    vi.spyOn(reader, 'scanEntityIdsRaw').mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
+    );
+
+    await runInToolCall(async () => {
+      await expect(idGen.generateUid(reader)).rejects.toThrow(/Cannot generate a safe UID.*layouts\/Broken/);
+    });
+    await runInToolCall(async () => {
+      await writer.deleteEntityFile('layouts', 'Broken');
+      await writer.removeFromProject('layouts', 'Broken');
+    });
+
+    await runInToolCall(async () => {
+      expect(await idGen.generateUid(reader)).toBe(1);
+    });
+  });
+
   it('a rescan after an external change never hands out an ID twice', async () => {
     await runInToolCall(async () => {
       expect(await idGen.generateUid(reader)).toBe(1); // handed out, not written anywhere
