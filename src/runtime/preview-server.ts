@@ -15,7 +15,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
@@ -358,17 +358,33 @@ export function findChrome(env: NodeJS.ProcessEnv = process.env): string {
   // Messages stay free of paths: the client sees a message with paths
   // redacted to nothing, so the locations tried go to the log.
   if (env.CHROME_PATH) {
-    if (existsSync(env.CHROME_PATH)) return env.CHROME_PATH;
+    if (isFile(env.CHROME_PATH)) return env.CHROME_PATH;
     console.error(`[serve_preview] CHROME_PATH names no file: ${env.CHROME_PATH}`);
     throw new Error('CHROME_PATH is set but names no file (the path is in the server log).');
   }
   const candidates = chromeCandidates(env);
-  const found = candidates.find(candidate => existsSync(candidate));
+  const found = candidates.find(candidate => isFile(candidate));
   if (!found) {
     console.error(`[serve_preview] no browser executable at any of: ${candidates.join('; ')}`);
     throw new Error(`No Chrome or Edge executable found in the ${candidates.length} usual locations (listed in the server log). Set CHROME_PATH in the server's environment.`);
   }
   return found;
+}
+
+/** True for an existing file (not a folder). */
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** The error for a browser that could not be started; the executable goes to the log only. */
+function startError(executable: string, error: unknown): Error {
+  console.error(`[serve_preview] could not start ${executable}:`, error);
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return new Error(`The browser could not be started (${code ?? (error instanceof Error ? error.message : String(error))}); the executable is named in the server log. Set CHROME_PATH to a Chrome or Edge executable.`);
 }
 
 /**
@@ -397,11 +413,14 @@ async function waitForDevToolsActivePort(
   userDataDir: string,
   timeoutMs: number,
   child: ChildProcess,
+  failure: () => Error | undefined,
 ): Promise<{ port: number; browserPath: string }> {
   const deadline = Date.now() + timeoutMs;
   let exited: number | null | undefined;
   child.once('exit', code => { exited = code ?? -1; });
   while (Date.now() < deadline) {
+    const failed = failure();
+    if (failed) throw failed;
     if (exited !== undefined) throw new Error(`The browser exited with code ${exited} before its debugging port answered`);
     const active = await readDevToolsActivePort(userDataDir);
     if (active) return active;
@@ -530,15 +549,35 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   if (options.headless) args.push('--headless=new', '--enable-unsafe-swiftshader', '--use-angle=swiftshader');
   if (options.windowWidth && options.windowHeight) args.push(`--window-size=${options.windowWidth},${options.windowHeight}`);
   args.push(options.url);
-  const child = spawn(executable, args, { stdio: 'ignore', windowsHide: false });
-  if (child.pid === undefined) {
+  let child: ChildProcess;
+  try {
+    child = spawn(executable, args, { stdio: 'ignore', windowsHide: false });
+  } catch (error) {
+    // Thrown at once for some unusable files (EFTYPE on Windows).
     await removeProfile(userDataDir, 2);
-    throw new Error(`Could not start ${executable}`);
+    throw startError(executable, error);
+  }
+  // Node reports a start that fails later (a missing or unusable
+  // executable) as an 'error' event; one without a listener would end the
+  // MCP server. The listener stays for the child's whole life.
+  let failure: Error | undefined;
+  const failed = new Promise<void>(done => {
+    child.on('error', error => {
+      if (!failure) failure = startError(executable, error);
+      else console.error('[serve_preview] browser process error:', error);
+      done();
+    });
+  });
+  if (child.pid === undefined) {
+    // No process: the 'error' event follows on the next tick.
+    await Promise.race([failed, new Promise(r => setTimeout(r, 1_000))]);
+    await removeProfile(userDataDir, 2);
+    throw failure ?? startError(executable, new Error('no process'));
   }
   await writeFile(join(userDataDir, OWNER_FILE), JSON.stringify({ serverPid: process.pid, browserPid: child.pid })).catch(() => undefined);
   let active: { port: number; browserPath: string };
   try {
-    active = await waitForDevToolsActivePort(userDataDir, options.readyTimeoutMs ?? 15_000, child);
+    active = await waitForDevToolsActivePort(userDataDir, options.readyTimeoutMs ?? 15_000, child, () => failure);
   } catch (error) {
     child.kill();
     await waitForExit(child, 2_000);
