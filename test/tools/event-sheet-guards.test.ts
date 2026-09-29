@@ -300,6 +300,69 @@ describe('move_events_between_sheets and event variables taken out of scope (#38
   });
 });
 
+// ─── sheet names spelled otherwise than registered (#38) ────
+
+describe('sheet names that differ from the registered name in case (#38)', () => {
+  const SCORE_SID = 785000000000001;
+  const USER_SID = 785000000000002;
+
+  /** MainSheet: global Score used by a block; Other: group G. */
+  async function setUp(): Promise<void> {
+    const main = await readSheet('MainSheet');
+    main.events.unshift(variable('Score', SCORE_SID));
+    main.events.push(block(USER_SID, [setX('Score * 2', 785000000000003)]));
+    await writeFile(join(tmpDir, 'eventSheets', 'MainSheet.json'), JSON.stringify(main, null, '\t'));
+    await addSheet('Other', [group('G', 785000000000010, [])]);
+    await startServer();
+  }
+  const files = () => Promise.all(['MainSheet', 'Other'].map(n => readFile(join(tmpDir, 'eventSheets', `${n}.json`), 'utf-8')));
+
+  it('move_events_between_sheets refuses them, so a used global variable cannot slip into a group unchecked', async () => {
+    await setUp();
+    const before = await files();
+
+    for (const [sourceSheet, targetSheet, named, meant] of [
+      ['mainsheet', 'Other', 'mainsheet', 'MainSheet'],
+      ['MainSheet', 'other', 'other', 'Other'],
+    ]) {
+      const error = await callError('move_events_between_sheets', {
+        sourceSheet, targetSheet, sids: [SCORE_SID], deleteSource: true, targetGroupPath: 'G',
+      });
+      expect(error).toContain(`Event sheet "${named}" not found: names are matched with their letter case. Did you mean "${meant}"?`);
+    }
+    expect(await files()).toEqual(before);
+  });
+
+  it('move_events_between_sheets refuses the source sheet in another case as the target, which lost the moved events', async () => {
+    await setUp();
+    const before = await files();
+
+    const error = await callError('move_events_between_sheets', {
+      sourceSheet: 'MainSheet', targetSheet: 'mainsheet', sids: [USER_SID], deleteSource: true,
+    });
+    expect(error).toContain('Event sheet "mainsheet" not found: names are matched with their letter case. Did you mean "MainSheet"?');
+    expect(await files()).toEqual(before);
+  });
+
+  it('delete_event_from_sheet, update_event_variable and add_event_to_sheet refuse them', async () => {
+    const MEANT_MAIN_SHEET = 'Event sheet "mainsheet" not found: names are matched with their letter case. Did you mean "MainSheet"?';
+    await setUp();
+    const before = await files();
+
+    expect(await callError('delete_event_from_sheet', { sheetName: 'mainsheet', sid: SCORE_SID, dryRun: true }))
+      .toContain(MEANT_MAIN_SHEET);
+    expect(await callError('update_event_variable', { sheetName: 'mainsheet', sid: SCORE_SID, newName: 'SCORE' }))
+      .toContain(MEANT_MAIN_SHEET);
+    expect(await callError('add_event_to_sheet', { sheetName: 'mainsheet', eventType: 'variable', variableName: 'Lives' }))
+      .toContain(MEANT_MAIN_SHEET);
+    expect(await files()).toEqual(before);
+
+    // Spelled as registered, the delete is refused for the use and the case-only rename goes through
+    expect((await call('delete_event_from_sheet', { sheetName: 'MainSheet', sid: SCORE_SID, dryRun: true })).action).toBe('delete_blocked');
+    expect((await call('update_event_variable', { sheetName: 'MainSheet', sid: SCORE_SID, newName: 'SCORE' })).success).toBe(true);
+  });
+});
+
 // ─── add_event_to_sheet results (#38) ───────────────────────
 
 describe('add_event_to_sheet returns what it created (#38)', () => {

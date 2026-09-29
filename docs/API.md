@@ -420,7 +420,7 @@ Mutation tools that write through the project writer (objects, families, event s
 
 **Parallel calls.** The animation tools, from [`add_animation_to_sprite`](#add_animation_to_sprite) to [`replace_sprite_image`](#replace_sprite_image), run one at a time: a call waits until the one before it has finished and reads the object only then. They write a Sprite's object file back, and several rename or write its frame image files, whose names hold the frame index, so two of them in parallel could otherwise move each other's images or write the object without the other's frames. Other tools that write an object file (e.g. `update_object_properties`) do not wait for them: run such a call on the same Sprite in parallel with an animation tool and one can overwrite the other's change, as for any two calls that change the same file. When [`add_frame_to_animation`](#add_frame_to_animation) or [`delete_frame_from_animation`](#delete_frame_from_animation) finds that another write replaced the object file during its own, it keeps the frames and image files together (see there).
 
-**Names and file names.** Entity files are named after the entity (`<category>/<folders>/<name>.json`, folders mirroring the project bar), and on Windows and macOS names that differ only in case name the same file. Create and rename tools therefore compare names the way the Construct 3 editor does: event sheet and layout names project-wide ignoring case, object type and family names in one namespace ignoring case, layer names per layout ignoring case (sub-layers included; the editor cannot load a layout with two such layers), animation names per sprite ignoring case (in any animation folder), event variable names ignoring case within the variable's scope (see [Event variable names](#event-variable-names)), and sibling project-bar folders (`subfolder` segments) ignoring case — a case-only clash is refused with an error naming the existing entity or folder. Create tools also refuse to write an entity JSON file or a timeline file where one already exists, including one whose name differs only in case; nothing is backed up or replaced, and the error says to choose another name or, for a leftover of a deleted entity, to check and remove the file first. Placeholder PNGs are not covered: `create_object` and `add_animation_to_sprite` write them over an image file of the same name in `images/`; `add_frame_to_animation` renames such a file to `<file>.bak` first. Rewrites of an existing file keep its name on disk exactly, including case, and the `.bak` backup takes that name.
+**Names and file names.** Entity files are named after the entity (`<category>/<folders>/<name>.json`, folders mirroring the project bar), and on Windows and macOS names that differ only in case name the same file. Create and rename tools therefore compare names the way the Construct 3 editor does: event sheet and layout names project-wide ignoring case, object type and family names in one namespace ignoring case, layer names per layout ignoring case (sub-layers included; the editor cannot load a layout with two such layers), animation names per sprite ignoring case (in any animation folder), event variable names ignoring case within the variable's scope (see [Event variable names](#event-variable-names)), and sibling project-bar folders (`subfolder` segments) ignoring case — a case-only clash is refused with an error naming the existing entity or folder. Create tools also refuse to write an entity JSON file or a timeline file where one already exists, including one whose name differs only in case; nothing is backed up or replaced, and the error says to choose another name or, for a leftover of a deleted entity, to check and remove the file first. Placeholder PNGs are not covered: `create_object` and `add_animation_to_sprite` write them over an image file of the same name in `images/`; `add_frame_to_animation` renames such a file to `<file>.bak` first. Rewrites of an existing file keep its name on disk exactly, including case, and the `.bak` backup takes that name. The event sheet tools that check a sheet together with the other event sheets (`add_event_to_sheet`, `delete_event_sheet`, `delete_event_from_sheet`, `update_event_variable`, `move_events_between_sheets`) take a sheet name only as the project registers it: a name that differs only in letter case is refused as not found, with the registered name in the error, also on Windows and macOS, where the file would open. Their checks know the other sheets by their registered names, so they would see that sheet twice, once as saved; a move whose target was its source spelled in another case lost the moved events.
 
 **Editor reload note.** Every response that reports a completed write includes `editorNote`: *"If this project is open in Construct 3, close and reopen it there before saving, or the editor can overwrite these changes."* The editor keeps an open project in memory, so saving from a session opened before the edit can overwrite it; its Project Bar reload (F9) re-reads script files only. A `WriteResult` with `success: true` counts as a write unless it is a dry run. Tools whose success does not imply a write carry no note: the `already_registered` no-op of `register_addon`, `fix_legacy_behavior_keys` with `dryRun: false` when it found nothing to rename, `fix_legacy_event_shapes` with `dryRun: false` when it found nothing to convert, `clone_project`, and `export_for_preview` / `pack_project` with `injectBridge: false`. Error responses never carry the note, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
 
@@ -573,7 +573,7 @@ Add a structural event to an existing event sheet.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sheetName` | string | Yes | Target event sheet |
+| `sheetName` | string | Yes | Target event sheet, as registered (letter case included) |
 | `eventType` | enum | Yes | `"group"` \| `"function"` \| `"variable"` \| `"include"` \| `"comment"` |
 | `title` | string | For groups | Group title |
 | `functionName` | string | For functions | Function name (checked, see [Function names](#function-names)) |
@@ -713,7 +713,7 @@ Delete an event from an event sheet by SID or include name.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sheetName` | string | Yes | Target event sheet |
+| `sheetName` | string | Yes | Target event sheet, as registered (letter case included) |
 | `sid` | number | No* | SID of the event to delete (block, group, variable, function) |
 | `eventPath` | string | No | With `sid`: picks one of several events that share the SID, e.g. `"events[3].children[1]"` (see [Events that share a SID](#mutation-tools)) |
 | `includeSheet` | string | No* | For removing includes: the included sheet name |
@@ -801,7 +801,7 @@ Update an event variable declaration found by SID.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sheetName` | string | Yes | Event sheet containing the variable |
+| `sheetName` | string | Yes | Event sheet containing the variable, as registered (letter case included) |
 | `sid` | number | Yes | SID of the `variable` event |
 | `eventPath` | string | No | Picks one of several events that share the SID (see [Events that share a SID](#mutation-tools)) |
 | `newName` | string | No | New name (checked, see [Event variable names](#event-variable-names)) |
@@ -818,8 +818,8 @@ Copy top-level events from one sheet to another by SID; with `deleteSource` they
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sourceSheet` | string | Yes | Sheet to copy/move from |
-| `targetSheet` | string | Yes | Sheet to copy/move into (must differ from the source) |
+| `sourceSheet` | string | Yes | Sheet to copy/move from, as registered (letter case included) |
+| `targetSheet` | string | Yes | Sheet to copy/move into (must differ from the source), as registered |
 | `sids` | number[] | Yes | SIDs of top-level events in the source sheet (min 1, each SID once) |
 | `eventPaths` | string[] | No | Paths of top-level events (`"events[4]"`) that pick one of several top-level events sharing a SID in `sids`, one per such SID (see [Events that share a SID](#mutation-tools)) |
 | `deleteSource` | boolean | No | Remove the events from the source after copying (default: false) |

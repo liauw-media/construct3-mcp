@@ -174,9 +174,9 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "... not found: names are matched with their letter case"
 
-**Cause**: `update_object_properties` or `update_family` was given a name that differs from the registered object type or family name only in letter case. On Windows and macOS such a name would open the file too, but the checks and the layout updates know the entity by its registered name only, so the call is refused.
+**Cause**: `update_object_properties` or `update_family` was given a name that differs from the registered object type or family name only in letter case, or `add_event_to_sheet`, `delete_event_from_sheet`, `update_event_variable` or `move_events_between_sheets` a sheet name that differs from the registered event sheet name only in letter case. On Windows and macOS such a name would open the file too, but the checks and the layout updates know the entity by its registered name only, so the call is refused. (For event sheets, the checks across sheets saw the sheet twice, and a move into the source sheet spelled in another case lost the moved events.)
 
-**Solution**: Use the registered name the error suggests (`list_objects`, `list_families`).
+**Solution**: Use the registered name the error suggests (`list_objects`, `list_families`, `list_eventsheets`).
 
 ### Sprite frames show the wrong image, or `validate_project` reports `frame-image`
 

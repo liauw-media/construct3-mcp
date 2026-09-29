@@ -268,7 +268,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     'add_event_to_sheet',
     'Add an event (group, function, variable, include, or comment) to the top level of an event sheet. Returns the SID of a new group, function or variable (generatedSid), the SIDs of the function\'s parameters (functionParameterSids), the new event\'s eventPath and the backupFile.',
     {
-      sheetName: z.string().max(200).describe('Target event sheet'),
+      sheetName: z.string().max(200).describe('Target event sheet, as registered (letter case included)'),
       eventType: z.enum(['group', 'function', 'variable', 'include', 'comment']).describe('Type of event to add'),
       title: z.string().max(500).optional().describe('For groups: the group title'),
       functionName: z.string().max(200).optional().describe('For functions: function name. Refused like in the editor: a name that matches, ignoring case, another function in the project or a System expression; with a return type also whitespace, punctuation such as - . : or a leading underscore (the name is used in expressions). Without a return type the editor accepts any name that is not empty'),
@@ -291,6 +291,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     },
     async (args) => {
       try {
+        // Its checks compare the sheet with the other sheets by registered name
+        const unregistered = await unregisteredSheetError(reader, args.sheetName);
+        if (unregistered) return unregistered;
+
         // Read existing sheet — preserves ALL original events and fields
         let sheet: EventSheet;
         try {
@@ -674,7 +678,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     'delete_event_from_sheet',
     'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Other event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the deleted functions and global variables: a match (a possible use), or such a sheet that cannot be read at all, also refuses without force (listed in unscannedFiles). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
     {
-      sheetName: z.string().max(200).describe('Target event sheet'),
+      sheetName: z.string().max(200).describe('Target event sheet, as registered (letter case included)'),
       sid: z.number().int().positive().optional().describe('SID of the event to delete (for block, group, variable, function events)'),
       eventPath: eventPathSchema,
       includeSheet: z.string().max(200).optional().describe('For removing includes: the included sheet name'),
@@ -690,6 +694,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (args.eventPath !== undefined && args.sid === undefined) {
           return toolError('eventPath picks one of several events that share a SID; pass it together with sid.');
         }
+        // Its reference check compares the sheet with the other sheets by registered name
+        const unregistered = await unregisteredSheetError(reader, args.sheetName);
+        if (unregistered) return unregistered;
 
         // Read the event sheet
         let sheet: EventSheet;
@@ -1073,8 +1080,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     'move_events_between_sheets',
     'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet. Refuses (unless force=true) a move that takes an event variable out of the scope of events that use it, e.g. a used global variable moved into a group (targetGroupPath), where it is a local variable; the uses are listed. Other event sheets that could not be parsed are searched as text for such a global variable.',
     {
-      sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
-      targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
+      sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from, as registered (letter case included)'),
+      targetSheet: z.string().max(200).describe('Event sheet to copy/move events into, as registered (letter case included)'),
       sids: z.array(z.number().int().positive()).min(1).describe('SIDs of the top-level events to copy/move (each SID once)'),
       eventPaths: z.array(z.string().max(500)).max(100).optional().describe(
         'Only needed when a SID in sids matches more than one top-level event of the source sheet (the call is then refused with a list of candidates): ' +
@@ -1089,6 +1096,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       try {
         if (args.sourceSheet === args.targetSheet) {
           return toolError('sourceSheet and targetSheet must be different sheets.');
+        }
+        // Its checks compare both sheets with the other sheets by registered
+        // name, and a target that is the source in another case would be
+        // written twice, the second time without the moved events
+        for (const name of [args.sourceSheet, args.targetSheet]) {
+          const unregistered = await unregisteredSheetError(reader, name);
+          if (unregistered) return unregistered;
         }
 
         // Read source sheet
@@ -1960,7 +1974,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     'update_event_variable',
     'Update an existing event variable declaration (rename, change type, change initial value). A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one.',
     {
-      sheetName: z.string().max(200).describe('Event sheet containing the variable'),
+      sheetName: z.string().max(200).describe('Event sheet containing the variable, as registered (letter case included)'),
       sid: z.number().int().describe('SID of the variable event to update'),
       eventPath: eventPathSchema,
       newName: z.string().max(200).optional().describe('New variable name. Refused like in the editor: a name that matches, ignoring case, an event variable or function parameter in the variable\'s scope (for a global variable: anywhere in the project) or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
@@ -1976,6 +1990,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (!hasUpdates) {
           return toolError('No updates provided. Specify at least one of: newName, newType, newInitialValue, isStatic, isConstant.');
         }
+        // Its name check compares the sheet with the other sheets by registered name
+        const unregistered = await unregisteredSheetError(reader, args.sheetName);
+        if (unregistered) return unregistered;
 
         let sheet: EventSheet;
         try {
@@ -2108,6 +2125,28 @@ function copiedSidsWarning(
     `update_event_block, update_event_block_action, update_event_variable and delete_event_from_sheet refuse ${one ? 'this SID' : 'these SIDs'} ` +
     `in "${sheetName}" unless eventPath names one of the events.`
   );
+}
+
+/**
+ * A "not found" error when the project registers no event sheet under exactly
+ * `name`, else undefined. On a file system that ignores case the reader also
+ * opens a sheet by a name that differs in case, but the tools that check a
+ * sheet together with the other event sheets key them by their registered
+ * names: they would see that sheet twice, once as saved, and miss what the
+ * change does to it (issue #38). A name that differs only in letter case gets
+ * its own hint, as in update_object_properties.
+ */
+async function unregisteredSheetError(
+  reader: MutationToolDeps['reader'],
+  name: string,
+): Promise<ReturnType<typeof toolError> | undefined> {
+  const registered = await reader.listEventSheets();
+  if (registered.includes(name)) return undefined;
+  const sameIgnoringCase = registered.find(n => n.toLowerCase() === name.toLowerCase());
+  if (sameIgnoringCase !== undefined) {
+    return toolError(`Event sheet "${name}" not found: names are matched with their letter case. Did you mean "${sameIgnoringCase}"?`);
+  }
+  return notFoundError('Event sheet', name, reader.findNearestName(name, 'eventsheets'), 'list_eventsheets');
 }
 
 /**
