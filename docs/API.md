@@ -233,8 +233,8 @@ Returns `{ valid, complete, summary, errors, warnings, info, unscannedFiles }`; 
 
 | Field | Description |
 |-------|-------------|
-| `valid` | No errors in the files that were checked. It does not say that every file was checked: read `complete` too |
-| `complete` | Every object type, family, event sheet and layout file that is registered in `project.c3proj` and exists on disk was read and checked. `false` when one of them was not; `valid` then vouches only for the others |
+| `valid` | No errors **and** every registered file was checked (`complete`). A project with a file that could not be checked is never `valid`: `summary.errors === 0` with `complete: false` means "no errors in the checked files, the rest unknown" |
+| `complete` | Every object type, family, event sheet and layout file that is registered in `project.c3proj` and exists on disk was read and checked. `false` when one of them was not; `valid` is then `false` too |
 | `unscannedFiles` | The files (`category/name`) that exist but were not checked. No check covered their contents, so duplicate UIDs and SIDs, broken references and load-time errors in them are not reported |
 | `summary` | `{ errors, warnings, info, checksRun, entitiesScanned, unscanned }`; `entitiesScanned` is the number of registered object types, event sheets and layouts (families not counted), unchecked ones included; `unscanned` is the number of `unscannedFiles` |
 

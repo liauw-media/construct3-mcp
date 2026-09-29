@@ -7,11 +7,11 @@ All notable changes to the Construct3 MCP Server are documented here.
 ### Added
 
 - `add_event_to_sheet` takes the function options `functionReturnType` (`none`, `number`, `string`, `any`), `functionIsAsync` and `functionCopyPicked`, the editor's *Return type*, *Asynchronous* and *Copy picked*, instead of always writing `none`/`false`/`false` (#49).
-- `validate_project` returns `complete` and `unscannedFiles`: `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable), and `unscannedFiles` names those files. `valid` keeps its meaning: no errors in the files that were checked (#49).
+- `validate_project` returns `complete` and `unscannedFiles`: `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable), and `unscannedFiles` names those files (#49).
 
 ### Changed
 
-- `validate_project` no longer counts a file over the 10MB read limit as an error, so a project whose only finding was such a file now returns `valid: true` (before: `false`, with a wrong "missing or contains invalid JSON" error) together with `complete: false`. Nothing in that file was checked, duplicate UIDs and SIDs included: a client that acts on `valid` should check `complete` too (#49).
+- `validate_project` reports a file over the 10MB read limit as an `unscanned-file` warning instead of a wrong "missing or contains invalid JSON" error, and `valid` is `false` whenever `complete` is `false`: nothing in such a file was checked, duplicate UIDs and SIDs included, so the project is not vouched for. A project whose only finding is such a file returns `valid: false` with `summary.errors: 0` (before: `valid: false` with a wrong error) (#49).
 - `validate_project` checks the files of registered families too: a registered family whose file is missing, unreadable or not valid JSON is now a `file-existence` error, so `valid` can be `false` for a project that passed before (#49).
 - `add_event_to_sheet` refuses a `functionReturnType` other than `none`, `number`, `string` and `any`; before, the option was unknown and any value was dropped without an error (#49).
 

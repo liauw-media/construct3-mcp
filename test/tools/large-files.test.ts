@@ -167,8 +167,9 @@ describe('validate_project and get_layout_details on a layout over the read cap'
     const warning = result.warnings.find((w: { check: string; entity: string }) =>
       w.check === 'unscanned-file' && w.entity === 'layouts/Big');
     expect(warning?.message).toContain('exceeds 10MB limit');
-    // valid keeps its meaning: no errors in the files that were checked
-    expect(result.valid).toBe(true);
+    // An unchecked file means the project cannot be vouched for: valid is false without any error
+    expect(result.summary.errors).toBe(0);
+    expect(result.valid).toBe(false);
   });
 
   it('get_layout_details names the size limit without suggesting the name it was given', async () => {

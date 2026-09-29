@@ -46,8 +46,11 @@ export interface IntegrityIssue {
 
 export interface IntegrityResult {
   /**
-   * No error-level issue was found in the files that were checked. It does
-   * not say that every file was checked: `complete` says that.
+   * No error-level issue was found AND every registered file was checked
+   * (`complete`). A project with a file that could not be checked is never
+   * reported valid, because nothing in that file (duplicate UIDs/SIDs
+   * included) was verified. `summary.errors === 0 && !complete` means: no
+   * errors in the checked files, the rest unknown.
    */
   valid: boolean;
   /**
@@ -168,7 +171,7 @@ export async function validateProjectIntegrity(
   const checksRun = 25;
 
   return {
-    valid: errors.length === 0,
+    valid: errors.length === 0 && unscannedFiles.length === 0,
     complete: unscannedFiles.length === 0,
     summary: {
       errors: errors.length,

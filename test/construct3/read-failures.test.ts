@@ -277,7 +277,8 @@ describe('validateProjectIntegrity — real files', () => {
     expect(result.warnings.find(w => w.check === 'unscanned-file' && w.entity === 'layouts/Big')).toBeDefined();
     expect(result.unscannedFiles).toContain('layouts/Big');
     expect(result.summary.unscanned).toBe(1);
-    expect(result.valid).toBe(true);
+    expect(result.summary.errors).toBe(0);
+    expect(result.valid).toBe(false);
     expect(result.complete).toBe(false);
   });
 

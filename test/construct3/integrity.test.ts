@@ -158,7 +158,7 @@ describe('validateProjectIntegrity', () => {
     expect(result.complete).toBe(false);
   });
 
-  it('reports complete: false while valid stays true when files were unscanned', async () => {
+  it('reports valid: false and complete: false with no errors when files were unscanned', async () => {
     const reader = validProject();
     reader.registerUnreadableLayout('HugeLayout', {
       code: 'E_FILE_TOO_LARGE',
@@ -166,8 +166,9 @@ describe('validateProjectIntegrity', () => {
     });
     const result = await validateProjectIntegrity(reader);
 
-    // valid only vouches for the files that were scanned; complete says whether that was all of them
-    expect(result.valid).toBe(true);
+    // Nothing in the unscanned file was checked, so the project is not reported valid;
+    // summary.errors === 0 still tells that the checked files had no errors.
+    expect(result.valid).toBe(false);
     expect(result.complete).toBe(false);
     expect(result.summary.errors).toBe(0);
   });
