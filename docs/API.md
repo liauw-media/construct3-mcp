@@ -981,6 +981,7 @@ Update properties of an existing layer or sub-layer.
 | `layoutName` | string | Yes | Layout name |
 | `layerName` | string | Yes | Layer or sub-layer to update, by name (a sub-layer also by its path, e.g. `"Main > HUD"`, which picks one of several layers with the same name) |
 | `newName` | string | No | Rename the layer (must differ from the other layers of the layout, sub-layers included, ignoring case; changing the case of the layer's own name is fine) |
+| `updateReferences` | boolean | No | With `newName`: point the event parameters that name the layer at the new name (default: true; see below) |
 | `isInitiallyVisible` | boolean | No | Initial visibility |
 | `isInitiallyInteractive` | boolean | No | Initial interactivity |
 | `isTransparent` | boolean | No | Transparency |
@@ -991,6 +992,13 @@ Update properties of an existing layer or sub-layer.
 | `zElevation` | number | No | Z elevation for 3D layering |
 
 At least one property must be provided. A new name used by another layer of the layout (sub-layers included), also one that differs only in case, is refused; changing only the case of the layer's own name is allowed.
+
+**Events that name the layer.** Conditions and actions name a layer in their `"layer"` parameter as a string expression (`"layer": "\"HUD\""`), and layer expressions take one too (`LayerScale("HUD")`); the editor looks layer names up ignoring case, and a layer parameter names a layer of whatever layout runs the event sheet. On a rename, every event sheet is searched (events, groups, function blocks and sub-events):
+- A `"layer"` parameter whose whole expression is the quoted old name, ignoring case, is pointed at the new name (a quote in the name is written as two quotes), and a warning lists them. Not when `updateReferences` is `false`, or when another layout has a layer of the old name (ignoring case) or a layout the reader could not parse names it (see [Files the server could not parse](#mutation-tools)): a layer parameter may name that layer, so they are listed in a warning instead
+- Any other string literal naming the layer (in another parameter, as part of a longer expression, as a function call argument, in a script) may name the layer or something else of the same name, such as an animation or a text: a warning lists them and they are never changed
+- Event sheets the reader could not parse are searched as text for the old name; a match, or one that cannot be read, is named in a warning (`unscannedFiles`)
+
+The layout is written first, then the event sheets; if one fails, everything written is restored from its backup.
 
 ### `delete_layer`
 

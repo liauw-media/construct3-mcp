@@ -173,7 +173,7 @@ Event SIDs are not always unique in editor-saved sheets. The tools that find an 
 | `update_layout` | Update layout event sheet binding and dimensions |
 | `delete_layout` | Delete a layout (blocks startup layout, checks references) |
 | `add_layer` | Add a layer (position, visibility, transparency, parallax, blend mode); refuses a name any layer or sub-layer of the layout uses, ignoring case |
-| `update_layer` | Rename a layer or sub-layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation; refuses a new name used by another layer or sub-layer, ignoring case |
+| `update_layer` | Rename a layer or sub-layer or change visibility, interactivity, parallax, blend mode, scale rate, Z elevation; refuses a new name used by another layer or sub-layer, ignoring case; a rename points the event parameters that name the layer at the new name (unless another layout has a layer of that name) and lists other strings that may name it |
 | `delete_layer` | Delete a layer or sub-layer with its sub-layers (never the last top-level one; blocked while they hold instances unless forced); hierarchy links of other instances to the deleted ones are removed |
 | `add_instance_to_layout` | Place an object instance on a layout layer or sub-layer with full property control; writes a value for every instance variable of the object and its families and refuses names they do not have |
 | `update_instance` | Update a placed instance by UID on any layer or sub-layer (position, size, angle, color, visibility, tags, instance variables of its object and families) |
