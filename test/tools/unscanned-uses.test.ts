@@ -665,3 +665,79 @@ describe('rename_animation with layouts that could not be parsed', () => {
     expect(warnings).not.toContain('NOT updated');
   });
 });
+
+// ─── Analysis tools ─────────────────────────────────────────
+
+describe('get_object_dependencies, find_orphaned_objects and get_asset_usage with files that could not be parsed', () => {
+  it('get_object_dependencies lists the file an object is possibly used in and the unscanned files', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy')]);
+    await startServer();
+
+    const result = await call('get_object_dependencies', { object: 'Enemy' });
+    expect(result.object.referenceCount).toBe(0);
+    expect(result.object.possiblyReferencedIn).toEqual(['layouts/Big']);
+    expect(result.unscannedFiles).toEqual([{ file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use' }]);
+
+    const sprite = await call('get_object_dependencies', { object: 'Sprite' });
+    expect(sprite.object.possiblyReferencedIn).toBeUndefined();
+  });
+
+  it('project-wide, an object with a possible use is listed as possibly used, not orphaned', async () => {
+    await addEnemy();
+    await addEntity('objectTypes', 'Unused', {
+      name: 'Unused', 'plugin-id': 'Sprite', sid: 710000000000100, isGlobal: false,
+      instanceVariables: [], behaviorTypes: [], effectTypes: [], animations: { items: [animation('A', 710000000000101)], subfolders: [] },
+    });
+    await addBigLayout('Big', [instance('Enemy')]);
+    await startServer();
+
+    const result = await call('get_object_dependencies', {});
+    expect(result.projectWide.orphanedObjects).toEqual(['Unused']);
+    expect(result.projectWide.possiblyUsedObjects).toEqual([{ name: 'Enemy', files: ['layouts/Big'] }]);
+    expect(result.projectWide.totalReferenced + result.projectWide.orphanedObjects.length +
+      result.projectWide.possiblyUsedObjects.length).toBe(result.projectWide.totalObjects);
+    expect(result.unscannedFiles).toEqual([{ file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use' }]);
+
+    const orphans = await call('find_orphaned_objects', {});
+    expect(orphans.orphanedObjects.map((o: { name: string }) => o.name)).toEqual(['Unused']);
+    expect(orphans.count).toBe(1);
+    expect(orphans.possiblyUsed).toEqual([{ name: 'Enemy', pluginId: 'Sprite', isGlobal: false, files: ['layouts/Big'] }]);
+    expect(orphans.unscannedFiles).toEqual([{ file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use' }]);
+  });
+
+  it('a file that cannot be read even as text makes every otherwise unused object possibly used', async () => {
+    await addEnemy();
+    await addUnreadable('layouts', 'Bad');
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects', {});
+    expect(orphans.orphanedObjects).toEqual([]);
+    expect(orphans.possiblyUsed.map((o: { name: string; files: string[] }) => [o.name, o.files])).toEqual([['Enemy', ['layouts/Bad']]]);
+    expect(orphans.unscannedFiles).toEqual([{ file: 'layouts/Bad', reason: 'could not be read', textSearch: 'unreadable' }]);
+  });
+
+  it('no new fields while every file could be parsed', async () => {
+    await addEnemy();
+    await register('layouts', 'Ghost');
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects', {});
+    expect(orphans.orphanedObjects.map((o: { name: string }) => o.name)).toEqual(['Enemy']);
+    expect(orphans.possiblyUsed).toBeUndefined();
+    expect(orphans.unscannedFiles).toBeUndefined();
+    const deps = await call('get_object_dependencies', {});
+    expect(deps.projectWide.possiblyUsedObjects).toBeUndefined();
+    expect(deps.unscannedFiles).toBeUndefined();
+  });
+
+  it('get_asset_usage does not report the images of such an object as unused', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy')]);
+    await startServer();
+
+    const result = await call('get_asset_usage', { type: 'image', detail: 'full' });
+    const enemy = result.assets.find((a: { name: string }) => a.name === 'Enemy');
+    expect(enemy.status).toBe('not-analysed');
+  });
+});

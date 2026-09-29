@@ -517,7 +517,14 @@ export interface ObjectDependencyNode {
   };
   families: string[];
   coOccursWith: string[];
+  /** References the index found (event references + layouts) */
   referenceCount: number;
+  /**
+   * Files that could not be parsed whose text names the object (or holds its
+   * SID), or that could not be searched at all: possible references, which
+   * referenceCount does not count
+   */
+  possiblyReferencedIn?: string[];
 }
 
 /** Performance issue found by heuristic analysis */

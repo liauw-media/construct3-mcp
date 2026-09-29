@@ -4,18 +4,32 @@
 
 import type { Construct3ProjectReader } from '../project-reader.js';
 import type { ObjectDependencyNode } from '../types.js';
-import { getProjectIndex } from './index-builder.js';
+import { getProjectIndex, type ProjectIndex } from './index-builder.js';
+import { searchUnscannedFiles, type UnscannedFileReport } from './unscanned-uses.js';
+import { nameTerm, numberTerm, type RawTextTerm } from '../raw-text-search.js';
+
+/** A file the index could not parse, and whether its text search found anything (no `names`: see the objects) */
+export type UnscannedFileSummary = Omit<UnscannedFileReport, 'names'>;
 
 export interface ObjectDependencyResult {
   object?: ObjectDependencyNode;
   projectWide?: {
     topConnected: ObjectDependencyNode[];
+    /** Objects nothing refers to; objects whose name is in a file that could not be parsed are in possiblyUsedObjects instead */
     orphanedObjects: string[];
     /** Orphans that are members of a family, with those families: delete_object refuses them until they leave it */
     orphanedFamilyMembers?: Array<{ name: string; families: string[] }>;
+    /**
+     * Objects the index finds no use of, but that files it could not parse
+     * possibly use (their text names the object or holds its SID, or they
+     * could not be searched): listed with those files
+     */
+    possiblyUsedObjects?: Array<{ name: string; files: string[] }>;
     totalObjects: number;
     totalReferenced: number;
   };
+  /** Event sheets, layouts and families the index could not parse, searched as text */
+  unscannedFiles?: UnscannedFileSummary[];
 }
 
 export interface OrphanedObjectsResult {
@@ -28,6 +42,59 @@ export interface OrphanedObjectsResult {
   }>;
   count: number;
   totalObjects: number;
+  /** Objects that would be orphans but that files the index could not parse possibly use, with those files */
+  possiblyUsed?: Array<{ name: string; pluginId: string; isGlobal: boolean; files: string[] }>;
+  /** Event sheets, layouts and families the index could not parse, searched as text */
+  unscannedFiles?: UnscannedFileSummary[];
+}
+
+/**
+ * Possible uses of `objects` in the event sheets, layouts and families the
+ * index could not parse (issue #55): one text search per file for all the
+ * names (and, in layouts, the SIDs object properties hold). `byObject` maps
+ * each object to the files whose text names it; a file that cannot be read
+ * even as text counts for every object. Nothing is read while every file
+ * could be parsed.
+ */
+async function possibleObjectUses(
+  reader: Construct3ProjectReader,
+  index: ProjectIndex,
+  objects: string[],
+): Promise<{ files: UnscannedFileSummary[]; byObject: Map<string, string[]> }> {
+  const byObject = new Map<string, string[]>();
+  const skipped = index.unscannedFiles.filter(f => f.category !== 'objectTypes');
+  if (skipped.length === 0 || objects.length === 0) return { files: [], byObject };
+
+  const owner = new Map<string, string>();
+  const nameTerms: RawTextTerm[] = [];
+  const sidTerms: RawTextTerm[] = [];
+  for (const name of objects) {
+    owner.set(name, name);
+    nameTerms.push(nameTerm(name));
+    const sid = index.sidOf(name);
+    if (sid !== undefined) {
+      const key = `sid:${sid}`;
+      owner.set(key, name);
+      sidTerms.push(numberTerm(sid, key));
+    }
+  }
+  const searched = await searchUnscannedFiles(reader, skipped,
+    file => file.category === 'layouts' ? [...nameTerms, ...sidTerms] : nameTerms);
+
+  const files: UnscannedFileSummary[] = [];
+  for (const { file, found } of searched) {
+    const users = found === null ? objects : [...new Set([...found].map(key => owner.get(key)!))];
+    for (const name of users) {
+      if (!byObject.has(name)) byObject.set(name, []);
+      byObject.get(name)!.push(file.file);
+    }
+    files.push({
+      file: file.file,
+      reason: file.reason,
+      textSearch: found === null ? 'unreadable' : found.size > 0 ? 'possible-use' : 'no-match',
+    });
+  }
+  return { files, byObject };
 }
 
 /**
@@ -52,20 +119,32 @@ export async function getObjectDependencies(
       throw new Error(`Object "${options.object}" not found.${hint} Use list_objects to see all available names.`);
     }
 
-    return { object: buildObjectNode(index, options.object) };
+    const node = buildObjectNode(index, options.object);
+    const { files, byObject } = await possibleObjectUses(reader, index, [options.object]);
+    const possibly = byObject.get(options.object);
+    return {
+      object: possibly ? { ...node, possiblyReferencedIn: possibly } : node,
+      ...(files.length > 0 ? { unscannedFiles: files } : {}),
+    };
   }
 
-  // Project-wide view
+  // Project-wide view. Same rule as find_orphaned_objects: objects the index finds
+  // no use of, unless files it could not parse possibly use them
+  const unused = index.allObjects.filter(objName => !index.isObjectUsed(objName));
+  const { files, byObject } = await possibleObjectUses(reader, index, unused);
   const allNodes: ObjectDependencyNode[] = [];
   const orphanedObjects: string[] = [];
   const orphanedFamilyMembers: Array<{ name: string; families: string[] }> = [];
+  const possiblyUsedObjects: Array<{ name: string; files: string[] }> = [];
 
   for (const objName of index.allObjects) {
     const node = buildObjectNode(index, objName);
-    allNodes.push(node);
+    const possibly = byObject.get(objName);
+    allNodes.push(possibly ? { ...node, possiblyReferencedIn: possibly } : node);
 
-    // Same rule as find_orphaned_objects and validate_project
-    if (!index.isObjectUsed(objName)) {
+    if (possibly) {
+      possiblyUsedObjects.push({ name: objName, files: possibly });
+    } else if (!index.isObjectUsed(objName)) {
       orphanedObjects.push(objName);
       const families = index.getObjectUsage(objName).families;
       if (families.length > 0) orphanedFamilyMembers.push({ name: objName, families });
@@ -82,10 +161,13 @@ export async function getObjectDependencies(
       topConnected: allNodes.slice(0, limit),
       orphanedObjects,
       ...(orphanedFamilyMembers.length > 0 ? { orphanedFamilyMembers } : {}),
+      ...(possiblyUsedObjects.length > 0 ? { possiblyUsedObjects } : {}),
       totalObjects: index.allObjects.length,
-      // Used objects (family use included), so totalReferenced + orphanedObjects.length = totalObjects
-      totalReferenced: index.allObjects.length - orphanedObjects.length,
+      // Used objects (family use included), so
+      // totalReferenced + orphanedObjects.length + possiblyUsedObjects.length = totalObjects
+      totalReferenced: index.allObjects.length - orphanedObjects.length - possiblyUsedObjects.length,
     },
+    ...(files.length > 0 ? { unscannedFiles: files } : {}),
   };
 }
 
@@ -122,25 +204,30 @@ export async function findOrphanedObjects(
 ): Promise<OrphanedObjectsResult> {
   const index = await getProjectIndex(reader);
   const objectTypes = await reader.readAllObjectTypes();
+  const unused = index.allObjects.filter(objName => !index.isObjectUsed(objName));
+  const { files, byObject } = await possibleObjectUses(reader, index, unused);
 
   const orphaned: OrphanedObjectsResult['orphanedObjects'] = [];
+  const possiblyUsed: NonNullable<OrphanedObjectsResult['possiblyUsed']> = [];
 
-  for (const objName of index.allObjects) {
-    if (!index.isObjectUsed(objName)) {
-      const objData = objectTypes.get(objName);
-      const families = index.getObjectUsage(objName).families;
-      orphaned.push({
-        name: objName,
-        pluginId: objData?.['plugin-id'] || 'unknown',
-        isGlobal: objData?.isGlobal === true,
-        ...(families.length > 0 ? { families } : {}),
-      });
+  for (const objName of unused) {
+    const objData = objectTypes.get(objName);
+    const pluginId = objData?.['plugin-id'] || 'unknown';
+    const isGlobal = objData?.isGlobal === true;
+    const possibly = byObject.get(objName);
+    if (possibly) {
+      possiblyUsed.push({ name: objName, pluginId, isGlobal, files: possibly });
+      continue;
     }
+    const families = index.getObjectUsage(objName).families;
+    orphaned.push({ name: objName, pluginId, isGlobal, ...(families.length > 0 ? { families } : {}) });
   }
 
   return {
     orphanedObjects: orphaned,
     count: orphaned.length,
     totalObjects: index.allObjects.length,
+    ...(possiblyUsed.length > 0 ? { possiblyUsed } : {}),
+    ...(files.length > 0 ? { unscannedFiles: files } : {}),
   };
 }
