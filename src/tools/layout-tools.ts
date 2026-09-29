@@ -41,6 +41,13 @@ import {
   type LayerEntry,
 } from '../construct3/layers.js';
 import { hierarchyUnlinkWarnings, unlinkRemovedInstances } from '../construct3/hierarchy.js';
+import {
+  buildInstanceVariableValues,
+  checkInstanceVariableValues,
+  expectedInstanceVariables,
+  type InstanceVariableDef,
+} from '../construct3/instance-variables.js';
+import { classifyReadError } from '../construct3/project-reader.js';
 
 /**
  * What delete_layout looks for in the text of a layout file it could not
@@ -115,6 +122,28 @@ function describeInstancePlace(entry: LayerEntry | undefined): string {
 }
 
 export function registerLayoutTools({ server, reader, writer, idGen }: MutationToolDeps) {
+  /**
+   * The instance variables the instances of `objectType` hold values for (its
+   * own and its families'); a warning instead when its file could not be
+   * parsed, and an error when it does not exist.
+   */
+  async function declaredInstanceVariables(
+    objectType: unknown,
+  ): Promise<{ variables: InstanceVariableDef[] } | { variables?: undefined; warning: string } | { error: string }> {
+    const name = String(objectType);
+    try {
+      const obj = await reader.readObjectType(name);
+      return { variables: expectedInstanceVariables(name, obj, await readFamiliesForInstances(reader)) };
+    } catch (error) {
+      if (classifyReadError(error) === 'E_FILE_NOT_FOUND') {
+        return { error: `The instance's object type "${name}" does not exist, so it has no instance variables to set. Nothing was changed.` };
+      }
+      return {
+        warning: `The object type "${name}" could not be parsed, so the instance variable names were not checked against its variables.`,
+      };
+    }
+  }
+
   // ─── create_layout ────────────────────────────────────────
 
   server.tool(
@@ -220,7 +249,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       originX: z.number().min(0).max(1).optional().describe('Horizontal origin 0-1 (default: 0.5 = center)'),
       originY: z.number().min(0).max(1).optional().describe('Vertical origin 0-1 (default: 0.5 = center)'),
       instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-        .describe('Instance variable values as {varName: value}'),
+        .describe('Instance variable values as {varName: value}; every instance variable of the object and its families not given gets its default (0, "" or false); a name the object and its families have no variable of is refused'),
       behaviors: z.record(z.string(), boundedRecord())
         .refine(obj => Object.keys(obj).length <= 50, 'Too many behaviors (max 50)')
         .refine(obj => JSON.stringify(obj).length <= 50_000, 'Behaviors payload too large (max 50KB)')
@@ -260,25 +289,27 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
         }
 
+        const warnings: string[] = [];
+        const families = await readFamiliesForInstances(reader);
+
+        // A value for every instance variable of the object and its families, like the
+        // editor writes them; values given for a variable it does not have are refused
+        const expectedVariables = expectedInstanceVariables(args.objectType, objData, families);
+        const variableCheck = checkInstanceVariableValues(expectedVariables, args.instanceVariables ?? {});
+        if (variableCheck.unknown.length > 0) {
+          return toolError(undeclaredVariablesError(args.objectType, variableCheck, expectedVariables));
+        }
+        if (variableCheck.mistyped.length > 0) {
+          warnings.push(`Instance variable values of another type than the variable: ${variableCheck.mistyped.join('; ')}. Written as given.`);
+        }
+        const instanceVariables = buildInstanceVariableValues(expectedVariables, args.instanceVariables);
+
         const uid = await idGen.generateUid(reader);
         const sid = await idGen.generateSid(reader);
-        const warnings: string[] = [];
-
-        // Validate instanceVariables keys against object type definition
-        if (args.instanceVariables && objData) {
-          const definedVars = new Set((objData.instanceVariables ?? []).map(v => v.name));
-          for (const key of Object.keys(args.instanceVariables)) {
-            if (!definedVars.has(key)) {
-              warnings.push(`Instance variable "${key}" is not defined on "${args.objectType}". Defined variables: ${[...definedVars].join(', ') || '(none)'}. It may be inherited from a family.`);
-            }
-          }
-        }
 
         // One behavior entry per behavior of the object and its families, like
         // the editor writes them; caller values override the defaults
-        const expectedBehaviors = expectedInstanceBehaviors(
-          args.objectType, objData, await readFamiliesForInstances(reader),
-        );
+        const expectedBehaviors = expectedInstanceBehaviors(args.objectType, objData, families);
         const instanceBehaviors = buildInstanceBehaviors(args.objectType, expectedBehaviors, args.behaviors);
         warnings.push(...instanceBehaviors.warnings);
 
@@ -289,7 +320,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         if (args.zElevation !== undefined) overrides.zElevation = args.zElevation;
         if (args.originX !== undefined) overrides.originX = args.originX;
         if (args.originY !== undefined) overrides.originY = args.originY;
-        if (args.instanceVariables !== undefined) overrides.instanceVariables = args.instanceVariables;
+        overrides.instanceVariables = instanceVariables;
         overrides.behaviors = instanceBehaviors.behaviors;
         if (args.tags !== undefined) overrides.tags = args.tags;
         if (args.showing !== undefined) overrides.showing = args.showing;
@@ -303,7 +334,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
             uid,
             sid,
             tags: overrides.tags ?? '',
-            instanceVariables: overrides.instanceVariables ?? {},
+            instanceVariables,
             behaviors: instanceBehaviors.behaviors,
             showing: overrides.showing ?? true,
             locked: overrides.locked ?? false,
@@ -799,7 +830,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       showing: z.boolean().optional().describe('Initial visibility'),
       locked: z.boolean().optional().describe('Locked in editor'),
       tags: z.string().max(500).optional().describe('Comma-separated tags'),
-      instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe('Instance variable values to update'),
+      instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe('Instance variable values to update (names of instance variables of the object type or its families; others are refused)'),
     },
     async (args) => {
       try {
@@ -825,6 +856,26 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return toolError(`Instance with UID ${args.uid} not found in layout "${args.layoutName}". Use get_layout_details to see all instance UIDs.`);
         }
         const inst = found.instance;
+
+        // Only the instance variables its object type and families have
+        const warnings: string[] = [];
+        if (args.instanceVariables !== undefined) {
+          const declared = await declaredInstanceVariables(inst.type);
+          if ('error' in declared) {
+            return toolError(declared.error);
+          }
+          if (declared.variables) {
+            const check = checkInstanceVariableValues(declared.variables, args.instanceVariables);
+            if (check.unknown.length > 0) {
+              return toolError(undeclaredVariablesError(String(inst.type), check, declared.variables));
+            }
+            if (check.mistyped.length > 0) {
+              warnings.push(`Instance variable values of another type than the variable: ${check.mistyped.join('; ')}. Written as given.`);
+            }
+          } else {
+            warnings.push(declared.warning);
+          }
+        }
 
         // Update world properties (non-world instances have none: spatial props are ignored for them)
         if (found.entry && inst.world) {
@@ -852,6 +903,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           category: 'layout',
           action: 'updated',
           backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
@@ -860,4 +912,22 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       }
     }
   );
+}
+
+/**
+ * Error for instance variable values given for names the object type and its
+ * families have no instance variable of.
+ */
+function undeclaredVariablesError(
+  objectType: string,
+  check: { unknown: string[]; suggestions: Map<string, string> },
+  expected: InstanceVariableDef[],
+): string {
+  const names = check.unknown.map(name => {
+    const suggestion = check.suggestions.get(name);
+    return suggestion ? `"${name}" (names are matched with their letter case: "${suggestion}"?)` : `"${name}"`;
+  });
+  const defined = expected.map(v => `${v.name} (${v.type})`).join(', ') || '(none)';
+  return `"${objectType}" and its families have no instance variable ${names.join(', ')}. Its instance variables: ${defined}. ` +
+    'Add the variable to the object type (update_object_properties) or its family (update_family) first. Nothing was changed.';
 }

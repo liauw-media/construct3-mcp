@@ -262,7 +262,9 @@ describe('instance behavior entries', () => {
     await call('add_instance_to_layout', { layoutName: 'Layout 1', layerName: 'Main', objectType: 'Hero', x: 1, y: 1 });
 
     const complete = await call('update_object_properties', { name: 'Hero', addVariables: [{ name: 'hp', type: 'number' }] });
-    expect(complete.warnings).toBeUndefined();
+    // Only the new variable's default value was added to the instance
+    expect(complete.warnings).toEqual(['Updated instances in layout(s): Layout 1']);
+    expect((await instancesOf('Hero'))[0].instanceVariables).toEqual({ hp: 0 });
 
     await setSavedBehaviors('Hero', {});
     const data = await call('update_object_properties', { name: 'Hero', removeVariables: ['hp'] });

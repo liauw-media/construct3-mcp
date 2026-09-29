@@ -431,7 +431,7 @@ This adds `objectTypes/Player.json` and a 1x1 placeholder image `images/player-a
 
 The UID is what `update_instance` and `delete_instance_from_layout` need later. Without a size the instance is 100 x 100.
 
-"Give Player a number instance variable health" calls `update_object_properties {"name": "Player", "addVariables": [{"name": "health", "type": "number"}]}`. The tool sets name and type only, not a start value.
+"Give Player a number instance variable health" calls `update_object_properties {"name": "Player", "addVariables": [{"name": "health", "type": "number"}]}`. The tool sets name and type only, not a start value: every instance already placed gets the type's default (`0`, `""` or `false`), which you can change per instance with `update_instance`.
 
 "Add a global number variable Score" calls `add_event_to_sheet {"sheetName": "MainSheet", "eventType": "variable", "variableName": "Score", "variableType": "number", "initialValue": "0"}`.
 

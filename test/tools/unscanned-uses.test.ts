@@ -852,7 +852,7 @@ describe('instance updates in layouts that could not be parsed', () => {
     ]);
   });
 
-  it('update_object_properties says nothing about such a layout without the object, or when no behavior changes', async () => {
+  it('update_object_properties says nothing about such a layout without the object', async () => {
     await addEnemy();
     await addBigLayout('Big', [instance('Sprite')]);
     await startServer();
@@ -861,9 +861,13 @@ describe('instance updates in layouts that could not be parsed', () => {
     expect(removed.success).toBe(true);
     expect(JSON.stringify(removed.warnings ?? [])).not.toContain('NOT updated');
 
+    // A new instance variable gets a value on every instance too, so the layout is searched, without a match
     const added = await call('update_object_properties', { name: 'Enemy', addVariables: [{ name: 'speed', type: 'number' }] });
     expect(added.success).toBe(true);
-    expect(added.unscannedFiles).toBeUndefined();
+    expect(JSON.stringify(added.warnings ?? [])).not.toContain('NOT updated');
+    expect(added.unscannedFiles).toEqual([
+      { file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'no-match', searchedFor: ['Enemy'] },
+    ]);
   });
 
   it('update_family and delete_family warn that member instances there keep the family\'s behavior entries', async () => {

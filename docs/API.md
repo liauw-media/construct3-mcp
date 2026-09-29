@@ -483,7 +483,8 @@ Update an existing object's instance variables and behaviors.
 - Generates unique SIDs for each new variable and behavior
 - Warns on duplicate variable/behavior names (skips them)
 - Updates the object's layout instances (all layers, sub-layers and `nonworld-instances`): each gets a default entry for an added behavior (see [`add_instance_to_layout`](#add_instance_to_layout)) and loses the entry of a removed one; existing entries keep their values and their order (a new entry goes next to the entries it follows in the editor's order)
-- On any behavior or instance variable change, an instance that has no entry for another behavior of the object or its families (older versions of these tools placed instances without them) gets a default entry for it too, and a warning names these behaviors and counts the instances
+- Keeps the instances' instance variable values in step, as the editor saves them: each instance gets the default value of an added variable (`0`, `""` or `false` by its type) and loses the value of a removed one, unless a family of the object still has a variable of that name; existing values keep their value and order
+- On any behavior or instance variable change, an instance that has no entry for another behavior of the object or its families, or no value for another of their instance variables (older versions of these tools placed instances without them), gets a default entry or value too, and a warning names them and counts the instances
 
 ### `delete_object`
 
@@ -536,13 +537,13 @@ At least one parameter besides `name` must be provided. Duplicates and missing e
 - Event sheets that could not be parsed (see [Files the server could not parse](#mutation-tools)): for `removeVariables`, a sheet whose text holds a removed name together with the family's or a member's name; for `removeMembers`, one whose text holds one of the family's instance variables or behaviors together with a leaving member's name. Such a sheet, or one that cannot be read at all, blocks as well (`unscannedFiles`)
 - Scripts: as in `update_object_properties`, a warning when scripts read by name an instance variable or behavior that a member loses (a removed variable, or for a leaving member each of the family's instance variables and behaviors that it does not declare itself or get from another family)
 
-When the family has behaviors, the layout instances of members that join get default entries for them, and those of members that leave lose them. Entries these instances lack for the other behaviors of their object and its families are added too, as in [`update_object_properties`](#update_object_properties).
+The layout instances of the members follow the change: members that join get default entries for the family's behaviors and the default value of each of its instance variables; members that leave lose them and the entries for the family's effects, unless the member still has a behavior, variable or effect of that name itself or through another family; the other members get the default value of an added variable and lose the value of a removed one. Entries and values these instances lack for the other behaviors and instance variables of their object and its families are added too, as in [`update_object_properties`](#update_object_properties). Effect entries of a joining member are not added: the default parameter values of effects are not known (Construct 3 is expected to add them when it opens the project; not verified).
 
 **Load-time check:** a member change that makes the family mix plugins is refused and nothing is written (`family-plugin-mismatch`, *wrong plugin*). A mix that was already there does not block other updates, and removing the odd member is allowed.
 
 ### `delete_family`
 
-Delete a family. The member object types are kept. The layout instances of its members lose the entries for the family's behaviors, and get the entries they lack for their other behaviors (see [`update_object_properties`](#update_object_properties)).
+Delete a family. The member object types are kept. The layout instances of its members lose the entries for the family's behaviors and effects and the values of its instance variables (unless the member still has one of that name itself or through another family), and get the entries and values they lack for their other behaviors and instance variables (see [`update_object_properties`](#update_object_properties)).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -554,7 +555,7 @@ Delete a family. The member object types are kept. The layout instances of its m
 - If referenced and `force=false`: blocks (`action: "delete_blocked"`) and lists where the family is used. `message` sums it up; `references` holds `eventSheets` and `layouts` (names), `events` and `instanceProperties` (as for `delete_object`) and `memberUses` (`{ eventSheet, path, eventPath, sid, member, kind, name, context }`, `eventPath` and `sid` as for the `uses` of [`update_object_properties`](#update_object_properties), `kind` being `instance variable` or `behavior` and `context` `condition`, `action` or `expression`). Each list is capped at 50 entries; `eventsNotListed`, `instancePropertiesNotListed` and `memberUsesNotListed` count the rest
 - If referenced and `force=true`: deletes with a warning that names the remaining uses (references NOT cleaned up). [`validate_project`](#validate_project) then reports the conditions, actions and object parameters that name the family and the Particles object properties that hold its SID as `broken-object-reference`, and the uses through members as `missing-behavior-or-variable`, but not the uses of the family's name in expressions and scripts, nor the uses through members written as `Member.name` or `Self.name` in expressions: a second warning lists those
 - Event sheets and layouts that could not be parsed (see [Files the server could not parse](#mutation-tools)) are searched for the family's name, layouts also for its SID, and event sheets for its instance variables and behaviors together with a member's name: a match, or such a file that cannot be read at all, blocks as well (`unscannedFiles`)
-- Values that member instances in layouts hold for the family's instance variables are left as they are; their entries for the family's behaviors are removed, and entries they lack for their other behaviors are added
+- Member instances in layouts lose the values of the family's instance variables and the entries for its behaviors and effects; entries and values they lack for their other behaviors and instance variables are added
 - Backs up the JSON file and removes from c3proj
 
 ### `create_event_sheet`
@@ -908,7 +909,7 @@ Place an object instance on a layout layer or sub-layer. For copying instances b
 | `zElevation` | number | No | Z elevation for 3D layering (default: 0) |
 | `originX` | number | No | Horizontal origin 0-1 (default: 0.5 = center) |
 | `originY` | number | No | Vertical origin 0-1 (default: 0.5 = center) |
-| `instanceVariables` | object | No | Instance variable values as `{varName: value}` |
+| `instanceVariables` | object | No | Instance variable values as `{varName: value}`; every instance variable of the object and its families not given gets its default (`0`, `""` or `false`); a name the object and its families have no instance variable of is refused |
 | `behaviors` | object | No | Behavior property values as `{behaviorName: {properties: {prop: val}}}` (the shape `get_layout_details` returns) or `{behaviorName: {prop: val}}`; they override the defaults |
 | `tags` | string | No | Comma-separated instance tags (alphanumeric only) |
 | `showing` | boolean | No | Whether instance is initially visible (default: true) |
@@ -920,7 +921,8 @@ Place an object instance on a layout layer or sub-layer. For copying instances b
 - Nonworld-global objects (Array, JSON, Dictionary) are placed in `nonworld-instances` instead of on layers
 - Auto-fills default instance properties for Sprite, Text, TiledBg, NinePatch
 - Writes a behavior entry for every behavior of the object and of the families it belongs to, like the editor: family behaviors first, then the object's own, each as `{"properties": {...}}` with the built-in behavior's default values (from the Construct 3 r449 editor's behavior definitions). Values passed in `behaviors` override the defaults. A behavior without known defaults (third-party addons) gets `{"properties": {}}` and a warning; Construct 3 fills in missing properties with their defaults when it opens the project (Scirra's own example projects contain such entries). The warning also points out a behaviorId that is not one the editor defines, such as `"Solid"` for `"solid"`
-- Warns on unknown instanceVariable keys (may be inherited from families), on behavior names that are not behaviors of the object or its families, on property ids that a built-in behavior does not have, and on values whose type differs from the property's default (e.g. a string for a check box)
+- Writes a value for every instance variable of the object and of the families it belongs to, like the editor: family variables first, then the object's own, the given values on top of the defaults (`0`, `""`, `false`). A name in `instanceVariables` that neither the object nor its families have is refused (names are matched with their letter case; a name that differs only in case is pointed out), and a value of another type than its variable is written with a warning
+- Warns on behavior names that are not behaviors of the object or its families, on property ids that a built-in behavior does not have, and on values whose type differs from the property's default (e.g. a string for a check box)
 - All visual and behavioral properties are preserved when specified
 
 ### `delete_layout`
@@ -1021,9 +1023,9 @@ Update a placed instance, found by UID on any layer or sub-layer or among the no
 | `showing` | boolean | No | Initial visibility |
 | `locked` | boolean | No | Locked in the editor |
 | `tags` | string | No | Comma-separated tags |
-| `instanceVariables` | object | No | Values merged into the instance's existing `instanceVariables` |
+| `instanceVariables` | object | No | Values merged into the instance's existing `instanceVariables`; only instance variables of the instance's object type and its families |
 
-At least one property must be provided.
+At least one property must be provided. A name in `instanceVariables` that neither the instance's object type nor its families have is refused and nothing is changed (names are matched with their letter case; a name that differs only in case is pointed out), as is any value when the object type does not exist; a value of another type than its variable is written with a warning. When the object type's file could not be parsed, the names are not checked and a warning says so.
 
 ### `delete_instance_from_layout`
 

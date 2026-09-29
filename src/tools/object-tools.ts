@@ -67,6 +67,15 @@ import {
 } from '../construct3/instance-behaviors.js';
 import type { InstanceBehavior } from '../construct3/instance-behaviors.js';
 import { planObjectImageParking, type ObjectImageParking } from '../construct3/object-images.js';
+import {
+  dropInstanceEffects,
+  effectNamesOf,
+  expectedInstanceEffects,
+  expectedInstanceVariables,
+  instanceVariablesOf,
+  syncInstanceVariables,
+  type InstanceVariableDef,
+} from '../construct3/instance-variables.js';
 
 export function registerObjectTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_object ──────────────────────────────────────────
@@ -233,6 +242,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const warnings: string[] = [];
         const addedBehaviors: string[] = [];
         const removedBehaviors: string[] = [];
+        const addedVariables: string[] = [];
+        const removedVariables: string[] = [];
 
         // Before any change: events that use an instance variable or behavior being removed
         const variablesToRemove = existingNames(obj.instanceVariables, args.removeVariables);
@@ -279,6 +290,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             }
             const sid = await idGen.generateSid(reader);
             vars.push(createInstanceVariable(v.name, v.type, sid));
+            addedVariables.push(v.name);
           }
         }
 
@@ -290,6 +302,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
               const idx = vars.findIndex(v => v.name === varName);
               if (idx !== -1) {
                 vars.splice(idx, 1);
+                removedVariables.push(varName);
               } else {
                 warnings.push(`Variable "${varName}" not found, skipping`);
               }
@@ -341,12 +354,20 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
         // Sync layout instances: ensure all instances of this object have
         // behaviors/instanceVariables dicts so C3 can resolve them on load,
-        // add an entry for each added behavior (and any other entry an
-        // instance lacks) and drop the removed ones.
+        // add an entry for each added behavior and a default value for each
+        // added instance variable (and any other entry or value an instance
+        // lacks) and drop the removed ones.
         if (args.addBehaviors?.length || args.removeBehaviors?.length || args.addVariables?.length || args.removeVariables?.length) {
-          const expected = expectedInstanceBehaviors(args.name, obj, await readFamiliesForInstances(reader));
+          const families = await readFamiliesForInstances(reader);
           const sync = await syncLayoutInstances(reader, writer, new Map([
-            [args.name, { expected, add: addedBehaviors, drop: removedBehaviors }],
+            [args.name, {
+              expected: expectedInstanceBehaviors(args.name, obj, families),
+              add: addedBehaviors,
+              drop: removedBehaviors,
+              variables: expectedInstanceVariables(args.name, obj, families),
+              addVariables: addedVariables,
+              dropVariables: removedVariables,
+            }],
           ]));
           warnings.push(...sync.warnings);
           unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
@@ -703,6 +724,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         if (!Array.isArray(family.instanceVariables)) family.instanceVariables = [];
         const vars = family.instanceVariables as Array<Record<string, unknown>>;
 
+        const addedVariables: string[] = [];
+        const removedVariables: string[] = [];
         if (args.addVariables) {
           for (const v of args.addVariables) {
             if (vars.some(ev => ev.name === v.name)) {
@@ -711,6 +734,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             }
             const sid = await idGen.generateSid(reader);
             vars.push(createInstanceVariable(v.name, v.type, sid));
+            addedVariables.push(v.name);
           }
         }
 
@@ -719,6 +743,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             const idx = vars.findIndex(v => v.name === varName);
             if (idx !== -1) {
               vars.splice(idx, 1);
+              removedVariables.push(varName);
             } else {
               warnings.push(`Variable "${varName}" not found, skipping`);
             }
@@ -729,15 +754,23 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const backupPath = await writer.writeEntityFile('families', args.name, family, subfolder);
 
         // Instances of members that joined get entries for the family's
-        // behaviors, instances of members that left lose them
+        // behaviors and values for its instance variables, instances of members
+        // that left lose them and the entries for its effects; instances of the
+        // other members get values for added variables and lose removed ones
         const familyBehaviors = behaviorTypesOf(family).map(b => b.name);
-        const memberChanges = [...new Set([...(args.addMembers ?? []), ...(args.removeMembers ?? [])])]
-          .filter(m => members.includes(m) !== membersBefore.includes(m))
-          .map(m => ({ member: m, joined: members.includes(m) }));
-        if (familyBehaviors.length > 0 && memberChanges.length > 0) {
+        const familyVariables = instanceVariablesOf(family).map(v => v.name);
+        const familyEffects = effectNamesOf(family);
+        const memberChanges: FamilyMemberChange[] = [...new Set([...membersBefore, ...members])].map(member => {
+          const joined = members.includes(member) && !membersBefore.includes(member);
+          const left = membersBefore.includes(member) && !members.includes(member);
+          if (joined) return { member, addBehaviors: familyBehaviors, addVariables: familyVariables };
+          if (left) return { member, dropBehaviors: familyBehaviors, dropVariables: [...familyVariables, ...removedVariables], dropEffects: familyEffects };
+          return { member, addVariables: addedVariables, dropVariables: removedVariables };
+        }).filter(hasFamilyMemberChange);
+        if (memberChanges.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.set(args.name, family);
-          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
+          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges);
           const sync = await syncLayoutInstances(reader, writer, plans);
           warnings.push(...planWarnings, ...sync.warnings);
           unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
@@ -852,16 +885,22 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
         const backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
         await writer.removeFromProject('families', args.name);
 
+        // Instances of the former members lose the entries for the family's
+        // behaviors and effects and the values of its instance variables
         const familyBehaviors = behaviorTypesOf(family).map(b => b.name);
         const formerMembers = Array.isArray(family?.members)
-          ? family.members.filter((m): m is string => typeof m === 'string')
+          ? [...new Set(family.members.filter((m): m is string => typeof m === 'string'))]
           : [];
-        if (familyBehaviors.length > 0 && formerMembers.length > 0) {
+        const memberChanges: FamilyMemberChange[] = formerMembers.map(member => ({
+          member,
+          dropBehaviors: familyBehaviors,
+          dropVariables: instanceVariablesOf(family).map(v => v.name),
+          dropEffects: effectNamesOf(family),
+        })).filter(hasFamilyMemberChange);
+        if (memberChanges.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.delete(args.name);
-          const { plans, warnings: planWarnings } = await familyMemberPlans(
-            reader, families, formerMembers.map(m => ({ member: m, joined: false })), familyBehaviors,
-          );
+          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges);
           const sync = await syncLayoutInstances(reader, writer, plans);
           warnings.push(...planWarnings, ...sync.warnings);
           unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
@@ -1227,6 +1266,20 @@ interface InstanceSyncPlan {
   add?: string[];
   /** Behavior names whose entries are removed unless still expected */
   drop?: string[];
+  /**
+   * Instance variables the object's instances hold values for, after the
+   * change; when given, every instance gets the default value of each one it
+   * lacks (see syncInstanceVariables)
+   */
+  variables?: InstanceVariableDef[];
+  /** Instance variable names the change added; values the instance lacked for other names are reported as missing before */
+  addVariables?: string[];
+  /** Instance variable names whose values are removed unless still expected */
+  dropVariables?: string[];
+  /** Effect names whose instance entries are removed unless the object type or its families still have the effect */
+  dropEffects?: string[];
+  /** The effects the object's instances carry entries for, after the change (with dropEffects) */
+  effects?: string[];
 }
 
 /**
@@ -1260,6 +1313,15 @@ async function syncLayoutInstances(
   const unknownDefaults: InstanceBehavior[] = [];
   /** Per object type: instances that lacked entries the change did not add, and those behavior names */
   const backfilled = new Map<string, { instances: number; names: Set<string> }>();
+  /** The same for instance variable values */
+  const backfilledValues = new Map<string, { instances: number; names: Set<string> }>();
+  const noteBackfill = (map: typeof backfilled, type: string, names: string[]) => {
+    if (names.length === 0) return;
+    const entry = map.get(type) ?? { instances: 0, names: new Set<string>() };
+    entry.instances++;
+    for (const name of names) entry.names.add(name);
+    map.set(type, entry);
+  };
 
   for (const [layoutName, layout] of layouts) {
     let modified = false;
@@ -1273,12 +1335,14 @@ async function syncLayoutInstances(
       });
       modified = synced.modified || modified;
       unknownDefaults.push(...synced.unknownDefaults);
-      const missingBefore = synced.added.filter(name => !(plan.add ?? []).includes(name));
-      if (missingBefore.length > 0) {
-        const entry = backfilled.get(instance.type) ?? { instances: 0, names: new Set<string>() };
-        entry.instances++;
-        for (const name of missingBefore) entry.names.add(name);
-        backfilled.set(instance.type, entry);
+      noteBackfill(backfilled, instance.type, synced.added.filter(name => !(plan.add ?? []).includes(name)));
+      if (plan.variables) {
+        const values = syncInstanceVariables(instance, plan.variables, { drop: plan.dropVariables });
+        modified = values.modified || modified;
+        noteBackfill(backfilledValues, instance.type, values.added.filter(name => !(plan.addVariables ?? []).includes(name)));
+      }
+      if (plan.dropEffects?.length) {
+        modified = dropInstanceEffects(instance, plan.dropEffects, plan.effects ?? []).length > 0 || modified;
       }
     };
 
@@ -1301,9 +1365,16 @@ async function syncLayoutInstances(
     warnings.push(`Also added default entries for behavior(s) ${names.map(n => `"${n}"`).join(', ')} to ${entry.instances} instance(s) of "${objectType}" `
       + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores an entry for every behavior of the object and its families on each instance.');
   }
+  for (const [objectType, entry] of backfilledValues) {
+    const expected = plans.get(objectType)?.variables ?? [];
+    const names = expected.map(v => v.name).filter(name => entry.names.has(name));
+    warnings.push(`Also added default values for instance variable(s) ${names.map(n => `"${n}"`).join(', ')} to ${entry.instances} instance(s) of "${objectType}" `
+      + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores a value for every instance variable of the object and its families on each instance.');
+  }
   if (unknownDefaults.length > 0) warnings.push(unknownDefaultsWarning(unknownDefaults));
 
-  const changing = [...plans].filter(([, plan]) => (plan.add?.length ?? 0) > 0 || (plan.drop?.length ?? 0) > 0);
+  const changing = [...plans].filter(([, plan]) => [plan.add, plan.drop, plan.addVariables, plan.dropVariables, plan.dropEffects]
+    .some(list => (list?.length ?? 0) > 0));
   const skipped = unscannedFilesOf('layouts', await reader.listLayouts(), layouts, layoutFailures);
   const unscanned = changing.length > 0 && skipped.length > 0
     ? await checkUnscannedFiles(reader, skipped, [{ categories: ['layouts'], allOf: [changing.map(([name]) => nameTerm(name))] }])
@@ -1324,7 +1395,7 @@ function unsyncedLayoutWarnings(reports: readonly UnscannedFileReport[]): string
   if (possible.length > 0) {
     warnings.push('Instances in layouts that could not be parsed were NOT updated: ' +
       possible.map(r => `${describeUnscannedFile(r)}, whose text names ${(r.names ?? []).map(n => `"${n}"`).join(', ')}`).join('; ') +
-      '. Instances there possibly still have the old behavior entries (a text search cannot tell an instance from the same name ' +
+      '. Instances there possibly still have the old behavior entries, instance variable values or effect entries (a text search cannot tell an instance from the same name ' +
       'in another string); check them in the Construct 3 editor.');
   }
   if (unreadable.length > 0) {
@@ -1335,20 +1406,39 @@ function unsyncedLayoutWarnings(reports: readonly UnscannedFileReport[]): string
 }
 
 /**
- * Sync plans for family members whose family behaviors changed: members that
- * joined get entries for `familyBehaviors`, members that left (or whose
- * family was deleted) lose them. `families` is the project's families after
- * the change.
+ * What a family change adds to or removes from the instances of one member:
+ * behavior entries, instance variable values, effect entries (names of the
+ * family's behaviors, variables and effects). A name is only removed while
+ * the member does not keep it through itself or another family.
+ */
+interface FamilyMemberChange {
+  member: string;
+  addBehaviors?: string[];
+  dropBehaviors?: string[];
+  addVariables?: string[];
+  dropVariables?: string[];
+  dropEffects?: string[];
+}
+
+function hasFamilyMemberChange(change: FamilyMemberChange): boolean {
+  return [change.addBehaviors, change.dropBehaviors, change.addVariables, change.dropVariables, change.dropEffects]
+    .some(list => (list?.length ?? 0) > 0);
+}
+
+/**
+ * Sync plans for family members whose instances a family change affects
+ * (see FamilyMemberChange). `families` is the project's families after the
+ * change.
  */
 async function familyMemberPlans(
   reader: Construct3ProjectReader,
   families: ReadonlyMap<string, unknown>,
-  changes: Array<{ member: string; joined: boolean }>,
-  familyBehaviors: string[],
+  changes: FamilyMemberChange[],
 ): Promise<{ plans: Map<string, InstanceSyncPlan>; warnings: string[] }> {
   const plans = new Map<string, InstanceSyncPlan>();
   const warnings: string[] = [];
-  for (const { member, joined } of changes) {
+  for (const change of changes) {
+    const { member } = change;
     let obj: unknown;
     try {
       obj = await reader.readObjectType(member);
@@ -1357,15 +1447,25 @@ async function familyMemberPlans(
       // parsed does (issue #55), but the entries its instances should have are unknown
       const code = classifyReadError(error);
       if (code !== 'E_FILE_NOT_FOUND') {
+        const names = [
+          ...(change.addBehaviors ?? []), ...(change.dropBehaviors ?? []),
+          ...(change.addVariables ?? []), ...(change.dropVariables ?? []), ...(change.dropEffects ?? []),
+        ];
         warnings.push(`Instances of "${member}" were NOT updated: objectTypes/${member} (${describeReadFailure(code)}) could not ` +
-          `be parsed, so the behaviors its instances need entries for are unknown. Their entries for the family's behaviors ` +
-          `(${familyBehaviors.map(b => `"${b}"`).join(', ')}) were left as they were; check them in the Construct 3 editor.`);
+          `be parsed, so the behaviors, instance variables and effects its instances need entries for are unknown. Their entries and values ` +
+          `for the family's ${[...new Set(names)].map(b => `"${b}"`).join(', ')} were left as they were; check them in the Construct 3 editor.`);
       }
       continue;
     }
     plans.set(member, {
       expected: expectedInstanceBehaviors(member, obj, families),
-      ...(joined ? { add: familyBehaviors } : { drop: familyBehaviors }),
+      add: change.addBehaviors ?? [],
+      drop: change.dropBehaviors ?? [],
+      variables: expectedInstanceVariables(member, obj, families),
+      addVariables: change.addVariables ?? [],
+      dropVariables: change.dropVariables ?? [],
+      dropEffects: change.dropEffects ?? [],
+      effects: expectedInstanceEffects(member, obj, families),
     });
   }
   return { plans, warnings };
