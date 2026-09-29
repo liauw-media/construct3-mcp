@@ -14,8 +14,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
 import { generateBridgeScript, getBridgeScriptPath } from '../runtime/bridge.js';
-import { writeFile, mkdir, readFile, readdir, stat, unlink } from 'node:fs/promises';
-import { join, dirname, relative } from 'node:path';
+import { writeFile, mkdir, readFile, readdir, realpath, stat, unlink } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { basename, join, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
@@ -30,6 +31,50 @@ function hostOfEndpoint(endpoint: string): string {
     return new URL(endpoint).hostname;
   } catch {
     return endpoint;
+  }
+}
+
+/** The real path of a file that may not exist yet: the real path of its nearest existing folder, plus the rest. */
+async function realTargetPath(path: string): Promise<string> {
+  const rest: string[] = [];
+  let existing = resolve(path);
+  for (;;) {
+    try {
+      return join(await realpath(existing), ...rest);
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) return resolve(path);
+      rest.unshift(basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+/** True when `path` is `dir` or lies under it (case-insensitively where the platform's paths are). */
+function isInside(dir: string, path: string): boolean {
+  const rel = relative(dir, path);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * Refuse a screenshot target that is not a new image file outside the
+ * project: the runtime tools leave the project as it is, and a relative
+ * path would land in the server process's working folder, wherever that is.
+ */
+async function checkScreenshotTarget(outputPath: string, format: 'png' | 'jpeg', overwrite: boolean, projectDir: string): Promise<void> {
+  if (!isAbsolute(outputPath)) {
+    throw new Error("outputPath must be an absolute path (a relative one would land in the MCP server's working folder).");
+  }
+  const extension = extname(outputPath).toLowerCase();
+  if (format === 'png' ? extension !== '.png' : extension !== '.jpg' && extension !== '.jpeg') {
+    throw new Error(format === 'png' ? 'outputPath must end in .png for format "png".' : 'outputPath must end in .jpg or .jpeg for format "jpeg".');
+  }
+  const [project, target] = await Promise.all([realTargetPath(projectDir), realTargetPath(outputPath)]);
+  if (isInside(project, target)) {
+    throw new Error("outputPath lies inside the open project's folder. The runtime tools leave the project as it is: write screenshots to a folder outside it.");
+  }
+  if (!overwrite && existsSync(outputPath)) {
+    throw new Error('outputPath exists already; pass overwrite: true to replace it, or choose a new file name.');
   }
 }
 
@@ -772,19 +817,22 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'screenshot_game',
-    'Capture the connected game page, or only its canvas, as a PNG or JPEG file on disk, so a run can keep visual evidence of a state without an editor or a browser tool.',
+    'Capture the connected game page, or only its canvas, as a PNG or JPEG file on disk, so a run can keep visual evidence of a state without an editor or a browser tool. The file goes to an absolute path outside the open project, ends in .png (or .jpg/.jpeg for jpeg), and an existing file is replaced only with overwrite: true.',
     {
       connectionId: z.string().uuid().describe('Connection ID returned by connect_to_game'),
-      outputPath: z.string().min(1).max(4096).describe('File to write (e.g. "C:/runs/after-click.png")'),
+      outputPath: z.string().min(1).max(4096).describe('Absolute path of the image file to write, outside the project folder (e.g. "C:/runs/after-click.png"); missing folders are created'),
       format: z.enum(['png', 'jpeg']).optional().default('png').describe('Image format (default: png)'),
       quality: z.number().int().min(0).max(100).optional().describe('JPEG quality 0-100 (jpeg only)'),
       canvasOnly: z.boolean().optional().default(false).describe('Capture only the game canvas rectangle (default: the whole viewport)'),
+      overwrite: z.boolean().optional().default(false).describe('Replace outputPath if the file exists (default: false, an existing file is an error)'),
     },
-    async ({ connectionId, outputPath, format, quality, canvasOnly }) => {
+    async ({ connectionId, outputPath, format, quality, canvasOnly, overwrite }) => {
       try {
+        await checkScreenshotTarget(outputPath, format, overwrite, reader.getProjectDir());
         const shot = await connections.captureScreenshot({ connectionId, format, quality, canvasOnly });
         await mkdir(dirname(outputPath), { recursive: true });
-        await writeFile(outputPath, shot.data);
+        // 'wx' fails rather than replace a file that appeared meanwhile.
+        await writeFile(outputPath, shot.data, { flag: overwrite ? 'w' : 'wx' });
         return toolResult({ success: true, path: outputPath, bytes: shot.data.length, format: shot.format, clip: shot.clip }, { projectWritten: false });
       } catch (error) {
         console.error('[screenshot_game] failed:', error);

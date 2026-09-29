@@ -264,14 +264,17 @@ function parseToolResult(result: {
   return JSON.parse(result.content[0].text) as Record<string, any>;
 }
 
-function registerConnectionTools(): {
+/** Where the tests' open project is: a folder no test writes into, unless a test passes its own. */
+const NO_PROJECT_DIR = join(tmpdir(), "c3mcp-cdp-test-project");
+
+function registerConnectionTools(projectDir = NO_PROJECT_DIR): {
   server: MockServer;
   controller: RuntimeToolController;
 } {
   const server = new MockServer();
   const controller = registerRuntimeTools({
     server: server as never,
-    reader: {} as any,
+    reader: { getProjectDir: () => projectDir } as any,
     writer: {} as any,
   });
   return { server, controller };
@@ -945,6 +948,47 @@ describe("screenshot_game", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  it("writes only a new image file outside the project, named for its format, at an absolute path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "c3-shot-project-"));
+    const outside = await mkdtemp(join(tmpdir(), "c3-shot-"));
+    try {
+      await writeFile(join(project, "project.c3proj"), "{\"project\": true}", "utf8");
+      await mkdir(join(project, "images"));
+      await writeFile(join(project, "images", "sprite.png"), "sprite", "utf8");
+      const fake = await startFakeCdp();
+      openFakes.push(fake);
+      const { server, controller } = registerConnectionTools(project);
+      openControllers.push(controller);
+      const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+      const shoot = (args: Record<string, unknown>) => server.callTool("screenshot_game", { connectionId: connected.connectionId, ...args });
+      const refused = async (args: Record<string, unknown>, reason: RegExp) => {
+        const result = await shoot(args);
+        expect(result.isError, JSON.stringify(args)).toBe(true);
+        expect(result.content[0].text).toMatch(reason);
+      };
+
+      await refused({ outputPath: join(project, "project.c3proj") }, /\.png/u);
+      await refused({ outputPath: join(project, "shots", "a.png") }, /inside the open project/u);
+      await refused({ outputPath: join(project, "images", "sprite.png"), overwrite: true }, /inside the open project/u);
+      await refused({ outputPath: "shots/a.png" }, /absolute/u);
+      await refused({ outputPath: join(outside, "a.jpg") }, /\.png/u);
+      await refused({ outputPath: join(outside, "a.png"), format: "jpeg" }, /\.jpg or \.jpeg/u);
+      expect(await readFile(join(project, "project.c3proj"), "utf8")).toBe("{\"project\": true}");
+      expect(await readFile(join(project, "images", "sprite.png"), "utf8")).toBe("sprite");
+      expect(fake.cdpCommands().filter((c) => c.method === "Page.captureScreenshot")).toEqual([]);
+
+      await writeFile(join(outside, "kept.png"), "earlier", "utf8");
+      await refused({ outputPath: join(outside, "kept.png") }, /exists.*overwrite/u);
+      expect(await readFile(join(outside, "kept.png"), "utf8")).toBe("earlier");
+      expect(parseToolResult(await shoot({ outputPath: join(outside, "kept.png"), overwrite: true })).success).toBe(true);
+      expect(await readFile(join(outside, "kept.png"), "utf8")).toBe('image:{"format":"png"}');
+      expect(parseToolResult(await shoot({ outputPath: join(outside, "b.JPEG"), format: "jpeg" })).format).toBe("jpeg");
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the connection when a screenshot message is larger than 4 MiB", async () => {
     // 5 MiB of image data is about 6.7 MiB of base64 in one CDP message.
     const fake = await startFakeCdp({ screenshotBytes: 5 * 1024 * 1024 });

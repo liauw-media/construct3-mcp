@@ -43,7 +43,9 @@ afterEach(async () => {
 
 function register(): Registered {
   const server = new MockServer();
-  const controller = registerRuntimeTools({ server: server as never, reader: {} as never, writer: {} as never });
+  // The open project is a folder the tests never write into.
+  const reader = { getProjectDir: () => join(tmpdir(), 'c3mcp-live-test-project') };
+  const controller = registerRuntimeTools({ server: server as never, reader: reader as never, writer: {} as never });
   controllers.push(controller);
   return { server, controller };
 }
