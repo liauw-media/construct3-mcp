@@ -621,6 +621,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
       inputSchema: z.object({
         folder: z.string().min(1).max(4096).describe('The exported game folder (contains index.html)'),
         port: z.number().int().min(0).max(65535).optional().default(0).describe('HTTP port on 127.0.0.1 (default 0: any free port)'),
+        crossOriginIsolated: z.boolean().optional().default(false).describe('Send COOP same-origin and COEP require-corp so the game gets SharedArrayBuffer (default: false; require-corp blocks resources from other origins that do not allow it, such as a CDN script)'),
         launchBrowser: z.boolean().optional().default(false).describe('Launch Chrome (or Edge) on the served URL with a remote-debugging port (default: false)'),
         headless: z.boolean().optional().default(false).describe('Launch the browser headless with software WebGL (default: false, a visible window)'),
         windowWidth: z.number().int().min(100).max(10_000).optional().describe('Browser window width in pixels'),
@@ -633,6 +634,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
         const info = await previews.serve({
           folder: args.folder,
           port: args.port,
+          crossOriginIsolated: args.crossOriginIsolated,
           launch: args.launchBrowser ? {
             headless: args.headless,
             windowWidth: args.windowWidth,

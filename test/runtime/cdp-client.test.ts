@@ -881,7 +881,9 @@ describe("serve_preview and stop_preview", () => {
       expect(stopped.stopped.map((p: { serverId: string }) => p.serverId)).toEqual([served.serverId]);
       await expect(fetch(served.url)).rejects.toThrow();
 
-      const again = parseToolResult(await server.callTool("serve_preview", { folder }));
+      const again = parseToolResult(await server.callTool("serve_preview", { folder, crossOriginIsolated: true }));
+      expect(again.crossOriginIsolated).toBe(true);
+      expect((await fetch(again.url)).headers.get("cross-origin-embedder-policy")).toBe("require-corp");
       const all = parseToolResult(await server.callTool("stop_preview", {}));
       expect(all.stopped.map((p: { serverId: string }) => p.serverId)).toEqual([again.serverId]);
     } finally {

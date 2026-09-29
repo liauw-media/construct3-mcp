@@ -139,6 +139,28 @@ describe('PreviewServer boundaries', () => {
   });
 });
 
+describe('cross-origin isolation', () => {
+  it('sends COOP and COEP only when asked, so SharedArrayBuffer is available on request', async () => {
+    const { game } = await makeExport();
+    const plain = await PreviewServer.start({ folder: game });
+    cleanups.push(() => plain.stop());
+    const plainIndex = await fetch(plain.url);
+    expect(plainIndex.headers.get('cross-origin-opener-policy')).toBeNull();
+    expect(plainIndex.headers.get('cross-origin-embedder-policy')).toBeNull();
+    expect(plain.info().crossOriginIsolated).toBe(false);
+
+    const isolated = await PreviewServer.start({ folder: game, crossOriginIsolated: true });
+    cleanups.push(() => isolated.stop());
+    for (const path of ['', 'scripts/main.js']) {
+      const response = await fetch(isolated.url + path);
+      expect(response.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+      expect(response.headers.get('cross-origin-embedder-policy')).toBe('require-corp');
+      expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+    }
+    expect(isolated.info().crossOriginIsolated).toBe(true);
+  });
+});
+
 describe('PreviewManager', () => {
   it('lists, stops by id and closes everything', async () => {
     const { game } = await makeExport();

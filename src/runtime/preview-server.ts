@@ -56,6 +56,14 @@ const MIME_TYPES: Record<string, string> = {
 export interface ServePreviewOptions {
   folder: string;
   port?: number;
+  /**
+   * Send Cross-Origin-Opener-Policy: same-origin and
+   * Cross-Origin-Embedder-Policy: require-corp, which a game needs for
+   * SharedArrayBuffer (crossOriginIsolated). Off by default: require-corp
+   * blocks resources from other origins that do not opt in, such as an SDK
+   * loaded from a CDN.
+   */
+  crossOriginIsolated?: boolean;
 }
 
 /**
@@ -93,6 +101,7 @@ export interface PreviewInfo {
   host: string;
   port: number;
   folder: string;
+  crossOriginIsolated: boolean;
   requests: number;
   browser?: { pid: number; executable: string; cdpPort: number; pageEndpoint?: string; headless: boolean };
 }
@@ -187,6 +196,7 @@ export class PreviewServer {
     readonly host: string,
     readonly port: number,
     private readonly server: Server,
+    readonly crossOriginIsolated: boolean,
   ) {}
 
   get url(): string {
@@ -196,9 +206,10 @@ export class PreviewServer {
   static async start(options: ServePreviewOptions): Promise<PreviewServer> {
     const root = await realpath(await checkExportFolder(options.folder));
     const host = PREVIEW_HOST;
+    const isolated = options.crossOriginIsolated === true;
     let instance: PreviewServer | undefined;
     const server = createServer((request, response) => {
-      void serve(root, request, response).then(() => { if (instance) instance.requests++; });
+      void serve(root, request, response, isolated).then(() => { if (instance) instance.requests++; });
     });
     await new Promise<void>((done, fail) => {
       server.once('error', fail);
@@ -208,7 +219,7 @@ export class PreviewServer {
       });
     });
     const address = server.address() as AddressInfo;
-    instance = new PreviewServer(root, host, address.port, server);
+    instance = new PreviewServer(root, host, address.port, server, isolated);
     return instance;
   }
 
@@ -219,6 +230,7 @@ export class PreviewServer {
       host: this.host,
       port: this.port,
       folder: this.folder,
+      crossOriginIsolated: this.crossOriginIsolated,
       requests: this.requests,
       browser: this.browser
         ? {
@@ -243,7 +255,13 @@ export class PreviewServer {
   }
 }
 
-async function serve(root: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+const ISOLATION_HEADERS = {
+  'cross-origin-opener-policy': 'same-origin',
+  'cross-origin-embedder-policy': 'require-corp',
+  'cross-origin-resource-policy': 'same-origin',
+};
+
+async function serve(root: string, request: IncomingMessage, response: ServerResponse, isolated: boolean): Promise<void> {
   if (!isAllowedHostHeader(request.headers.host)) {
     response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('Host not allowed');
     return;
@@ -262,6 +280,7 @@ async function serve(root: string, request: IncomingMessage, response: ServerRes
     'content-type': MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream',
     'content-length': info.size,
     'cache-control': 'no-store',
+    ...(isolated ? ISOLATION_HEADERS : {}),
   });
   if (request.method === 'HEAD') {
     response.end();
