@@ -2,7 +2,7 @@
 
 How to install construct3-mcp, connect it to your AI tool and use it on a Construct 3 project without losing work.
 
-This guide is for Construct 3 developers who want to use the server with Claude Code, Claude Desktop, Cursor or VS Code. You do not need to know how MCP works. It was written for version 1.9.1. Unless a section says otherwise, the commands and outputs below come from real runs on Windows 11 with Node.js 22 and Claude Code 2.1.284. Sections that only repeat another vendor's documentation say so.
+This guide is for Construct 3 developers who want to use the server with Claude Code, Claude Desktop, Cursor or VS Code. You do not need to know how MCP works. It was written for version 1.9.2. Unless a section says otherwise, the commands and outputs below come from real runs on Windows 11 with Node.js 22 and Claude Code 2.1.284. Sections that only repeat another vendor's documentation say so.
 
 ## Contents
 
@@ -74,11 +74,11 @@ npm ci
 `npm ci` installs the dependencies **and** compiles the server into `dist/` (the `prepare` script runs the build). It took 30 to 45 seconds in our tests. The output looks like this:
 
 ```
-> construct3-mcp-server@1.9.1 prepare
+> construct3-mcp-server@1.9.2 prepare
 > npm run build
 
 
-> construct3-mcp-server@1.9.1 build
+> construct3-mcp-server@1.9.2 build
 > tsc
 
 

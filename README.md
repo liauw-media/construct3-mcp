@@ -2,11 +2,16 @@
 
 > An MCP server that lets Claude, Cursor and other AI assistants read, analyze and safely edit Construct 3 projects — editor-faithful writes with backups and validation. New here? Start with the [User Guide](docs/USER-GUIDE.md).
 
-> **v1.9.1** — Frame images move with their frames, no duplicate UIDs next to layouts over 10MB, function options in `add_event_to_sheet`, and a new [User Guide](docs/USER-GUIDE.md). See [What's new in 1.9.1](#whats-new-in-191) and the [CHANGELOG](CHANGELOG.md).
+> **v1.9.2** — Delete and removal tools no longer miss uses inside files the server cannot parse (over 10MB or invalid JSON). 1.9.1 brought frame images that move with their frames, no duplicate UIDs next to large layouts and a new [User Guide](docs/USER-GUIDE.md). See [What's new](#whats-new-in-192) and the [CHANGELOG](CHANGELOG.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
+
+## What's new in 1.9.2
+
+- **Safer deletes next to unparsed files** — `delete_object`, `delete_family`, `delete_layout`, `delete_event_sheet`, `delete_event_from_sheet`, `update_object_properties`, `update_family` and `rename_animation` search registered files over the 10MB read limit or with invalid JSON as text and refuse without `force` on a possible use; results list the unchecked files in `unscannedFiles`.
+- **Usage analysis says "possibly used"** — `find_orphaned_objects`, `get_object_dependencies` and `analyze_performance` no longer report objects as unused that such files may use.
 
 ## What's new in 1.9.1
 

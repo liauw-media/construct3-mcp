@@ -2,7 +2,12 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
-## [Unreleased]
+## [1.9.2] - 2026-09-29
+
+### Highlights
+
+- **Deletes no longer miss uses in files the server cannot parse.** The delete and removal tools search registered layouts, event sheets and families over the 10MB read limit or with invalid JSON as text, and refuse without `force` when the name possibly appears there. Before, `delete_object` deleted an object whose only instances were in such a layout (#55).
+- **Honest usage analysis.** `find_orphaned_objects`, `get_object_dependencies` and `analyze_performance` report such objects as possibly used and list the files they could not parse, instead of calling them unused (#55).
 
 ### Changed
 
