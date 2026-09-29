@@ -7,6 +7,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   PreviewManager,
@@ -16,6 +18,7 @@ import {
   findChrome,
   isLoopbackHost,
   readDevToolsActivePort,
+  removeStaleProfiles,
 } from '../../src/runtime/preview-server.js';
 
 const FIXTURE_PROJECT = join(__dirname, '..', 'fixtures', 'minimal-project');
@@ -144,5 +147,36 @@ describe('DevToolsActivePort', () => {
     expect(await readDevToolsActivePort(dir)).toEqual({ port: 53917, browserPath: '/devtools/browser/0b1c-42' });
     await writeFile(join(dir, 'DevToolsActivePort'), '0\n/devtools/browser/x', 'utf8');
     expect(await readDevToolsActivePort(dir)).toBeUndefined();
+  });
+});
+
+describe('stale browser profiles', () => {
+  it('removes the profiles of servers and browsers that are gone, and keeps every other folder', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'c3-profiles-'));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    // A process that has exited: its pid is not alive any more.
+    const gone = spawnSync(process.execPath, ['-e', '0']).pid!;
+    const profile = async (name: string, owner?: { serverPid: number; browserPid: number }) => {
+      await mkdir(join(root, name, 'Default'), { recursive: true });
+      await writeFile(join(root, name, 'Default', 'Preferences'), '{}', 'utf8');
+      if (owner) await writeFile(join(root, name, 'c3mcp-owner.json'), JSON.stringify(owner), 'utf8');
+    };
+    await profile(`c3mcp-chrome-${gone}-aB3dE9`, { serverPid: gone, browserPid: gone });
+    await profile(`c3mcp-chrome-${gone}-nOwNeR`);
+    await profile(`c3mcp-chrome-${process.pid}-mine01`, { serverPid: process.pid, browserPid: gone });
+    await profile(`c3mcp-chrome-${gone}-orphan`, { serverPid: gone, browserPid: process.pid });
+    await profile('c3mcp-chrome-legacy');
+    await profile('something-else');
+
+    const removed = await removeStaleProfiles(root);
+
+    expect(removed.sort()).toEqual([`c3mcp-chrome-${gone}-aB3dE9`, `c3mcp-chrome-${gone}-nOwNeR`].sort());
+    expect(existsSync(join(root, `c3mcp-chrome-${gone}-aB3dE9`))).toBe(false);
+    expect(existsSync(join(root, `c3mcp-chrome-${gone}-nOwNeR`))).toBe(false);
+    // This process's own profile, one whose browser still runs, and folders not ours stay.
+    expect(existsSync(join(root, `c3mcp-chrome-${process.pid}-mine01`))).toBe(true);
+    expect(existsSync(join(root, `c3mcp-chrome-${gone}-orphan`))).toBe(true);
+    expect(existsSync(join(root, 'c3mcp-chrome-legacy'))).toBe(true);
+    expect(existsSync(join(root, 'something-else'))).toBe(true);
   });
 });

@@ -11,7 +11,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
@@ -346,6 +346,71 @@ async function findPageEndpoint(port: number, url: string, timeoutMs: number): P
   return undefined;
 }
 
+/** Browser profiles are temporary folders named c3mcp-chrome-<server pid>-<6 random characters>. */
+const PROFILE_PREFIX = 'c3mcp-chrome-';
+const PROFILE_NAME = /^c3mcp-chrome-(\d+)-[A-Za-z0-9]{6}$/u;
+/** Written into each profile: the server process and the browser process that use it. */
+const OWNER_FILE = 'c3mcp-owner.json';
+
+/** Profiles of this process that could not be removed yet (files still locked); retried on the next launch. */
+const pendingProfileRemovals = new Set<string>();
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** Remove a profile folder, retrying while a browser that just ended still holds files; false when it stays. */
+async function removeProfile(dir: string, maxRetries: number): Promise<boolean> {
+  try {
+    await rm(dir, { recursive: true, force: true, maxRetries, retryDelay: 50 });
+    pendingProfileRemovals.delete(dir);
+    return true;
+  } catch {
+    pendingProfileRemovals.add(dir);
+    return false;
+  }
+}
+
+/**
+ * Remove browser profiles earlier runs left behind in `root` (default: the
+ * system temp folder): those whose server process has ended and whose
+ * browser, if it recorded one, has ended too, plus this process's own
+ * profiles an earlier removal could not finish. Folders of running servers
+ * and running browsers, and anything not named like a profile, stay.
+ * Returns the names removed.
+ */
+export async function removeStaleProfiles(root: string = tmpdir()): Promise<string[]> {
+  for (const dir of [...pendingProfileRemovals]) await removeProfile(dir, 2);
+  let names: string[];
+  try {
+    names = await readdir(root);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    const match = PROFILE_NAME.exec(name);
+    if (!match) continue;
+    const serverPid = Number(match[1]);
+    if (serverPid === process.pid || isProcessAlive(serverPid)) continue;
+    const dir = join(root, name);
+    try {
+      const owner = JSON.parse(await readFile(join(dir, OWNER_FILE), 'utf8')) as { browserPid?: unknown };
+      if (typeof owner.browserPid === 'number' && isProcessAlive(owner.browserPid)) continue;
+    } catch {
+      // no owner file: the server ended before its browser started
+    }
+    if (await removeProfile(dir, 2)) removed.push(name);
+  }
+  return removed;
+}
+
 /** Wait until `child` has exited, at most `timeoutMs`; true when it is gone. */
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
@@ -360,12 +425,14 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
  * Launch Chrome on `url` with a fresh profile and a debugging port the
  * browser picks itself (--remote-debugging-port=0, read back from
  * DevToolsActivePort in that profile). Closing ends only this child
- * process; nothing is ever sent to whatever else listens on a port.
- * The child is not detached: it ends with the server process.
+ * process, at once, and removes its profile; nothing is ever sent to
+ * whatever else listens on a port. Profiles earlier runs left behind are
+ * removed first. The child is not detached: it ends with the server process.
  */
 export async function launchBrowser(options: LaunchBrowserOptions): Promise<LaunchedBrowser> {
   const executable = findChrome(options.chromePath);
-  const userDataDir = await mkdtemp(join(tmpdir(), 'c3mcp-chrome-'));
+  await removeStaleProfiles();
+  const userDataDir = await mkdtemp(join(tmpdir(), `${PROFILE_PREFIX}${process.pid}-`));
   const args = [
     '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
@@ -379,14 +446,18 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   if (options.windowWidth && options.windowHeight) args.push(`--window-size=${options.windowWidth},${options.windowHeight}`);
   args.push(options.url);
   const child = spawn(executable, args, { stdio: 'ignore', windowsHide: false });
-  if (child.pid === undefined) throw new Error(`Could not start ${executable}`);
+  if (child.pid === undefined) {
+    await removeProfile(userDataDir, 2);
+    throw new Error(`Could not start ${executable}`);
+  }
+  await writeFile(join(userDataDir, OWNER_FILE), JSON.stringify({ serverPid: process.pid, browserPid: child.pid })).catch(() => undefined);
   let active: { port: number; browserPath: string };
   try {
     active = await waitForDevToolsActivePort(userDataDir, options.readyTimeoutMs ?? 15_000, child);
   } catch (error) {
     child.kill();
     await waitForExit(child, 2_000);
-    await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+    await removeProfile(userDataDir, 6);
     throw error;
   }
   const pid = child.pid;
@@ -409,7 +480,9 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
           await waitForExit(child, 1_000);
         }
       }
-      await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+      // The browser's helper processes can hold profile files a moment
+      // longer; what still stays is removed on the next launch.
+      await removeProfile(userDataDir, 6);
     },
   };
 }

@@ -7,7 +7,8 @@
 
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { rm } from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { findChrome } from '../../src/runtime/preview-server.js';
 import { registerRuntimeTools, type RuntimeToolController } from '../../src/tools/runtime-tools.js';
@@ -79,6 +80,10 @@ async function listenRecorder(port: number): Promise<{ requests: string[]; serve
   return { requests, server: server };
 }
 
+async function profileDirs(): Promise<string[]> {
+  return (await readdir(tmpdir())).filter((name) => name.startsWith('c3mcp-chrome-')).sort();
+}
+
 describe.skipIf(!browser)('runtime tools against a real headless browser', () => {
   it('launches on a debugging port the browser picks and never contacts another process on 9222', async (context) => {
     const foreign = await listenRecorder(9222);
@@ -92,5 +97,23 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     expect(connected.gameState.ready).toBe(true);
     parse(await server.callTool('stop_preview', { serverId: served.serverId }));
     expect(foreign!.requests).toEqual([]);
+  }, LIVE_TIMEOUT_MS);
+
+  it('removes the browser profile on stop_preview and on shutdown, and shuts down within 2 s', async () => {
+    const before = await profileDirs();
+    const folder = await fakeExport('dom');
+    const { server, controller } = register();
+
+    const first = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+    parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: first.browser.cdpPort, timeoutMs: 15_000 }));
+    parse(await server.callTool('stop_preview', { serverId: first.serverId }));
+    expect(await profileDirs()).toEqual(before);
+
+    const second = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+    parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: second.browser.cdpPort, timeoutMs: 15_000 }));
+    const startedAt = Date.now();
+    await controller.close();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(await profileDirs()).toEqual(before);
   }, LIVE_TIMEOUT_MS);
 });
