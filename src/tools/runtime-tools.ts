@@ -110,12 +110,14 @@ const inputActionSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('key'),
-    key: z.string().min(1).max(100),
+    key: z.string().min(1).max(100).describe('A key name (Enter, Escape, Space, ArrowLeft, Tab, Backspace, F1-F24...) or one character ("a", ".", "!"); characters get the US-layout code and keyCode'),
     modifiers: z.array(z.enum(['Alt', 'Control', 'Meta', 'Shift'])).max(4).optional().default([]),
   }),
   z.object({
     type: z.literal('type'),
     text: z.string().min(1).max(1_000),
+    mode: z.enum(['keys', 'insertText']).optional().default('keys')
+      .describe('"keys" (default): a key press per character, with US-layout key codes, as a game reading the keyboard expects; "insertText": insert the text at once into the focused field, without key events'),
   }),
   z.object({
     type: z.literal('mouseMove'),

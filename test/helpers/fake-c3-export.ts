@@ -37,6 +37,9 @@ const FAKE_RUNTIME = `(function () {
     callFunction(name, ...params) {
       if (name === 'Add') return params[0] + params[1];
       if (name === 'Bonus') { g.__c3bridge.emit('Bonus', { n: params[0] }); return 1; }
+      // Page-side probes for the DOM variant: the input events seen, and touch support.
+      if (name === 'InputLog') { const log = g.__log || []; g.__log = []; return log; }
+      if (name === 'MaxTouchPoints') return typeof navigator === 'undefined' ? null : navigator.maxTouchPoints;
       throw new Error('No function ' + name);
     },
     goToLayout(name) { this.layout = layout(name); },

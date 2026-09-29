@@ -1011,7 +1011,7 @@ describe("simulate_input", () => {
     });
   });
 
-  it("dispatches key combinations and inserts text by Unicode character", async () => {
+  it("dispatches key combinations, and types text as key presses unless insertText is asked for", async () => {
     const fake = await startFakeCdp();
     openFakes.push(fake);
     const { server, controller } = registerConnectionTools();
@@ -1031,7 +1031,11 @@ describe("simulate_input", () => {
     }));
     parseToolResult(await server.callTool("simulate_input", {
       connectionId: connected.connectionId,
-      action: { type: "type", text: "A🙂" },
+      action: { type: "type", text: "a.B🙂" },
+    }));
+    parseToolResult(await server.callTool("simulate_input", {
+      connectionId: connected.connectionId,
+      action: { type: "type", text: "A🙂", mode: "insertText" },
     }));
 
     const commands = fake.cdpCommands();
@@ -1065,10 +1069,41 @@ describe("simulate_input", () => {
       code: "Space",
       text: " ",
     });
-    expect(commands.slice(-2)).toEqual([
-      { method: "Input.insertText", params: { text: "A" } },
-      { method: "Input.insertText", params: { text: "🙂" } },
+    // "type" presses a key per character, so a game reading the keyboard sees it.
+    const typed = commands.slice(4, -1).map((command) => command.params);
+    expect(commands.slice(4, -1).every((command) => command.method === "Input.dispatchKeyEvent")).toBe(true);
+    expect(typed.map((p) => [p.type, p.key, p.code, p.windowsVirtualKeyCode, p.modifiers, p.text])).toEqual([
+      ["keyDown", "a", "KeyA", 65, 0, "a"],
+      ["keyUp", "a", "KeyA", 65, 0, undefined],
+      ["keyDown", ".", "Period", 190, 0, "."],
+      ["keyUp", ".", "Period", 190, 0, undefined],
+      ["keyDown", "B", "KeyB", 66, 8, "B"],
+      ["keyUp", "B", "KeyB", 66, 8, undefined],
+      ["keyDown", "🙂", "", 0, 0, "🙂"],
+      ["keyUp", "🙂", "", 0, 0, undefined],
     ]);
+    expect(commands.at(-1)).toEqual({ method: "Input.insertText", params: { text: "A🙂" } });
+  });
+
+  it("gives punctuation and shifted characters their US-layout key codes", async () => {
+    const fake = await startFakeCdp();
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const connected = parseToolResult(await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, timeoutMs: 500 }));
+
+    const cases: Array<[string, string, number, number]> = [
+      [".", "Period", 190, 0], [",", "Comma", 188, 0], ["-", "Minus", 189, 0], ["/", "Slash", 191, 0],
+      [";", "Semicolon", 186, 0], ["'", "Quote", 222, 0], ["[", "BracketLeft", 219, 0], ["]", "BracketRight", 221, 0],
+      ["\\", "Backslash", 220, 0], ["`", "Backquote", 192, 0], ["=", "Equal", 187, 0],
+      ["!", "Digit1", 49, 8], ["?", "Slash", 191, 8], [":", "Semicolon", 186, 8], ["_", "Minus", 189, 8],
+      ["7", "Digit7", 55, 0], ["Z", "KeyZ", 90, 8], ["Insert", "Insert", 45, 0], ["F13", "F13", 124, 0],
+    ];
+    for (const [key] of cases) {
+      parseToolResult(await server.callTool("simulate_input", { connectionId: connected.connectionId, action: { type: "key", key } }));
+    }
+    const downs = fake.cdpCommands().filter((command) => command.params.type === "keyDown").map((command) => command.params);
+    expect(downs.map((p) => [p.key, p.code, p.windowsVirtualKeyCode, p.modifiers])).toEqual(cases);
   });
 
   it("dispatches tap, swipe, and long-press touch gestures", async () => {

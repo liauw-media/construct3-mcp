@@ -116,4 +116,27 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(await profileDirs()).toEqual(before);
   }, LIVE_TIMEOUT_MS);
+
+  it('delivers keys with their real codes, typed text as key presses, and a canvas click', async () => {
+    const folder = await fakeExport('dom');
+    const { server } = register();
+    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+    const { connectionId } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+    const inputLog = async () => parse(await server.callTool('call_bridge', { connectionId, command: 'callFunction', args: { name: 'InputLog' } })).result as Array<Record<string, unknown>>;
+    await inputLog();
+
+    parse(await server.callTool('simulate_input', { connectionId, action: { type: 'key', key: '.' } }));
+    parse(await server.callTool('simulate_input', { connectionId, action: { type: 'type', text: 'a-B' } }));
+    const keydowns = (await inputLog()).filter((e) => e.type === 'keydown').map((e) => [e.key, e.code, e.keyCode, e.shiftKey]);
+    expect(keydowns).toEqual([
+      ['.', 'Period', 190, false],
+      ['a', 'KeyA', 65, false],
+      ['-', 'Minus', 189, false],
+      ['B', 'KeyB', 66, true],
+    ]);
+
+    parse(await server.callTool('simulate_input', { connectionId, action: { type: 'click', x: 10, y: 20 }, coordinateSpace: 'canvas' }));
+    const clicks = (await inputLog()).filter((e) => e.type === 'click').map((e) => [e.x, e.y]);
+    expect(clicks).toEqual([[110, 70]]);
+  }, LIVE_TIMEOUT_MS);
 });

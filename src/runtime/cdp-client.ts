@@ -124,6 +124,8 @@ export type SimulatedInputAction =
   | {
     type: "type";
     text: string;
+    /** "keys" (default): a key press per character; "insertText": the text inserted at once, as an IME would. */
+    mode?: "keys" | "insertText";
   }
   | {
     type: "mouseMove";
@@ -347,63 +349,115 @@ interface KeyDescriptor {
   windowsVirtualKeyCode: number;
   nativeVirtualKeyCode: number;
   text?: string;
+  /** The character needs Shift on a US keyboard (A-Z, !, ?, ...). */
+  shift?: boolean;
 }
 
+/**
+ * The keys of a US keyboard's main block that type a character, by the
+ * character they type unshifted and shifted: DOM code and Windows virtual
+ * key code (the keyCode a page sees).
+ */
+const CHARACTER_KEYS: Array<[unshifted: string, shifted: string, code: string, keyCode: number]> = [
+  ["`", "~", "Backquote", 192],
+  ["1", "!", "Digit1", 49], ["2", "@", "Digit2", 50], ["3", "#", "Digit3", 51], ["4", "$", "Digit4", 52],
+  ["5", "%", "Digit5", 53], ["6", "^", "Digit6", 54], ["7", "&", "Digit7", 55], ["8", "*", "Digit8", 56],
+  ["9", "(", "Digit9", 57], ["0", ")", "Digit0", 48],
+  ["-", "_", "Minus", 189], ["=", "+", "Equal", 187],
+  ["[", "{", "BracketLeft", 219], ["]", "}", "BracketRight", 221], ["\\", "|", "Backslash", 220],
+  [";", ":", "Semicolon", 186], ["'", '"', "Quote", 222],
+  [",", "<", "Comma", 188], [".", ">", "Period", 190], ["/", "?", "Slash", 191],
+];
+
+const CHARACTERS = new Map<string, { code: string; keyCode: number; shift: boolean }>();
+for (const [unshifted, shifted, code, keyCode] of CHARACTER_KEYS) {
+  CHARACTERS.set(unshifted, { code, keyCode, shift: false });
+  CHARACTERS.set(shifted, { code, keyCode, shift: true });
+}
+for (let letter = 65; letter <= 90; letter++) {
+  const upper = String.fromCharCode(letter);
+  CHARACTERS.set(upper.toLowerCase(), { code: `Key${upper}`, keyCode: letter, shift: false });
+  CHARACTERS.set(upper, { code: `Key${upper}`, keyCode: letter, shift: true });
+}
+
+const NAMED_KEYS: Record<string, Omit<KeyDescriptor, "nativeVirtualKeyCode">> = {
+  Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+  Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+  Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
+  Shift: { key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 },
+  Control: { key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17 },
+  Alt: { key: "Alt", code: "AltLeft", windowsVirtualKeyCode: 18 },
+  Pause: { key: "Pause", code: "Pause", windowsVirtualKeyCode: 19 },
+  CapsLock: { key: "CapsLock", code: "CapsLock", windowsVirtualKeyCode: 20 },
+  Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+  Space: { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " },
+  PageUp: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33 },
+  PageDown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 },
+  End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
+  Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+  Insert: { key: "Insert", code: "Insert", windowsVirtualKeyCode: 45 },
+  Delete: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
+  Meta: { key: "Meta", code: "MetaLeft", windowsVirtualKeyCode: 91 },
+  ContextMenu: { key: "ContextMenu", code: "ContextMenu", windowsVirtualKeyCode: 93 },
+};
+
+/**
+ * What to dispatch for a key name (Enter, ArrowLeft, F5, Space...) or a
+ * single character. Characters get the DOM code and keyCode of the US
+ * keyboard key that types them ("." is Period, 190), and characters typed
+ * with Shift say so; a character no key types gets its text alone.
+ */
 function keyDescriptor(input: string): KeyDescriptor {
-  const named: Record<string, Omit<KeyDescriptor, "nativeVirtualKeyCode">> = {
-    Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
-    Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
-    Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
-    Shift: { key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 },
-    Control: { key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17 },
-    Alt: { key: "Alt", code: "AltLeft", windowsVirtualKeyCode: 18 },
-    Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
-    Space: { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " },
-    PageUp: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33 },
-    PageDown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 },
-    End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
-    Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
-    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
-    ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
-    ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
-    ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
-    Delete: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
-    Meta: { key: "Meta", code: "MetaLeft", windowsVirtualKeyCode: 91 },
-  };
-  const known = named[input];
+  const known = NAMED_KEYS[input];
   if (known) return { ...known, nativeVirtualKeyCode: known.windowsVirtualKeyCode };
 
-  if (/^F(?:[1-9]|1[0-2])$/u.test(input)) {
-    const functionNumber = Number(input.slice(1));
-    const virtualKeyCode = 111 + functionNumber;
+  if (/^F(?:[1-9]|1[0-9]|2[0-4])$/u.test(input)) {
+    const virtualKeyCode = 111 + Number(input.slice(1));
+    return { key: input, code: input, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode };
+  }
+
+  if (input === "\n" || input === "\r") return keyDescriptor("Enter");
+  if (input === "\t") return keyDescriptor("Tab");
+  if (input === " ") return keyDescriptor("Space");
+
+  const character = CHARACTERS.get(input);
+  if (character) {
     return {
       key: input,
-      code: input,
-      windowsVirtualKeyCode: virtualKeyCode,
-      nativeVirtualKeyCode: virtualKeyCode,
+      code: character.code,
+      windowsVirtualKeyCode: character.keyCode,
+      nativeVirtualKeyCode: character.keyCode,
+      text: input,
+      shift: character.shift,
     };
   }
 
   if ([...input].length === 1) {
-    const upper = input.toUpperCase();
-    const isLetter = /^[A-Z]$/u.test(upper);
-    const isDigit = /^[0-9]$/u.test(input);
-    const virtualKeyCode = upper.charCodeAt(0);
-    return {
-      key: input,
-      code: isLetter ? `Key${upper}` : isDigit ? `Digit${input}` : input,
-      windowsVirtualKeyCode: virtualKeyCode,
-      nativeVirtualKeyCode: virtualKeyCode,
-      text: input,
-    };
+    return { key: input, code: "", windowsVirtualKeyCode: 0, nativeVirtualKeyCode: 0, text: input };
   }
 
-  return {
-    key: input,
-    code: input,
-    windowsVirtualKeyCode: 0,
-    nativeVirtualKeyCode: 0,
-  };
+  return { key: input, code: input, windowsVirtualKeyCode: 0, nativeVirtualKeyCode: 0 };
+}
+
+/** Press and release one key: keyDown (with its text unless Control, Alt or Meta is held) and keyUp. */
+async function pressKey(connection: CdpConnection, descriptor: KeyDescriptor, modifierBits: number): Promise<void> {
+  const { text, shift, ...identity } = descriptor;
+  const modifiers = modifierBits | (shift ? 8 : 0);
+  await connection.command("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    modifiers,
+    ...identity,
+    ...((modifiers & 7) === 0 && text !== undefined ? { text, unmodifiedText: text } : {}),
+  });
+  await connection.command("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    modifiers,
+    ...identity,
+  });
 }
 
 function formatDiscoveryHost(host: string): string {
@@ -921,26 +975,16 @@ export class RuntimeConnectionManager {
         });
         await this.dispatchTouch(connection, action);
         break;
-      case "key": {
-        const modifiers = modifierMask(action.modifiers);
-        const descriptor = keyDescriptor(action.key);
-        const { text, ...identity } = descriptor;
-        await connection.command("Input.dispatchKeyEvent", {
-          type: "keyDown",
-          modifiers,
-          ...identity,
-          ...((modifiers & 7) === 0 && text !== undefined ? { text } : {}),
-        });
-        await connection.command("Input.dispatchKeyEvent", {
-          type: "keyUp",
-          modifiers,
-          ...identity,
-        });
+      case "key":
+        await pressKey(connection, keyDescriptor(action.key), modifierMask(action.modifiers));
         break;
-      }
       case "type":
-        for (const character of action.text) {
-          await connection.command("Input.insertText", { text: character });
+        if (action.mode === "insertText") {
+          await connection.command("Input.insertText", { text: action.text });
+        } else {
+          for (const character of action.text) {
+            await pressKey(connection, keyDescriptor(character), 0);
+          }
         }
         break;
     }
