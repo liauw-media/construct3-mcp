@@ -1415,3 +1415,16 @@ describe("simulate_input", () => {
     }
   });
 });
+
+describe("get_bridge_commands", () => {
+  it("names call_bridge and lists exactly the commands call_bridge accepts", async () => {
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const tool = server.getTool("get_bridge_commands")!;
+    expect(tool.description).toContain("call_bridge");
+    expect(tool.description).not.toContain("call_bridge_command");
+    const listed = Object.keys(parseToolResult(await server.callTool("get_bridge_commands", {}))).sort();
+    const accepted = [...(server.getTool("call_bridge")!.schema.command as unknown as { options: string[] }).options].sort();
+    expect(listed).toEqual(accepted);
+  });
+});

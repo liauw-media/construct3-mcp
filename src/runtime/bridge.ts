@@ -7,13 +7,20 @@
  * call_bridge submit a command and poll for its result); a browser console
  * or any CDP-capable tool can do the same.
  *
- * The bridge runs inside the browser alongside the game. It:
+ * The bridge runs inside the browser alongside the game: on the page, or in
+ * the runtime's worker when the project uses one ("Use worker"; the CDP
+ * client attaches to the worker to reach it). It:
  * 1. Captures the IRuntime reference via runOnStartup()
- * 2. Keeps a command queue and a result store on globalThis.__c3bridge
+ * 2. Keeps a command queue and a result store on globalThis.__c3bridge;
+ *    a caller that stops waiting withdraws its command with cancel(id), and
+ *    results nobody collects expire after 60 s
  * 3. Processes queued commands on every documented runtime tick
  * 4. Keeps event subscriptions (global-variable changes, layout changes and
  *    explicit custom events) in bounded per-subscription buffers, filled
  *    from documented runtime state each tick
+ *
+ * Construct loads the script because inject_runtime_bridge imports it from
+ * the project's main script, or registers it as the main script.
  *
  * Only documented scripting interfaces are used: IRuntime.globalVars,
  * IRuntime.layout, tickCount and the tick event. There is no documented

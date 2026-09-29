@@ -374,7 +374,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'get_bridge_commands',
-    'List all commands supported by the C3 runtime bridge. Use this to understand what you can do with call_bridge_command.',
+    'List the commands the runtime bridge supports, with their arguments: what call_bridge can run in a game connected with connect_to_game.',
     {},
     async () => {
       const commands = {
@@ -395,9 +395,9 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           args: { name: 'string (variable name)', value: 'any (new value)' },
         },
         getObjectState: {
-          description: 'Read properties from the first instance of an object type',
+          description: 'Read properties from the first instance of an object type (its instance variables come in _instVars)',
           args: {
-            objectName: 'string (object type name)',
+            objectName: 'string (object type name; the argument is objectName, not objectType)',
             properties: 'string[] (optional — defaults to x, y, width, height, isVisible, opacity)',
           },
         },
@@ -427,6 +427,30 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
         listGlobalVars: {
           description: 'List all global variables and their current values',
           args: {},
+        },
+        layerToCssPx: {
+          description: 'Convert layout coordinates on a layer to CSS pixels in the page viewport, through the game\'s own transform (simulate_input uses it for coordinateSpace "layout")',
+          args: { layer: 'string | number (layer name or index, default 0)', x: 'number', y: 'number' },
+        },
+        cssPxToLayer: {
+          description: 'Convert CSS pixels in the page viewport to layout coordinates on a layer',
+          args: { layer: 'string | number (layer name or index, default 0)', x: 'number', y: 'number' },
+        },
+        subscribeEvents: {
+          description: 'Start buffering events (the subscribe_events tool wraps it)',
+          args: {
+            eventType: '"globalVarChange" | "layoutChange" | "custom"',
+            filter: 'object ({ variable } for globalVarChange, optional { name } for custom)',
+            bufferSize: 'number (1 to 1000, default 100)',
+          },
+        },
+        readEvents: {
+          description: 'Read a subscription\'s buffered events (the read_events tool wraps it)',
+          args: { subscriptionId: 'string', clear: 'boolean (default true)' },
+        },
+        unsubscribeEvents: {
+          description: 'Stop a subscription (the unsubscribe_events tool wraps it)',
+          args: { subscriptionId: 'string' },
         },
       };
 
