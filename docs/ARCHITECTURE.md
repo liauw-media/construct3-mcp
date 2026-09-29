@@ -230,7 +230,7 @@ A shared cross-reference index and fifteen analysis modules, several of which bu
 | `runtime-traps.ts` | Signal pairing and order, script/function-parameter traps (`find_runtime_traps`) |
 | `script-scan.ts` | Lightweight JS/TS scanner for script actions, used by the runtime trap checks |
 
-The cross-reference index (`ProjectIndex`) is cached per reader, so projects opened side by side in one process (scripts, tests, embeddings) each keep their own; a write resets the index of its project only, via `resetProjectIndex(reader)`.
+The cross-reference index (`ProjectIndex`) is cached per reader, so projects opened side by side in one process (scripts, tests, embeddings) each keep their own; a write through the writer or the event tools resets the index of its project only, via `resetProjectIndex(reader)`.
 
 ### 7. MCP Layers
 
