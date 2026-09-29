@@ -1,8 +1,9 @@
 /**
  * Two projects open in one process (issue #38, point 14): each project keeps
  * its own cross-reference index. Before, one module-wide index served every
- * reader, so validate_project reported the other project's objects as missing
- * and delete_object deleted an object the project uses. Runs the real reader,
+ * reader, so validate_project reported the other project's objects as missing,
+ * delete_object deleted an object the project uses and update_object_properties
+ * removed an instance variable its events use. Runs the real reader,
  * writer and tool handlers on two copies of the minimal fixture: A as it is
  * (object "Sprite"), B with the object renamed to "Enemy" in its object file,
  * the layout instance and the event.
@@ -115,6 +116,24 @@ describe('two projects in one process', () => {
     expect(existsSync(join(dirA, 'objectTypes', 'Sprite.json'))).toBe(true);
   });
 
+  it('update_object_properties refuses removing a variable project B\'s events use after project A built its index', async () => {
+    const a = await open(dirA);
+    const b = await open(dirB);
+    await b.call('update_object_properties', { name: 'Enemy', addVariables: [{ name: 'hp', type: 'number' }] });
+    await b.call('add_event_block', {
+      sheetName: 'MainSheet',
+      conditions: [{ id: 'compare-instance-variable', objectClass: 'Enemy', parameters: { 'instance-variable': 'hp', comparison: 0, value: '0' } }],
+      actions: [{ id: 'destroy', objectClass: 'Enemy' }],
+    });
+    await a.call('find_orphaned_objects');
+
+    const blocked = await b.call('update_object_properties', { name: 'Enemy', removeVariables: ['hp'] });
+    expect(blocked.success).toBe(false);
+    expect(blocked.action).toBe('update_blocked');
+    const enemy = JSON.parse(await readFile(join(dirB, 'objectTypes', 'Enemy.json'), 'utf-8'));
+    expect(enemy.instanceVariables.map((v: Record<string, any>) => v.name)).toEqual(['hp']);
+  });
+
   it('a write in one project resets only that project\'s index', async () => {
     const a = await open(dirA);
     const b = await open(dirB);
@@ -123,15 +142,20 @@ describe('two projects in one process', () => {
     expect(indexA.allObjects).toEqual(['Sprite']);
     expect(indexB.allObjects).toEqual(['Enemy']);
 
-    // Through the writer (create_object) and through an event tool (add_event_to_sheet)
+    // Through the writer (create_object) ...
     await a.call('create_object', { name: 'Coin', pluginId: 'Sprite' });
+    const afterCreateA = await getProjectIndex(a.reader);
+    expect(afterCreateA).not.toBe(indexA);
+    expect([...afterCreateA.allObjects].sort()).toEqual(['Coin', 'Sprite']);
     expect(await getProjectIndex(b.reader)).toBe(indexB);
+
+    // ... and through an event tool (add_event_to_sheet)
     await a.call('add_event_to_sheet', { sheetName: 'MainSheet', eventType: 'function', functionName: 'Collect' });
     expect(await getProjectIndex(b.reader)).toBe(indexB);
 
     const rebuiltA = await getProjectIndex(a.reader);
-    expect(rebuiltA).not.toBe(indexA);
-    expect(rebuiltA.allObjects.sort()).toEqual(['Coin', 'Sprite']);
+    expect(rebuiltA).not.toBe(afterCreateA);
+    expect([...rebuiltA.allObjects].sort()).toEqual(['Coin', 'Sprite']);
     expect(rebuiltA.functionDefinitions.has('Collect')).toBe(true);
 
     // B's index is untouched and still B's
