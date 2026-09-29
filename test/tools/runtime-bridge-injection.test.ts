@@ -142,6 +142,37 @@ describe('inject_runtime_bridge', () => {
   });
 });
 
+describe('inject_runtime_bridge and remove_runtime_bridge on script files as users have them', () => {
+  /** Give the project a main script at scripts/main.js with `source`. */
+  async function addRootMainScript(dir: string, source: string, scriptsType?: string): Promise<string> {
+    const project = await readProject(dir);
+    project.rootFileFolders.script.items.push({ name: 'main.js', type: 'application/javascript', sid: 402118576391205, 'script-info': { purpose: 'main' } });
+    if (scriptsType) project.properties.scriptsType = scriptsType;
+    await writeFile(join(dir, 'project.c3proj'), JSON.stringify(project, null, '\t'), 'utf8');
+    await mkdir(join(dir, 'scripts'), { recursive: true });
+    const path = join(dir, 'scripts', 'main.js');
+    await writeFile(path, source, 'utf8');
+    return path;
+  }
+
+  it('leaves the main script of a project with classic scripts alone, where an import would not parse', async () => {
+    const dir = await copyFixture('minimal-project');
+    const original = 'runOnStartup(function (runtime) {\n  console.log("classic");\n});\n';
+    const mainPath = await addRootMainScript(dir, original, 'classic');
+    const server = await tools(dir);
+
+    const injected = payload(await server.callTool('inject_runtime_bridge', {}));
+    expect(injected).toMatchObject({ success: true, loadedAs: 'classic' });
+    expect(injected.importAdded).toBeUndefined();
+    expect(await readFile(mainPath, 'utf8')).toBe(original);
+    expect(bridgeEntries(await readProject(dir))).toEqual([expect.objectContaining({ 'script-info': { purpose: 'none' } })]);
+
+    const prepared = payload(await server.callTool('export_for_preview', { injectBridge: true }));
+    expect(prepared.checks.find((c: { check: string }) => c.check === 'runtimeBridge').status).toBe('warning');
+    expect(await readFile(mainPath, 'utf8')).toBe(original);
+  });
+});
+
 describe('export_for_preview', () => {
   async function withUseWorker(value: string): Promise<string> {
     const dir = await copyFixture('minimal-project');

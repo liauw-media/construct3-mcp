@@ -261,7 +261,10 @@ async function installBridge(projectDir: string, c3projPath: string): Promise<Br
   scripts.subfolders ??= [];
 
   const mainScript = findMainScript(scripts);
-  const loadedAs: BridgeLoading = c3proj.scriptsType === 'classic' ? 'classic' : mainScript ? 'import' : 'main';
+  // The scripts type is a project property ("module" or "classic"); a classic
+  // script cannot hold an import statement.
+  const scriptsType = (c3proj.properties as { scriptsType?: unknown } | undefined)?.scriptsType;
+  const loadedAs: BridgeLoading = scriptsType === 'classic' ? 'classic' : mainScript ? 'import' : 'main';
   const purpose = loadedAs === 'main' ? 'main' : 'none';
 
   const existing = takeBridgeEntries(scripts);
