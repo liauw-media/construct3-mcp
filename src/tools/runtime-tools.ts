@@ -612,14 +612,13 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'serve_preview',
-    'Serve an exported Construct game (the HTML5 export folder that holds index.html) over HTTP on this machine, and optionally launch Chrome on it with a remote-debugging port so connect_to_game can follow. A source project folder or a .c3p is refused: Construct exports only from its editor.',
+    'Serve an exported Construct game (the HTML5 export folder that holds index.html) over HTTP on this machine, and optionally launch Chrome on it with a fresh profile and a remote-debugging port the browser picks itself, so connect_to_game can follow (the result names the port and the page endpoint). A source project folder or a .c3p is refused: Construct exports only from its editor.',
     {
       folder: z.string().min(1).max(4096).describe('The exported game folder (contains index.html)'),
       port: z.number().int().min(0).max(65535).optional().default(0).describe('HTTP port (default 0: any free port)'),
       host: z.string().min(1).max(255).optional().default('localhost').describe('Interface to listen on (default: localhost)'),
       allowRemoteHost: z.boolean().optional().default(false).describe('Allow listening on an interface other than this machine (default: false)'),
       launchBrowser: z.boolean().optional().default(false).describe('Launch Chrome (or Edge) on the served URL with a remote-debugging port (default: false)'),
-      chromeDebuggingPort: z.number().int().min(1).max(65535).optional().default(9222).describe('Remote-debugging port for the launched browser (default: 9222)'),
       chromePath: z.string().max(4096).optional().describe('Browser executable (default: CHROME_PATH, then the platform\'s usual Chrome and Edge locations)'),
       headless: z.boolean().optional().default(false).describe('Launch the browser headless with software WebGL (default: false, a visible window)'),
       windowWidth: z.number().int().min(100).max(10_000).optional().describe('Browser window width in pixels'),
@@ -636,7 +635,6 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           host: args.host,
           port: args.port,
           launch: args.launchBrowser ? {
-            debuggingPort: args.chromeDebuggingPort,
             chromePath: args.chromePath,
             headless: args.headless,
             windowWidth: args.windowWidth,
@@ -648,7 +646,7 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
           success: true,
           ...info,
           next: info.browser
-            ? `connect_to_game with host "127.0.0.1" and port ${info.browser.cdpPort}; the game must carry the runtime bridge (inject_runtime_bridge before the export).`
+            ? `connect_to_game with ${info.browser.pageEndpoint ? `cdpEndpoint "${info.browser.pageEndpoint}"` : `host "127.0.0.1" and port ${info.browser.cdpPort}`}; the game must carry the runtime bridge (inject_runtime_bridge before the export).`
             : `Open ${info.url} in a browser started with --remote-debugging-port, then connect_to_game; or call again with launchBrowser: true.`,
         }, { projectWritten: false });
       } catch (error) {

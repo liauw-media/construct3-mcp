@@ -15,6 +15,7 @@ import {
   chromeCandidates,
   findChrome,
   isLoopbackHost,
+  readDevToolsActivePort,
 } from '../../src/runtime/preview-server.js';
 
 const FIXTURE_PROJECT = join(__dirname, '..', 'fixtures', 'minimal-project');
@@ -129,5 +130,19 @@ describe('browser discovery', () => {
   it('knows which hosts are this machine', () => {
     for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '127.1.2.3', '::1', '[::1]']) expect(isLoopbackHost(host)).toBe(true);
     for (const host of ['0.0.0.0', '10.0.0.5', 'example.com', '::']) expect(isLoopbackHost(host)).toBe(false);
+  });
+});
+
+describe('DevToolsActivePort', () => {
+  it('reads the port and browser path once both lines are there, and nothing before', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'c3-devtools-port-'));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    expect(await readDevToolsActivePort(dir)).toBeUndefined();
+    await writeFile(join(dir, 'DevToolsActivePort'), '53917', 'utf8');
+    expect(await readDevToolsActivePort(dir)).toBeUndefined();
+    await writeFile(join(dir, 'DevToolsActivePort'), '53917\r\n/devtools/browser/0b1c-42\r\n', 'utf8');
+    expect(await readDevToolsActivePort(dir)).toEqual({ port: 53917, browserPath: '/devtools/browser/0b1c-42' });
+    await writeFile(join(dir, 'DevToolsActivePort'), '0\n/devtools/browser/x', 'utf8');
+    expect(await readDevToolsActivePort(dir)).toBeUndefined();
   });
 });

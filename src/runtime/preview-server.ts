@@ -11,13 +11,12 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { webSocketClass } from './cdp-client.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -59,7 +58,6 @@ export interface ServePreviewOptions {
 
 export interface LaunchBrowserOptions {
   url: string;
-  debuggingPort: number;
   chromePath?: string;
   headless: boolean;
   windowWidth?: number;
@@ -71,10 +69,13 @@ export interface LaunchBrowserOptions {
 export interface LaunchedBrowser {
   pid: number;
   executable: string;
+  /** The debugging port the browser picked itself and wrote to its profile. */
   cdpPort: number;
   userDataDir: string;
-  /** The browser-level CDP endpoint reported by /json/version. */
-  webSocketDebuggerUrl?: string;
+  /** The browser-level CDP endpoint, from the same file. */
+  webSocketDebuggerUrl: string;
+  /** The CDP endpoint of the tab showing the served URL, when the browser listed it. */
+  pageEndpoint?: string;
   close(): Promise<void>;
 }
 
@@ -85,7 +86,7 @@ export interface PreviewInfo {
   port: number;
   folder: string;
   requests: number;
-  browser?: { pid: number; executable: string; cdpPort: number; headless: boolean };
+  browser?: { pid: number; executable: string; cdpPort: number; pageEndpoint?: string; headless: boolean };
 }
 
 /**
@@ -192,7 +193,13 @@ export class PreviewServer {
       folder: this.folder,
       requests: this.requests,
       browser: this.browser
-        ? { pid: this.browser.pid, executable: this.browser.executable, cdpPort: this.browser.cdpPort, headless: this.browserHeadless }
+        ? {
+          pid: this.browser.pid,
+          executable: this.browser.executable,
+          cdpPort: this.browser.cdpPort,
+          pageEndpoint: this.browser.pageEndpoint,
+          headless: this.browserHeadless,
+        }
         : undefined,
     };
   }
@@ -279,54 +286,88 @@ export function findChrome(explicit?: string): string {
   return found;
 }
 
-async function waitForDebugger(port: number, timeoutMs: number, child: ChildProcess): Promise<string | undefined> {
+/**
+ * The debugging port and browser endpoint path a Chromium browser writes to
+ * `<userDataDir>/DevToolsActivePort` once its debugging server listens, or
+ * undefined while the file is missing or incomplete. Launched with
+ * --remote-debugging-port=0, the browser picks a free port itself, and a
+ * file in the profile it was given can only come from that browser, so the
+ * port is never another process's.
+ */
+export async function readDevToolsActivePort(userDataDir: string): Promise<{ port: number; browserPath: string } | undefined> {
+  let text: string;
+  try {
+    text = await readFile(join(userDataDir, 'DevToolsActivePort'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const [portLine, pathLine] = text.split(/\r?\n/u);
+  const port = Number(portLine);
+  const browserPath = pathLine?.trim();
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !browserPath?.startsWith('/devtools/browser/')) return undefined;
+  return { port, browserPath };
+}
+
+async function waitForDevToolsActivePort(
+  userDataDir: string,
+  timeoutMs: number,
+  child: ChildProcess,
+): Promise<{ port: number; browserPath: string }> {
   const deadline = Date.now() + timeoutMs;
   let exited: number | null | undefined;
   child.once('exit', code => { exited = code ?? -1; });
   while (Date.now() < deadline) {
     if (exited !== undefined) throw new Error(`The browser exited with code ${exited} before its debugging port answered`);
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (response.ok) {
-        const version = await response.json() as { webSocketDebuggerUrl?: string };
-        return version.webSocketDebuggerUrl;
-      }
-    } catch {
-      // not up yet
-    }
-    await new Promise(r => setTimeout(r, 250));
+    const active = await readDevToolsActivePort(userDataDir);
+    if (active) return active;
+    await new Promise(r => setTimeout(r, 100));
   }
-  throw new Error(`The browser's debugging port ${port} did not answer within ${timeoutMs} ms`);
+  throw new Error(`The browser did not open its debugging port within ${timeoutMs} ms`);
 }
 
-/** Ask a running browser to close through its CDP endpoint; resolves false when it could not be reached. */
-async function browserClose(webSocketDebuggerUrl: string): Promise<boolean> {
-  return new Promise(done => {
-    let socket: InstanceType<typeof globalThis.WebSocket>;
+/** The CDP endpoint of the page showing `url`, polled briefly from the browser's own /json/list. */
+async function findPageEndpoint(port: number, url: string, timeoutMs: number): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
-      socket = new (webSocketClass())(webSocketDebuggerUrl);
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+      if (response.ok) {
+        const targets = await response.json() as Array<{ type?: string; url?: string; webSocketDebuggerUrl?: string }>;
+        const page = Array.isArray(targets)
+          ? targets.find(t => t.type === 'page' && typeof t.url === 'string' && t.url.startsWith(url) && typeof t.webSocketDebuggerUrl === 'string')
+          : undefined;
+        if (page?.webSocketDebuggerUrl) return page.webSocketDebuggerUrl;
+      }
     } catch {
-      done(false);
-      return;
+      // not listed yet
     }
-    const timer = setTimeout(() => { socket.close(); done(false); }, 2000);
-    socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
-      setTimeout(() => { clearTimeout(timer); socket.close(); done(true); }, 300);
-    }, { once: true });
-    socket.addEventListener('error', () => { clearTimeout(timer); done(false); }, { once: true });
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return undefined;
+}
+
+/** Wait until `child` has exited, at most `timeoutMs`; true when it is gone. */
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(done => {
+    const timer = setTimeout(() => { child.off('exit', onExit); done(false); }, timeoutMs);
+    const onExit = () => { clearTimeout(timer); done(true); };
+    child.once('exit', onExit);
   });
 }
 
 /**
- * Launch Chrome on `url` with a remote-debugging port and a fresh profile.
+ * Launch Chrome on `url` with a fresh profile and a debugging port the
+ * browser picks itself (--remote-debugging-port=0, read back from
+ * DevToolsActivePort in that profile). Closing ends only this child
+ * process; nothing is ever sent to whatever else listens on a port.
  * The child is not detached: it ends with the server process.
  */
 export async function launchBrowser(options: LaunchBrowserOptions): Promise<LaunchedBrowser> {
   const executable = findChrome(options.chromePath);
   const userDataDir = await mkdtemp(join(tmpdir(), 'c3mcp-chrome-'));
   const args = [
-    `--remote-debugging-port=${options.debuggingPort}`,
+    '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
     '--no-default-browser-check',
@@ -339,11 +380,12 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   args.push(options.url);
   const child = spawn(executable, args, { stdio: 'ignore', windowsHide: false });
   if (child.pid === undefined) throw new Error(`Could not start ${executable}`);
-  let webSocketDebuggerUrl: string | undefined;
+  let active: { port: number; browserPath: string };
   try {
-    webSocketDebuggerUrl = await waitForDebugger(options.debuggingPort, options.readyTimeoutMs ?? 15_000, child);
+    active = await waitForDevToolsActivePort(userDataDir, options.readyTimeoutMs ?? 15_000, child);
   } catch (error) {
     child.kill();
+    await waitForExit(child, 2_000);
     await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
@@ -352,20 +394,21 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   return {
     pid,
     executable,
-    cdpPort: options.debuggingPort,
+    cdpPort: active.port,
     userDataDir,
-    webSocketDebuggerUrl,
+    webSocketDebuggerUrl: `ws://127.0.0.1:${active.port}${active.browserPath}`,
+    pageEndpoint: await findPageEndpoint(active.port, options.url, 2_000),
     async close() {
       if (closed) return;
       closed = true;
-      const asked = webSocketDebuggerUrl ? await browserClose(webSocketDebuggerUrl) : false;
-      const gone = await new Promise<boolean>(done => {
-        if (child.exitCode !== null) { done(true); return; }
-        const timer = setTimeout(() => done(false), asked ? 3000 : 0);
-        child.once('exit', () => { clearTimeout(timer); done(true); });
-      });
-      if (!gone) child.kill();
-      await new Promise(r => setTimeout(r, 300));
+      // Only our own child is ended; its profile goes with it.
+      if (!await waitForExit(child, 0)) {
+        child.kill();
+        if (!await waitForExit(child, 2_000)) {
+          child.kill('SIGKILL');
+          await waitForExit(child, 1_000);
+        }
+      }
       await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
     },
   };
