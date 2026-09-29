@@ -13,6 +13,7 @@ import type {
 } from './types.js';
 import { resolveProjectPath } from './path-utils.js';
 import { parseJsonText, stripBom } from './json-format.js';
+import { searchFileText, type RawTextTerm } from './raw-text-search.js';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 /** Limits for listing flowcharts/ and timelines/ */
@@ -533,6 +534,19 @@ export class Construct3ProjectReader {
   async scanEntityIdsRaw(category: EntityCategory, name: string): Promise<{ highestUid: number; sids: number[] }> {
     const content = await readFile(this.resolveEntityPath(category, name), 'utf-8');
     return scanIdsInText(content);
+  }
+
+  /**
+   * Text search of an entity file for names or patterns (raw-text-search.ts),
+   * bypassing the size cap and JSON parsing: for the files the bulk reads
+   * skipped, whose uses the reference checks cannot see otherwise (#55). The
+   * file is streamed, so memory use does not grow with its size, through the
+   * same path map and resolveProjectPath() check as the parsed readers.
+   * Returns the keys of the terms found. fs errors propagate unwrapped, so
+   * callers can test `.code` (ENOENT: no file, so no uses in it).
+   */
+  async searchEntityTextRaw(category: EntityCategory, name: string, terms: readonly RawTextTerm[]): Promise<Set<string>> {
+    return searchFileText(this.resolveEntityPath(category, name), terms);
   }
 
   /**

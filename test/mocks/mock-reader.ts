@@ -5,6 +5,7 @@
 
 import type { Construct3Project, EventSheet, ObjectType, Layout, FileItem } from '../../src/construct3/types.js';
 import { scanIdsInText, type EntityCategory, type ReadFailure } from '../../src/construct3/project-reader.js';
+import { searchText, type RawTextTerm } from '../../src/construct3/raw-text-search.js';
 
 export interface MockReaderData {
   objects?: Map<string, Record<string, unknown>>;
@@ -338,6 +339,16 @@ export class MockReader {
     if (content === undefined) throw new Error(`${key}: raw text not available`);
     // The mock only fakes the I/O; the scan itself is the production one.
     return scanIdsInText(content);
+  }
+
+  /** Text search over the raw text registered for an unreadable entity (the search is the production one). */
+  async searchEntityTextRaw(category: EntityCategory, name: string, terms: readonly RawTextTerm[]): Promise<Set<string>> {
+    const key = `${category}/${name}`;
+    const forced = this.rawScanErrors.get(key);
+    if (forced) throw forced;
+    const content = this.rawEntityText.get(key);
+    if (content === undefined) throw new Error(`${key}: raw text not available`);
+    return searchText(content, terms);
   }
 
   invalidateCaches(): void {
