@@ -27,6 +27,7 @@ import { runInToolCall } from '../../src/construct3/disk-state.js';
 import { registerQueryTools } from '../../src/tools/query.js';
 import { registerAnalysisTools } from '../../src/tools/analysis.js';
 import { registerMutationTools } from '../../src/tools/mutations.js';
+import { registerRuntimeTools } from '../../src/tools/runtime-tools.js';
 
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 
@@ -88,6 +89,22 @@ function saveSheetInEditor(sheet: string, text = 'saved in the editor'): void {
   writeFileSync(path, JSON.stringify(data, null, '\t'), 'utf-8');
 }
 
+/**
+ * The first time the tool calls `method`, the editor saves project.c3proj
+ * first: a change made during the tool call, after its start.
+ */
+function editorSavesProjectBeforeFirstCallOf<T extends object>(target: T, method: keyof T & string): void {
+  const original = (target[method] as (...args: unknown[]) => unknown).bind(target);
+  let saved = false;
+  vi.spyOn(target as Record<string, (...args: unknown[]) => unknown>, method).mockImplementation((...args: unknown[]) => {
+    if (!saved) {
+      saved = true;
+      saveProjectInEditor();
+    }
+    return original(...args);
+  });
+}
+
 function projectText(): string {
   return readFileSync(join(dir, 'project.c3proj'), 'utf-8');
 }
@@ -105,6 +122,7 @@ beforeEach(async () => {
   registerQueryTools(server as never, reader);
   registerAnalysisTools(server as never, reader);
   registerMutationTools(server as never, reader, writer, idGen);
+  registerRuntimeTools({ server: server as never, reader, writer });
 });
 
 afterEach(async () => {
@@ -498,6 +516,106 @@ describe('a call refused after it changed other files puts them back (#51)', () 
     expect(result.text).toContain('Check the project (validate_project, git diff)');
     const target = await readJson('eventSheets/Other.json');
     expect(target.events.some((e: { text?: string }) => e.text === 'target saved in the editor')).toBe(true);
+  });
+});
+
+// ─── Tools that update project.c3proj themselves ────────────
+
+describe('tools that update project.c3proj themselves refuse a change made during the call, before their first write (#51)', () => {
+  const refusal = 'project.c3proj was changed on disk after this server read it';
+  const bridgeScript = () => join(dir, 'scripts', 'c3-runtime-bridge.js');
+
+  it('create_timeline', async () => {
+    editorSavesProjectBeforeFirstCallOf(reader, 'getProject');
+
+    const result = await call('create_timeline', { name: 'Intro' });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect(existsSync(join(dir, 'timelines'))).toBe(false);
+    const project = await readJson('project.c3proj');
+    expect(project.properties.author).toBe('Editor');
+    expect(JSON.stringify(project.timelines)).not.toContain('Intro');
+  });
+
+  it('delete_timeline', async () => {
+    await expectSuccess('create_timeline', { name: 'Intro' });
+    editorSavesProjectBeforeFirstCallOf(reader, 'getProject');
+
+    const result = await call('delete_timeline', { name: 'Intro' });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect(existsSync(join(dir, 'timelines', 'Intro.json'))).toBe(true);
+    expect(JSON.stringify((await readJson('project.c3proj')).timelines)).toContain('Intro');
+  });
+
+  it('register_addon', async () => {
+    editorSavesProjectBeforeFirstCallOf(reader, 'getUsedAddons');
+
+    const result = await call('register_addon', { type: 'behavior', id: 'Tween', name: 'Tween' });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    const project = await readJson('project.c3proj');
+    expect(project.properties.author).toBe('Editor');
+    expect(project.usedAddons.map((a: { id: string }) => a.id)).not.toContain('Tween');
+  });
+
+  it('unregister_addon', async () => {
+    await expectSuccess('register_addon', { type: 'behavior', id: 'Tween', name: 'Tween' });
+    editorSavesProjectBeforeFirstCallOf(reader, 'getUsedAddons');
+
+    const result = await call('unregister_addon', { type: 'behavior', id: 'Tween', force: true });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect((await readJson('project.c3proj')).usedAddons.map((a: { id: string }) => a.id)).toContain('Tween');
+  });
+
+  it('inject_runtime_bridge', async () => {
+    editorSavesProjectBeforeFirstCallOf(reader, 'getProjectDir');
+
+    const result = await call('inject_runtime_bridge');
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect(existsSync(bridgeScript())).toBe(false);
+    expect(JSON.stringify((await readJson('project.c3proj')).rootFileFolders.script)).not.toContain('c3-runtime-bridge');
+  });
+
+  it('remove_runtime_bridge', async () => {
+    await expectSuccess('inject_runtime_bridge');
+    editorSavesProjectBeforeFirstCallOf(reader, 'getProjectDir');
+
+    const result = await call('remove_runtime_bridge');
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect(existsSync(bridgeScript())).toBe(true);
+    expect(JSON.stringify((await readJson('project.c3proj')).rootFileFolders.script)).toContain('c3-runtime-bridge');
+  });
+
+  it('export_for_preview', async () => {
+    editorSavesProjectBeforeFirstCallOf(reader, 'getProjectDir');
+
+    const result = await call('export_for_preview');
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect(existsSync(bridgeScript())).toBe(false);
+  });
+
+  it('pack_project', async () => {
+    const output = join(snapshotDir, 'game.c3p');
+    editorSavesProjectBeforeFirstCallOf(reader, 'getProjectDir');
+
+    const result = await call('pack_project', { outputPath: output });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(refusal);
+    expect(existsSync(bridgeScript())).toBe(false);
+    expect(existsSync(output)).toBe(false);
   });
 });
 
