@@ -2,9 +2,9 @@
  * Runtime control tools for Construct 3 games.
  *
  * These tools bridge the gap between static project manipulation and
- * live game control. They work with any desktop automation tool (Playwright,
- * curl, etc.) to interact with a running C3 preview via an injected bridge
- * script.
+ * live game control: they add a bridge script to the project, serve an
+ * exported game (preview-server.ts), and drive the running game over the
+ * Chrome DevTools Protocol (cdp-client.ts) through that bridge.
  *
  * Generic — not tied to any specific game or addon.
  */

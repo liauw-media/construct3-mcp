@@ -197,6 +197,40 @@ For undo across several steps, keep the project under git and commit before each
 
 In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files, and `validate_project` lists them as `backup-file` info.
 
+## Runtime Tool Issues
+
+### "Runtime bridge was not ready after ... ms"
+
+`connect_to_game` found no page whose `globalThis.__c3bridge` answered ready; the message lists the pages it tried.
+- Inject the bridge (`inject_runtime_bridge`), reopen the project in Construct 3, and export or preview again: a build made before the injection has no bridge. The answer's `loadedAs` says how Construct loads it (imported by the main script, or as the main script).
+- Check the game has started: the preview's console shows `[c3-bridge] Runtime bridge initialized`.
+- With several tabs, pass `urlContains` (part of the game's address) or the tab's `cdpEndpoint` (`serve_preview` returns it as `browser.pageEndpoint`).
+- Projects with *Use worker* on work: the bridge is found in the runtime's worker (`bridgeContext: "worker"`).
+
+### "Runtime bridge command timed out ... it had not run yet and was withdrawn"
+
+The game did not tick while `call_bridge` waited. A browser runs no animation frames for a hidden page (a background tab, a minimized window), and the bridge processes commands on ticks. `connect_to_game` brings the tab to the front and warns (`pageVisible: false`) when it stays hidden; show the window, or run the game in a window of its own. The command was withdrawn, so it will not run later. "It may still run later" means the game carries an older bridge without `cancel`: inject the current one.
+
+### "The runtime connection needs the WebSocket client built into Node.js 22 and later"
+
+The connection tools use Node.js's built-in WebSocket client. Start the server with Node.js 22 or later; the other tools work on older versions.
+
+### "No Chrome or Edge executable found" / "CHROME_PATH is set but names no file"
+
+`serve_preview` launches the browser from `CHROME_PATH` or the usual install locations (the log lists the places tried). Set `CHROME_PATH` in the server's environment (the `env` of its MCP configuration) to the browser executable. A browser path cannot be passed as a tool parameter.
+
+### "Condition type "expression" ... is off unless the server was started with C3MCP_ALLOW_EVAL=1"
+
+Expression conditions run JavaScript in the game page. Use a `globalVar`, `objectProperty` or `layout` condition, or set `C3MCP_ALLOW_EVAL=1` in the server's environment if you want to allow page script.
+
+### "Refusing to connect to ...: only this machine ... is allowed"
+
+`connect_to_game` reaches browsers on this machine only. To allow another machine, set `C3MCP_ALLOW_REMOTE_CDP=1` in the server's environment.
+
+### `serve_preview` refuses `host`, `allowRemoteHost`, `chromePath` or `chromeDebuggingPort`
+
+These parameters existed in the first version of the tool and were removed: the server listens on 127.0.0.1 only, the browser comes from `CHROME_PATH`, and it picks its own debugging port (returned as `browser.cdpPort`). Use the address the tool returns (`http://127.0.0.1:<port>/`); requests naming another host get 403.
+
 ## Build Issues
 
 ### TypeScript compilation errors

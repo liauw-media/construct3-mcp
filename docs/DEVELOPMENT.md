@@ -91,6 +91,8 @@ construct3-mcp/
 │   │   └── pitfalls.ts             # Curated pitfalls text (construct3://docs/pitfalls)
 │   ├── runtime/
 │   │   ├── bridge.ts               # Injectable runtime bridge script generator
+│   │   ├── cdp-client.ts           # CDP client: game connections, bridge calls, input, screenshots
+│   │   ├── preview-server.ts       # Loopback server for exported games, browser launch
 │   │   └── zip-writer.ts           # Zero-dep ZIP writer for .c3p packing
 │   ├── tools/                      # MCP tool handlers
 │   │   ├── query.ts                # Query tools (9)
@@ -104,14 +106,14 @@ construct3-mcp/
 │   │   ├── animation-tools.ts      # Sprite animation and frame tools (8)
 │   │   ├── timeline-tools.ts       # Timeline tools (5)
 │   │   ├── project-tools.ts        # Project metadata and addon tools (4)
-│   │   └── runtime-tools.ts        # Runtime control tools (7)
+│   │   └── runtime-tools.ts        # Runtime control tools (19)
 │   └── prompts/                    # MCP prompt handlers
 │       └── workflows.ts            # Workflow prompts (7)
 ├── test/                           # Vitest suites
 │   ├── construct3/                 # Reader, writer, templates and analyzer tests
 │   ├── tools/                      # Tool handler tests (through the mock server)
 │   ├── resources/                  # Resource and prompt tests
-│   ├── runtime/                    # Runtime bridge tests
+│   ├── runtime/                    # Runtime bridge, CDP client and preview server tests (live-browser.test.ts needs Chrome or Edge)
 │   ├── acceptance/                 # End-to-end round trip through the tool handlers
 │   ├── mocks/                      # Mock MCP server, reader, writer, ID generator
 │   └── fixtures/                   # Small Construct 3 projects used by the tests
@@ -230,6 +232,7 @@ npx vitest run --maxWorkers=2         # fewer workers on low-memory machines
 ```
 
 - Tool tests register the real handlers on the mock server in `test/mocks/mock-server.ts` and call them with `callTool()`.
+- The runtime connection tests talk to fake CDP endpoints on 127.0.0.1 (`test/helpers/ws-server.ts` is a small WebSocket server for them); the generated bridge runs for real in `node:vm`. `test/runtime/live-browser.test.ts` runs the tools against a real headless Chrome or Edge (from `CHROME_PATH` or the usual install locations) and a fake Construct export (`test/helpers/fake-c3-export.ts`, page and worker variants); without a browser it is skipped with a note in the output. It uses port 9222 when free, to check that nothing contacts another program there.
 - Tests that write copy a fixture from `test/fixtures/` to a temporary folder first; the committed fixtures are never changed.
 - Fixtures contain no proprietary content: `minimal-project` is hand-written, `c3-loadable-minimal` was derived with `scripts/derive-minimal-fixture.ts` and opened in the editor (its uniqueId, SIDs, version, layer names and a layer color were replaced with generated or default values afterwards, as the script now does; that version has not been reopened in the editor yet), and `runtime-traps-real` holds event sheets from public MIT-licensed projects (sources in its README).
 

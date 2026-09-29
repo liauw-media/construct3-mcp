@@ -26,12 +26,12 @@ This guide is for Construct 3 developers who want to use the server with Claude 
 
 ## What it does and what it doesn't
 
-construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 71 tools, 9 resources (5 fixed ones and 4 templates that take the name of an object, event sheet, layout or manual topic) and 7 prompts for one Construct 3 project:
+construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 83 tools, 9 resources (5 fixed ones and 4 templates that take the name of an object, event sheet, layout or manual topic) and 7 prompts for one Construct 3 project:
 
 - **Read and explain**: list objects, layouts, event sheets, families, timelines and addons, show an event sheet as a readable outline with the editor's event numbers, find where an object is used, map functions, find unused objects and assets.
 - **Check**: `validate_project` runs 26 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
 - **Edit**: create, change and delete objects, families, event sheets and events, layouts, layers, instances, animations and timelines, and change the project metadata (name, version, author, description). Names and references are checked before anything is written, and most rewritten files get a `.bak` copy (exceptions under [.bak files](#bak-files)).
-- **Prepare runtime testing**: add a "bridge" script to your project so you (or a browser-automation tool) can read variables and call functions in a running preview.
+- **Test the running game**: add a "bridge" script to your project, serve an export of the game, and let the AI read variables, call functions, wait for states, click, type and take screenshots in the running game.
 
 What it does **not** do:
 
@@ -39,7 +39,7 @@ What it does **not** do:
 - The Construct 3 editor does not notice its changes. You close and reopen the project yourself (see [the safe editing workflow](#the-safe-editing-workflow)).
 - It does not know Construct's list of conditions and actions or their parameter names, and it does not parse full expressions. A misspelled action id or an expression like `Player.X +` is written without complaint.
 - It does not download the Construct 3 manual. The documentation resources only return links.
-- It does not click through or play your game. The runtime bridge has to be driven from the browser console or an automation tool.
+- It does not export or preview your game: that only the Construct editor does. The runtime tools start from an export or from the editor's preview in Chrome or Edge.
 - It cannot install third-party addons. `register_addon` only writes an entry into the project's addon list (`usedAddons`), and after that the server creates objects for that addon whether it is installed or not. Add third-party addons in the editor and don't let the AI register them.
 - It opens no network port. Your AI tool talks to it over stdin/stdout only.
 
@@ -133,7 +133,7 @@ To see the tool list without any AI tool, use the MCP Inspector in CLI mode:
 npx -y @modelcontextprotocol/inspector --cli node "C:/Tools/construct3-mcp/dist/index.js" "C:/Games/My Game" --method tools/list
 ```
 
-This prints a JSON list of 71 tools. The first run downloads the Inspector and can take a few minutes. It may also print a `npm warn deprecated` line and `Schema portability: 0 errors, 12 warnings across 6 tools`; both are harmless. Without `--cli` the Inspector starts a browser UI and keeps running.
+This prints a JSON list of 83 tools. The first run downloads the Inspector and can take a few minutes. It may also print a `npm warn deprecated` line and `Schema portability: 0 errors, 12 warnings across 6 tools`; both are harmless. Without `--cli` the Inspector starts a browser UI and keeps running.
 
 ### Alternative: run from GitHub without cloning
 
@@ -354,12 +354,12 @@ Confirm the trust prompt when the server starts. Logs: Command Palette > **MCP: 
 
 *From each vendor's documentation, not tested for this guide.* Always pass an explicit project path.
 
-- **Windsurf** (now "Devin Desktop", agent "Cascade"): Cascade panel > `...` menu > **Open MCP config file**. Same `mcpServers` JSON as Claude Desktop. Cascade allows at most 100 tools in total and this server alone brings 71, so disable other servers or tools you don't need if you hit the limit.
+- **Windsurf** (now "Devin Desktop", agent "Cascade"): Cascade panel > `...` menu > **Open MCP config file**. Same `mcpServers` JSON as Claude Desktop. Cascade allows at most 100 tools in total and this server alone brings 83, so disable other servers or tools you don't need if you hit the limit.
 - **Antigravity**: open the file through the Agent panel > **MCP Servers** > **Manage MCP Servers** > **View raw config**. Current documentation names `~/.gemini/config/mcp_config.json` (global) and `.agents/mcp_config.json` (per workspace).
 
 ### Check that it works
 
-Your client should show `construct3` with 71 tools (plus 5 resources, 4 resource templates and 7 prompts). In Claude Code, start `claude` (in your game folder if your setup has no project path), type `/mcp` and select `construct3` to see its status and tools. Then type:
+Your client should show `construct3` with 83 tools (plus 5 resources, 4 resource templates and 7 prompts). In Claude Code, start `claude` (in your game folder if your setup has no project path), type `/mcp` and select `construct3` to see its status and tools. Then type:
 
 > Give me an overview of this project.
 
@@ -570,7 +570,7 @@ Before the server rewrites or deletes a JSON file or `project.c3proj`, it copies
 - There is only **one** such `.bak` per file. The next write to the same file overwrites it, so it holds the state before the **last write** to that file, not the state before your session. One request can write the same file twice: after "Add keyboard input", `project.c3proj.bak` already contains the new `Keyboard` addon entry.
 - Sprite frame images work differently. The editor names a frame's image after the frame's index, so `add_frame_to_animation` with an `index` and `delete_frame_from_animation` rename the images of the later frames one index up or down, and every frame keeps its image. The image of a deleted frame, and an image file that no frame uses but sits where a moved image or the new placeholder has to go, are renamed to `<file>.bak` in `images/`, for example `images/player-animation 1-001.png.bak`. If that name is taken, the next one is `<file>.1.bak`, then `<file>.2.bak`, so older copies are kept. The tool's `warnings` name these files (the first three, then how many more).
 - Nothing deletes them. They are not listed in `project.c3proj`, and `pack_project` leaves them out of the `.c3p`. `validate_project` lists them as `backup-file` info, including those in `images/`. Whether the Construct 3 editor shows or keeps them was not tested for this guide.
-- Some writes make no `.bak` at all: `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they add the bridge) and the other image writes. `replace_sprite_image` writes the new PNG over the frame's image, and `create_object` and `add_animation_to_sprite` write their placeholder PNGs over an image file of the same name, for example one left behind by a deleted object or animation.
+- Some writes make no `.bak` at all: `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they add the bridge, which also add or remove one line in your main script) and the other image writes. `replace_sprite_image` writes the new PNG over the frame's image, and `create_object` and `add_animation_to_sprite` write their placeholder PNGs over an image file of the same name, for example one left behind by a deleted object or animation.
 
 To list or delete them:
 
@@ -602,15 +602,15 @@ Don't save anything. Go back to your last commit (see above), or ask the AI to r
 
 ## Read tools and write tools
 
-**Read-only tools (25)**, safe to auto-approve:
+**Read-only tools (26)**, safe to auto-approve:
 
 - Browse: `get_project_summary`, `list_objects`, `list_layouts`, `list_eventsheets`, `list_families`, `list_addons`, `list_timelines`, `search_objects`
 - Details: `get_object_details`, `get_layout_details`, `get_eventsheet_details`, `get_timeline_details`
 - Understand and find: `get_object_dependencies`, `get_eventsheet_outline`, `locate_event`, `get_eventsheet_flow`, `get_function_map`, `get_group_settings`, `get_asset_usage`
 - Check: `validate_project`, `find_orphaned_objects`, `find_runtime_traps`, `analyze_performance`
-- Runtime helpers that only return text: `get_bridge_commands`, `generate_bridge_eval_script`
+- Runtime helpers that only return text: `get_bridge_commands`, `generate_bridge_eval_script`, `get_canvas_size`
 
-**Tools that write files (46)**, review before approving:
+**Tools that write files (47)**, review before approving:
 
 - Objects and families: `create_object`, `update_object_properties`, `delete_object`, `create_family`, `update_family`, `delete_family`
 - Event sheets: `create_event_sheet`, `add_event_to_sheet`, `add_event_block`, `update_event_block`, `update_event_block_action`, `update_event_variable`, `move_events_between_sheets`, `delete_event_from_sheet`, `remove_event_from_sheet`, `delete_event_sheet`, `fix_legacy_behavior_keys`, `fix_legacy_event_shapes`
@@ -618,7 +618,9 @@ Don't save anything. Go back to your last commit (see above), or ask the AI to r
 - Animations: `add_animation_to_sprite`, `update_animation_properties`, `rename_animation`, `delete_animation`, `add_frame_to_animation`, `update_frame`, `delete_frame_from_animation`, `replace_sprite_image`
 - Timelines: `create_timeline`, `update_timeline`, `delete_timeline`
 - Project and addons: `update_project_metadata`, `register_addon`, `unregister_addon`
-- Runtime: `inject_runtime_bridge`, `remove_runtime_bridge`, `export_for_preview`, `clone_project`, `pack_project`
+- Runtime: `inject_runtime_bridge`, `remove_runtime_bridge`, `export_for_preview`, `clone_project`, `pack_project`, and `screenshot_game` (writes the image file you name)
+
+**Tools that act on the running game** (they change nothing in the project, but run functions, set variables and send input in the game they connect to, and `serve_preview` starts a local web server and a browser): `connect_to_game`, `disconnect_from_game`, `call_bridge`, `wait_for_condition`, `subscribe_events`, `read_events`, `unsubscribe_events`, `simulate_input`, `serve_preview`, `stop_preview`.
 
 Defaults to know:
 
@@ -634,56 +636,44 @@ Parameter names differ between tools. This only matters if you write tool calls 
 
 ## Testing a running game with the runtime bridge
 
-The runtime bridge is a script (`scripts/c3-runtime-bridge.js`) that the server adds to your project. While the game runs in Preview, it lets you read and change global variables, call event sheet functions, read object state and switch layouts from the browser console, or from any tool that can run JavaScript in the page (Playwright, the Chrome DevTools Protocol). The server itself does not connect to the browser.
+The runtime bridge is a script (`scripts/c3-runtime-bridge.js`) that the server adds to your project. While the game runs, it lets the AI read and change global variables, call event sheet functions, read object state, switch layouts, wait for a state, record events, click and type into the game and take screenshots. The server talks to the game's browser tab over the Chrome DevTools Protocol, so it works with Chrome and Edge (Chromium-based browsers).
 
-> **Not verified in a live editor.** The server's messages say the bridge starts by itself. According to the Construct 3 manual, Construct only runs the project's **main script** automatically, and the bridge is added as an ordinary script (Purpose "none"). Step 5 below follows the manual. Check for the console line in step 6: if it is missing, the bridge is not running.
+What you need: Node.js 22 or later for the connection tools (older versions say so when you use them), Chrome or Edge, and a way to run the game in that browser: an export of the game (Construct exports only from its editor) or the editor's preview in a browser started with a debugging port.
 
-1. **Commit and close the project** in Construct 3, as in [the safe editing workflow](#the-safe-editing-workflow).
-2. **Pre-flight check** without changing anything: ask the AI to run `export_for_preview` with `injectBridge: false`.
+1. **Add the bridge**: ask for `inject_runtime_bridge`. Construct runs only the project's main script by itself, so the tool adds one marked line at the top of your main script:
 
-   ```json
-   { "success": true, "useWorker": "dom", "checks": [{ "check": "workerMode", "status": "ok" }], "nextSteps": [ ... ] }
+   ```javascript
+   import "./c3-runtime-bridge.js"; // construct3-mcp runtime bridge (remove_runtime_bridge removes this line)
    ```
 
-   If `useWorker` is anything other than `"dom"` (for example `"auto"`) you get `{"check": "workerMode", "status": "warning", "detail": "useWorker is \"auto\" — should be \"dom\" for runtime bridge access. Set to \"dom\" in project settings."}`. The tool only reports, it does not change the setting. According to the manual, Auto already runs without a worker once the project uses scripting, and the bridge is a script, so with Auto the warning may be a false alarm; setting **Use worker** to **No** (step 4) makes it certain. Older projects that store `"useWorker": false` get this warning too.
-3. **Add the bridge**: ask for `inject_runtime_bridge`.
+   (with `../` in front when the main script is in a subfolder). A project without a main script gets the bridge as its main script. The answer says which (`"loadedAs": "import"` with `"mainScript"`, or `"loadedAs": "main"`). No `.bak` is written.
+2. **Reopen the project in Construct 3.** *Use worker* can stay as it is: with *Auto* the project runs on the page because it now uses a script, and with *Yes* the server finds the bridge in the runtime's worker.
+3. **Run the game.** Either export it (Menu > Project > Export > Web (HTML5)) and ask for `serve_preview` with the exported folder and `launchBrowser: true` (add `headless: true` for no window), or preview it in a Chrome started with a separate profile and a debugging port, for example `chrome --remote-debugging-port=9222 --user-data-dir=C:\Temp\c3-debug` (Chrome ignores the port for your normal profile; sign in to construct.net in that window). `serve_preview` answers with the address (`http://127.0.0.1:<port>/`) and the browser's `pageEndpoint`.
+4. **Connect**: `connect_to_game` with the `cdpEndpoint` from `serve_preview`, or with `port: 9222` for your own browser. It tries every tab and keeps the one whose bridge answers (pass `urlContains`, such as `"preview"`, to pick one), and brings it to the front: a tab in the background does not run, so commands would time out. `pageVisible: false` with a warning means the tab stayed hidden (a minimized window, for example).
+5. **Drive the game** with the `connectionId`:
 
-   ```json
-   { "success": true, "injected": true, "path": "C:\\Games\\My Game\\scripts\\c3-runtime-bridge.js", "registered": true, ... }
-   ```
+   - `call_bridge` runs one bridge command: `callFunction` `{ name: "StartGame", params: [] }`, `getGlobalVar` `{ name }`, `setGlobalVar` `{ name, value }`, `getObjectState` `{ objectName: "Player" }`, `getAllInstances`, `getLayout`, `goToLayout` `{ name }`, `evaluateExpression`, `listObjects`, `listGlobalVars`, `ping`. `get_bridge_commands` lists them all with their arguments.
+   - `wait_for_condition` waits until a global variable, an object property or the layout matches, for example `{ type: "globalVar", name: "GameState", operator: "eq", value: "READY" }`.
+   - `subscribe_events` and `read_events` record changes of a global variable, layout changes, or custom events your own script sends with `globalThis.__c3bridge.emit("Bonus", data)`.
+   - `simulate_input` clicks, moves the mouse, taps, swipes, presses keys (`"Enter"`, `"Space"`, `"."`) and types text as key presses, in page, canvas or layout coordinates; `get_canvas_size` gives the canvas's position and size.
+   - `screenshot_game` saves the page or only the canvas as a PNG or JPEG.
+6. **Clean up**: `disconnect_from_game`, and `stop_preview`, which closes the browser it launched and deletes its temporary profile.
 
-   This adds `scripts/c3-runtime-bridge.js` and one entry in `project.c3proj`. No `.bak` is written.
-4. **Reopen the project in Construct 3 and turn off the worker.** Click the project name in the Project Bar, then in the Properties Bar under **Advanced** set **Use worker** to **No**. In project files saved by Construct 3 we found `"useWorker": "dom"` for this, `"auto"` and `"worker"` for the other values (we did not find the stored values in the manual). With the worker on, the game runs in a Web Worker named "Runtime" and `globalThis.__c3bridge` is not in the page's default console context.
-5. **Make sure Construct runs the bridge.** In the Project Bar under **Scripts**, either add this line at the top of your main script (the main script is shown in bold):
+The bridge also works from the browser console: `globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" })` returns a command id, and `globalThis.__c3bridge.getResult(id)` returns `{ ok: true, value: ... }` once, after the next game tick (`null` before). When the preview starts, the console shows `[c3-bridge] Runtime bridge initialized. Access via globalThis.__c3bridge`.
 
-   ```js
-   import "./c3-runtime-bridge.js";
-   ```
+Two things are off unless you set them where the server starts (in the `env` of its entry in your AI tool's MCP configuration), because a tool call must not be able to turn them on:
 
-   or, if the project has no main script yet, select `c3-runtime-bridge.js` and set its **Purpose** to **Main script**.
-6. **Preview** the game, click into the preview window and press F12 (Safari: Option+Cmd+I) to open the developer tools. The console should show `Hosted in DOM` and:
+- `C3MCP_ALLOW_EVAL=1` allows `wait_for_condition` with `{ type: "expression", expr: "..." }`, which runs any JavaScript in the game page with the page's rights.
+- `C3MCP_ALLOW_REMOTE_CDP=1` allows `connect_to_game` to reach a browser on another machine.
 
-   ```
-   [c3-bridge] Runtime bridge initialized. Access via globalThis.__c3bridge
-   ```
-
-7. **Send commands** in the console of the preview window. `submit()` returns a command id, not the value. The result is ready after the next game tick and can be read **once** with `getResult()` (it returns `null` while the command is pending):
-
-   ```js
-   const id = globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" });
-   // a moment later:
-   globalThis.__c3bridge.getResult(id);   // { ok: true, value: ... } or { ok: false, error: ... }
-   ```
-
-   Other commands: `ping` `{}`, `callFunction` `{ name: "StartGame", params: [] }`, `setGlobalVar` `{ name, value }`, `getObjectState` `{ objectName: "Player" }`, `getAllInstances` `{ objectName }`, `getLayout` `{}`, `goToLayout` `{ name }`, `evaluateExpression` `{ objectName, expression }`, `listObjects` `{}`, `listGlobalVars` `{}`. `get_bridge_commands` lists them all with their arguments. `generate_bridge_eval_script` returns the matching console lines for one command. Its `pythonScript` only prints those lines, it does not connect to the browser.
-8. **Automate** (optional): a Playwright or CDP script runs the same two calls (`submit`, then `getResult`) in the preview page. This is up to you; the server does not do it.
+`CHROME_PATH` chooses the browser `serve_preview` launches (by default Chrome, then Edge, from their usual install locations).
 
 ### Remove the bridge before you export
 
 While the bridge is in the game, anyone who opens the browser console can change variables, call your functions and skip levels, and the script announces itself in the console. `validate_project` does not warn about a leftover bridge. Before you export a build for players:
 
-1. In Construct 3, delete the `import "./c3-runtime-bridge.js";` line from your main script if you added it. Save and close the project.
-2. Ask for `remove_runtime_bridge`. It removes the script and its entry in `project.c3proj` (an empty `scripts/` folder may stay). It answers `"removed": true` even when there was nothing to remove.
+1. Close the project in Construct 3.
+2. Ask for `remove_runtime_bridge`. It removes the script, its entry in `project.c3proj` and the marked import line from your main script (an empty `scripts/` folder may stay). A line you typed yourself is left alone.
 3. Reopen the project and check that `c3-runtime-bridge.js` is gone from the Scripts folder.
 
 To share a clean `.c3p`, ask for `pack_project` **with `injectBridge: false`**, for example `pack_project {"outputPath": "C:/Temp/MyGame.c3p", "injectBridge": false}`. Without that flag it adds the bridge to your project folder and to the `.c3p`.
@@ -756,5 +746,5 @@ Install it and add one object that uses the addon in the Construct 3 editor, sav
 - New instances get sequential UIDs. The server ignores the project setting *UID numbering: Random*, which Scirra recommends for teams, so avoid placing instances with the server on two branches at the same time.
 - Third-party addons must be installed and added in the editor; `register_addon` only edits the addon list.
 - The documentation resources only return links to the Construct 3 manual.
-- The runtime bridge must be driven from the browser console or an automation tool, and must be removed before you ship.
-- Windsurf / Devin Desktop allows 100 tools in total; this server uses 71 of them.
+- The runtime tools need Node.js 22 or later and Chrome or Edge, start from an export or the editor's preview (the server cannot export), and the bridge must be removed before you ship.
+- Windsurf / Devin Desktop allows 100 tools in total; this server uses 83 of them.

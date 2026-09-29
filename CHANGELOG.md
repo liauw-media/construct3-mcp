@@ -2,6 +2,36 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Highlights
+
+- **The server drives a running game.** New runtime tools connect to the game's browser tab over the Chrome DevTools Protocol and use the injected bridge: `connect_to_game`, `disconnect_from_game`, `call_bridge`, `wait_for_condition`, `subscribe_events` / `read_events` / `unsubscribe_events`, `simulate_input`, `get_canvas_size`, `screenshot_game`, and `serve_preview` / `stop_preview` to serve an exported game and launch a browser on it (#8, #9, #10, #11, #12, #13). Ported from the BeatsByZann fork (thanks @BeatsByZann) and reworked where review found problems.
+- **The injected bridge now actually loads.** `inject_runtime_bridge` imports it from the project's main script (or makes it the main script); before, Construct never ran it.
+
+### Added
+
+- `connect_to_game` and `disconnect_from_game`: a persistent CDP connection to the game's page. With a host and debugging port, every page of the browser is tried and the first whose bridge answers ready is kept (`urlContains` narrows the pages); the bridge is found on the page or, for games with *Use worker* on, in the runtime's worker (`bridgeContext`); the tab is brought to the front, and `pageVisible: false` with a warning says when it stays hidden, where the game does not tick. Only browsers on this machine, unless the server runs with `C3MCP_ALLOW_REMOTE_CDP=1` (#8).
+- `call_bridge`: run one bridge command and return `commandId`, `result` and `elapsedMs`; a command that times out is withdrawn from the bridge, and the error says whether it will not run, ran after all, or (older bridge) may still run (#9).
+- `wait_for_condition`: wait until a global variable, an object property (or instance variable) or the layout matches, with `eq`, `neq`, `gt`, `lt`, `gte`, `lte` and `contains`; returns `met`, `elapsedMs` and `finalValue` without failing on a timeout. Conditions of type `expression` run JavaScript in the game and are refused unless the server runs with `C3MCP_ALLOW_EVAL=1` (#10).
+- `subscribe_events`, `read_events`, `unsubscribe_events`: bounded per-subscription buffers in the bridge for global-variable changes, layout changes and custom events the game sends with `globalThis.__c3bridge.emit(name, data)` (#11).
+- `simulate_input` and `get_canvas_size`: click, mouse move, touch tap/long press/swipe, keys with modifiers and typed text, in viewport, canvas or layout coordinates. Characters get the code and keyCode of the US keyboard key that types them, text is typed as key presses (or inserted with `mode: "insertText"`), and touch emulation is on only for the gesture (#12).
+- `screenshot_game`: the page or the canvas as PNG or JPEG, of any size (#12).
+- `serve_preview` and `stop_preview`: serve an exported game at `http://127.0.0.1:<port>/`, with COOP/COEP on request (`crossOriginIsolated`), and launch Chrome or Edge on it with a fresh profile and a debugging port the browser picks itself; the result names that port and the page's CDP endpoint. Stopping ends only that browser and removes its profile; profiles left by ended runs are removed at the next launch; everything ends when the MCP server shuts down (#13).
+- The bridge answers `layerToCssPx`, `cssPxToLayer`, `subscribeEvents`, `readEvents` and `unsubscribeEvents`, has `cancel(id)` and `emit(name, data)`, and drops results nobody collects within 60 seconds.
+
+### Changed
+
+- `inject_runtime_bridge` (and `export_for_preview`, `pack_project` and `clone_project` when they add the bridge) adds one marked `import` line at the top of the project's main script, or registers the bridge as the main script of a project without one, and lists it with `"script-info"` like the editor. The answer says how the bridge is loaded (`loadedAs`). `remove_runtime_bridge` also removes that import line, so you no longer delete it by hand.
+- `export_for_preview` no longer warns about *Use worker* "auto" (with the bridge the project uses scripts, so Construct runs it on the page) or "worker" (the bridge is reached there); its next steps name `serve_preview` and `connect_to_game`.
+- `get_bridge_commands` lists all 16 commands `call_bridge` runs and names `call_bridge` instead of a `call_bridge_command` that never existed; `getObjectState` takes `objectName`.
+- The server has 83 tools (71 before).
+- The connection tools need Node.js 22 or later (its built-in WebSocket client); the rest of the server still runs on Node.js 18. No new dependencies.
+
+### Fixed
+
+- The injected bridge was registered with `"file-info": {"purpose": "none"}` and imported by nothing, so Construct never loaded it: the manual has Construct run only the main script and the scripts it imports. A registration written by an earlier version is repaired by the next `inject_runtime_bridge`.
+
 ## [1.9.2] - 2026-09-29
 
 ### Highlights
