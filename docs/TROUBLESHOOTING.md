@@ -204,12 +204,20 @@ In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a 
 `connect_to_game` found no page whose `globalThis.__c3bridge` answered ready; the message lists the pages it tried.
 - Inject the bridge (`inject_runtime_bridge`), reopen the project in Construct 3, and export or preview again: a build made before the injection has no bridge. The answer's `loadedAs` says how Construct loads it (imported by the main script, or as the main script).
 - Check the game has started: the preview's console shows `[c3-bridge] Runtime bridge initialized`.
-- With several tabs, pass `urlContains` (part of the game's address) or the tab's `cdpEndpoint` (`serve_preview` returns it as `browser.pageEndpoint`).
+- With several tabs, pass `pageUrl` (the game's address, such as the `url` from `serve_preview`), `urlContains` (part of the game's address or path; the query does not count) or the tab's `cdpEndpoint` (`serve_preview` returns it as `browser.pageEndpoint`).
 - Projects with *Use worker* on work: the bridge is found in the runtime's worker (`bridgeContext: "worker"`).
 
 ### "Runtime bridge command timed out ... it had not run yet and was withdrawn"
 
 The game did not tick while `call_bridge` waited. A browser runs no animation frames for a hidden page (a background tab, a minimized window), and the bridge processes commands on ticks. `connect_to_game` brings the tab to the front and warns (`pageVisible: false`) when it stays hidden; show the window, or run the game in a window of its own. The command was withdrawn, so it will not run later. "It may still run later" means the game carries an older bridge without `cancel`: inject the current one.
+
+### "N pages have a ready runtime bridge (...); connect_to_game does not guess which is the game"
+
+More than one tab of the browser has a `globalThis.__c3bridge` that answers ready: two previews of the game, the editor's preview beside an export, or another site that defines such an object. `connect_to_game` does not pick one, since the wrong tab would get your input and answer your commands. Name the game: `pageUrl` with its address (`serve_preview` returns it as `url`), `urlContains` with part of its address or path, or `cdpEndpoint` with the tab's endpoint (`browser.pageEndpoint`). Or close the other tabs.
+
+### "The game page reloaded or navigated since connect_to_game"
+
+The page was reloaded (F5, a new export being served, the game reloading itself) or left for another address. The game started over: its variables are back at their start values, and subscriptions and pending commands are gone. The connection was closed so that no tool drives the new game as if it were the old one. Call `connect_to_game` again, and `subscribe_events` again if you used it.
 
 ### "The runtime connection needs the WebSocket client built into Node.js 22 and later"
 
@@ -217,19 +225,35 @@ The connection tools use Node.js's built-in WebSocket client. Start the server w
 
 ### "No Chrome or Edge executable found" / "CHROME_PATH is set but names no file"
 
-`serve_preview` launches the browser from `CHROME_PATH` or the usual install locations (the log lists the places tried). Set `CHROME_PATH` in the server's environment (the `env` of its MCP configuration) to the browser executable. A browser path cannot be passed as a tool parameter.
+`serve_preview` launches the browser from `CHROME_PATH` or the usual install locations (the log lists the places tried). Set `CHROME_PATH` in the server's environment (the `env` of its MCP configuration) to the browser executable, the file itself (`chrome.exe`, `msedge.exe`), not its folder. A browser path cannot be passed as a tool parameter.
+
+### "The browser could not be started (...)"
+
+The file `CHROME_PATH` (or the install location found) names could not be started: `EFTYPE` or `EACCES` mean it is not an executable, `ENOENT` that it disappeared. The server log names the file. Nothing is left behind: the temporary profile made for the launch is removed.
+
+### "Port N on 127.0.0.1 is in use by another program"
+
+`serve_preview` was given a `port` that something else already answers on. On Windows a second program can listen on the same port for all interfaces, and connections that program already holds would keep reaching it. Choose another port, or leave `port` out for any free one.
 
 ### "Condition type "expression" ... is off unless the server was started with C3MCP_ALLOW_EVAL=1"
 
 Expression conditions run JavaScript in the game page. Use a `globalVar`, `objectProperty` or `layout` condition, or set `C3MCP_ALLOW_EVAL=1` in the server's environment if you want to allow page script.
 
-### "Refusing to connect to ...: only this machine ... is allowed"
+### "Refusing to connect to ...: only this machine ... is allowed" / "The debugging port lists page endpoints on another host"
 
-`connect_to_game` reaches browsers on this machine only. To allow another machine, set `C3MCP_ALLOW_REMOTE_CDP=1` in the server's environment.
+`connect_to_game` reaches browsers on this machine only, and follows the page endpoints a debugging port on this machine lists only when they are on this machine too. To allow another machine, set `C3MCP_ALLOW_REMOTE_CDP=1` in the server's environment.
+
+### `screenshot_game`: "outputPath must be an absolute path", "must end in .png", "lies inside the open project's folder", "exists already"
+
+`screenshot_game` writes one new image file outside the project: an absolute path (a relative one would land wherever the server was started), with the extension of the format (`.png`, or `.jpg`/`.jpeg` for `format: "jpeg"`), not in the project folder (the runtime tools leave the project as it is), and an existing file only with `overwrite: true`. The checks run before the capture, so nothing was written.
+
+### `remove_runtime_bridge`: "Nothing was changed: scripts/... uses the bridge in a way remove_runtime_bridge cannot take out"
+
+A script imports `c3-runtime-bridge.js` other than with a line of its own (`import "./c3-runtime-bridge.js";`), for example `import * as bridge from "./c3-runtime-bridge.js"` or `import("./c3-runtime-bridge.js")`. Without the bridge file that script would fail and the game would not load, so nothing was removed. Take that use out of the named script, then call `remove_runtime_bridge` again.
 
 ### `serve_preview` refuses `host`, `allowRemoteHost`, `chromePath` or `chromeDebuggingPort`
 
-These parameters existed in the first version of the tool and were removed: the server listens on 127.0.0.1 only, the browser comes from `CHROME_PATH`, and it picks its own debugging port (returned as `browser.cdpPort`). Use the address the tool returns (`http://127.0.0.1:<port>/`); requests naming another host get 403.
+These parameters existed in the BeatsByZann fork this tool was ported from and were not taken over: the server listens on 127.0.0.1 only, the browser comes from `CHROME_PATH`, and it picks its own debugging port (returned as `browser.cdpPort`). Use the address the tool returns (`http://127.0.0.1:<port>/`); requests naming another host get 403.
 
 ## Build Issues
 

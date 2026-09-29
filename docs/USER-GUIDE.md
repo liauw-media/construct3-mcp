@@ -41,7 +41,7 @@ What it does **not** do:
 - It does not download the Construct 3 manual. The documentation resources only return links.
 - It does not export or preview your game: that only the Construct editor does. The runtime tools start from an export or from the editor's preview in Chrome or Edge.
 - It cannot install third-party addons. `register_addon` only writes an entry into the project's addon list (`usedAddons`), and after that the server creates objects for that addon whether it is installed or not. Add third-party addons in the editor and don't let the AI register them.
-- It opens no network port. Your AI tool talks to it over stdin/stdout only.
+- It does not listen on the network for your AI tool: the two talk over stdin/stdout only. Only the runtime tools use ports, and only on this machine: `serve_preview` serves an export on 127.0.0.1 and starts a browser with a debugging port, and `connect_to_game` connects to such a port (another machine only if you allow it, see [Testing a running game](#testing-a-running-game-with-the-runtime-bridge)).
 
 ## Requirements
 
@@ -97,7 +97,7 @@ To address all issues, run:
 `npm install` works the same way. You only need `npm run build` again if you change the source code.
 
 - Do **not** use `npm ci --omit=dev` or `--production`. The build needs the TypeScript compiler, which is a dev dependency, so the install fails with `tsc` not found and no `dist/` folder.
-- About the vulnerability summary (17 on 2026-09-29, 8 of them in runtime dependencies, the rest in test tools): 7 of the 8 runtime findings are in the HTTP server parts of the MCP SDK (express, hono and their dependencies), which this stdio server never loads. The eighth, `fast-uri`, is loaded as part of the SDK's JSON-schema validator (`ajv`). Its reported problems concern parsing untrusted URLs, which this server does not do. The server opens no network port. You don't need to run `npm audit fix` to use it.
+- About the vulnerability summary (17 on 2026-09-29, 8 of them in runtime dependencies, the rest in test tools): 7 of the 8 runtime findings are in the HTTP server parts of the MCP SDK (express, hono and their dependencies), which this stdio server never loads. The eighth, `fast-uri`, is loaded as part of the SDK's JSON-schema validator (`ajv`). Its reported problems concern parsing untrusted URLs, which this server does not do. The server runs no HTTP server of the SDK: the MCP connection is stdio, and the only port it opens is the loopback preview server of `serve_preview`, which is its own code. You don't need to run `npm audit fix` to use it.
 - To update later: `git pull`, then `npm ci` again, then restart or reconnect the server in your AI tool.
 
 Every configuration below needs the **absolute path** to `dist/index.js` in your clone. To print it, run this inside the clone folder:
@@ -133,7 +133,7 @@ To see the tool list without any AI tool, use the MCP Inspector in CLI mode:
 npx -y @modelcontextprotocol/inspector --cli node "C:/Tools/construct3-mcp/dist/index.js" "C:/Games/My Game" --method tools/list
 ```
 
-This prints a JSON list of 83 tools. The first run downloads the Inspector and can take a few minutes. It may also print a `npm warn deprecated` line and `Schema portability: 0 errors, 12 warnings across 6 tools`; both are harmless. Without `--cli` the Inspector starts a browser UI and keeps running.
+This prints a JSON list of 83 tools. The first run downloads the Inspector and can take a few minutes. It may also print a `npm warn deprecated` line and `Schema portability: 0 errors, 16 warnings across 8 tools`; both are harmless. Without `--cli` the Inspector starts a browser UI and keeps running.
 
 ### Alternative: run from GitHub without cloning
 
@@ -262,7 +262,7 @@ This format works, and so does the one `claude mcp add` writes (the same with `"
 
 #### Tool permissions
 
-Claude Code asks before it uses an MCP tool. In Claude Code the tools are named `mcp__construct3__<tool>`, for example `mcp__construct3__list_objects`. The server does not mark its tools as read-only or destructive, so your client cannot tell them apart by itself. These rules allow exactly the 25 read-only tools and nothing else. Put them in `~/.claude/settings.json` (applies in every folder, which fits the `user` setup above), or in `.claude/settings.json` inside the game folder you start `claude` in (Claude Code reads it only from the start folder, not from parent folders, and applies its allow rules only after you trusted that folder). You can also add them with `/permissions`:
+Claude Code asks before it uses an MCP tool. In Claude Code the tools are named `mcp__construct3__<tool>`, for example `mcp__construct3__list_objects`. The server does not mark its tools as read-only or destructive, so your client cannot tell them apart by itself. These rules allow exactly the 26 read-only tools and nothing else. Put them in `~/.claude/settings.json` (applies in every folder, which fits the `user` setup above), or in `.claude/settings.json` inside the game folder you start `claude` in (Claude Code reads it only from the start folder, not from parent folders, and applies its allow rules only after you trusted that folder). You can also add them with `/permissions`:
 
 ```json
 {
@@ -281,7 +281,7 @@ Claude Code asks before it uses an MCP tool. In Claude Code the tools are named 
 }
 ```
 
-Keep the write tools on "ask" so you see each change before it happens. The rule syntax is from the Claude Code permissions documentation. That the patterns match exactly the 25 read-only tools was checked against the server's tool list.
+Keep the write tools on "ask" so you see each change before it happens. The rule syntax is from the Claude Code permissions documentation. That the patterns match exactly the 26 read-only tools was checked against the server's tool list (MCP Inspector, 83 tools). `get_*` includes `get_canvas_size`, which reads the canvas of a game you connected to and changes nothing.
 
 ### Claude Desktop
 
@@ -608,7 +608,8 @@ Don't save anything. Go back to your last commit (see above), or ask the AI to r
 - Details: `get_object_details`, `get_layout_details`, `get_eventsheet_details`, `get_timeline_details`
 - Understand and find: `get_object_dependencies`, `get_eventsheet_outline`, `locate_event`, `get_eventsheet_flow`, `get_function_map`, `get_group_settings`, `get_asset_usage`
 - Check: `validate_project`, `find_orphaned_objects`, `find_runtime_traps`, `analyze_performance`
-- Runtime helpers that only return text: `get_bridge_commands`, `generate_bridge_eval_script`, `get_canvas_size`
+- Runtime helpers that only return text: `get_bridge_commands`, `generate_bridge_eval_script`
+- Runtime read: `get_canvas_size` (the canvas geometry of a game you connected to with `connect_to_game`; it sends nothing to the game)
 
 **Tools that write files (47)**, review before approving:
 
@@ -618,13 +619,13 @@ Don't save anything. Go back to your last commit (see above), or ask the AI to r
 - Animations: `add_animation_to_sprite`, `update_animation_properties`, `rename_animation`, `delete_animation`, `add_frame_to_animation`, `update_frame`, `delete_frame_from_animation`, `replace_sprite_image`
 - Timelines: `create_timeline`, `update_timeline`, `delete_timeline`
 - Project and addons: `update_project_metadata`, `register_addon`, `unregister_addon`
-- Runtime: `inject_runtime_bridge`, `remove_runtime_bridge`, `export_for_preview`, `clone_project`, `pack_project`, and `screenshot_game` (writes the image file you name)
+- Runtime: `inject_runtime_bridge`, `remove_runtime_bridge`, `export_for_preview`, `clone_project`, `pack_project`, and `screenshot_game` (writes the image file you name, outside the project; an existing file only with `overwrite: true`)
 
 **Tools that act on the running game** (they change nothing in the project, but run functions, set variables and send input in the game they connect to, and `serve_preview` starts a local web server and a browser): `connect_to_game`, `disconnect_from_game`, `call_bridge`, `wait_for_condition`, `subscribe_events`, `read_events`, `unsubscribe_events`, `simulate_input`, `serve_preview`, `stop_preview`.
 
 Defaults to know:
 
-- `export_for_preview` and `pack_project` add the runtime bridge **to your project folder** unless you pass `injectBridge: false`. `clone_project` adds it to the copy unless you pass `includeBridge: false`.
+- `export_for_preview` and `pack_project` add the runtime bridge **to your project folder** (with the import line in your main script) unless you pass `injectBridge: false`, and the `.c3p` then runs the bridge; `pack_project` says so in a `warning`. `clone_project` adds it to the copy unless you pass `includeBridge: false`.
 - `fix_legacy_behavior_keys` and `fix_legacy_event_shapes` only report by default (`dryRun: true`).
 - `force: true` means different things per tool:
   - On `delete_object`, `delete_family`, `delete_event_sheet`, `delete_event_from_sheet`, `delete_layout`, `update_object_properties` and `update_family` it skips the reference checks and leaves the references behind.
@@ -649,14 +650,14 @@ What you need: Node.js 22 or later for the connection tools (older versions say 
    (with `../` in front when the main script is in a subfolder). A project without a main script gets the bridge as its main script. The answer says which (`"loadedAs": "import"` with `"mainScript"`, or `"loadedAs": "main"`). No `.bak` is written.
 2. **Reopen the project in Construct 3.** *Use worker* can stay as it is: with *Auto* the project runs on the page because it now uses a script, and with *Yes* the server finds the bridge in the runtime's worker.
 3. **Run the game.** Either export it (Menu > Project > Export > Web (HTML5)) and ask for `serve_preview` with the exported folder and `launchBrowser: true` (add `headless: true` for no window), or preview it in a Chrome started with a separate profile and a debugging port, for example `chrome --remote-debugging-port=9222 --user-data-dir=C:\Temp\c3-debug` (Chrome ignores the port for your normal profile; sign in to construct.net in that window). `serve_preview` answers with the address (`http://127.0.0.1:<port>/`) and the browser's `pageEndpoint`.
-4. **Connect**: `connect_to_game` with the `cdpEndpoint` from `serve_preview`, or with `port: 9222` for your own browser. It tries every tab and keeps the one whose bridge answers (pass `urlContains`, such as `"preview"`, to pick one), and brings it to the front: a tab in the background does not run, so commands would time out. `pageVisible: false` with a warning means the tab stayed hidden (a minimized window, for example).
+4. **Connect**: `connect_to_game` with the `cdpEndpoint` from `serve_preview`, or with `port: 9222` for your own browser. It tries every tab and keeps the one whose bridge answers, and brings it to the front: a tab in the background does not run, so commands would time out. `pageVisible: false` with a warning means the tab stayed hidden (a minimized window, for example). If more than one tab has a ready bridge (two previews, or a site that defines one of its own), it does not guess: the error lists the tabs, and you name the game with `pageUrl` (its address, such as `"http://127.0.0.1:53817/"` from `serve_preview`) or `urlContains` (such as `"preview"`; only the address and path count, not the query). If the game's page reloads, the game starts over and the connection ends with an error that says so; connect again.
 5. **Drive the game** with the `connectionId`:
 
    - `call_bridge` runs one bridge command: `callFunction` `{ name: "StartGame", params: [] }`, `getGlobalVar` `{ name }`, `setGlobalVar` `{ name, value }`, `getObjectState` `{ objectName: "Player" }`, `getAllInstances`, `getLayout`, `goToLayout` `{ name }`, `evaluateExpression`, `listObjects`, `listGlobalVars`, `ping`. `get_bridge_commands` lists them all with their arguments.
    - `wait_for_condition` waits until a global variable, an object property or the layout matches, for example `{ type: "globalVar", name: "GameState", operator: "eq", value: "READY" }`.
    - `subscribe_events` and `read_events` record changes of a global variable, layout changes, or custom events your own script sends with `globalThis.__c3bridge.emit("Bonus", data)`.
    - `simulate_input` clicks, moves the mouse, taps, swipes, presses keys (`"Enter"`, `"Space"`, `"."`) and types text as key presses, in page, canvas or layout coordinates; `get_canvas_size` gives the canvas's position and size.
-   - `screenshot_game` saves the page or only the canvas as a PNG or JPEG.
+   - `screenshot_game` saves the page or only the canvas as a PNG or JPEG, to an absolute path outside the project folder, such as `"C:/Temp/runs/after-click.png"`. It does not replace an existing file unless you pass `overwrite: true`.
 6. **Clean up**: `disconnect_from_game`, and `stop_preview`, which closes the browser it launched and deletes its temporary profile.
 
 The bridge also works from the browser console: `globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" })` returns a command id, and `globalThis.__c3bridge.getResult(id)` returns `{ ok: true, value: ... }` once, after the next game tick (`null` before). When the preview starts, the console shows `[c3-bridge] Runtime bridge initialized. Access via globalThis.__c3bridge`.
@@ -673,10 +674,10 @@ Two things are off unless you set them where the server starts (in the `env` of 
 While the bridge is in the game, anyone who opens the browser console can change variables, call your functions and skip levels, and the script announces itself in the console. `validate_project` does not warn about a leftover bridge. Before you export a build for players:
 
 1. Close the project in Construct 3.
-2. Ask for `remove_runtime_bridge`. It removes the script, its entry in `project.c3proj` and the marked import line from your main script (an empty `scripts/` folder may stay). A line you typed yourself is left alone.
+2. Ask for `remove_runtime_bridge`. It removes the script, its entry in `project.c3proj` and every line in your scripts that only imports it: the marked line it added, and a plain `import "./c3-runtime-bridge.js";` you typed yourself (the v1.9.2 instructions had you do that). An empty `scripts/` folder may stay. If one of your scripts uses the bridge in another way, such as `import * as bridge from "./c3-runtime-bridge.js"`, it changes nothing and names that script: take that use out first, or the game would not load without the file.
 3. Reopen the project and check that `c3-runtime-bridge.js` is gone from the Scripts folder.
 
-To share a clean `.c3p`, ask for `pack_project` **with `injectBridge: false`**, for example `pack_project {"outputPath": "C:/Temp/MyGame.c3p", "injectBridge": false}`. Without that flag it adds the bridge to your project folder and to the `.c3p`.
+To share a clean `.c3p`, ask for `pack_project` **with `injectBridge: false`**, for example `pack_project {"outputPath": "C:/Temp/MyGame.c3p", "injectBridge": false}`. Without that flag it adds the bridge to your project folder (with the import line in your main script) and to the `.c3p`, where it runs, and its answer carries a `warning` that says so.
 
 ## Troubleshooting and FAQ
 

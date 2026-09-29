@@ -1256,7 +1256,7 @@ The connection tools need Node.js 22 or later (its built-in WebSocket client); o
 
 ### `inject_runtime_bridge`
 
-Write the bridge script and register it so Construct loads it. Construct loads only the main script on its own; other scripts run only when the main script imports them (manual, "Script files"). So in a project with a main script, one marked line goes at the top of that script (`import "./c3-runtime-bridge.js"; // construct3-mcp runtime bridge (...)`, with the relative path from the main script's folder; line endings and BOM kept), and the bridge is listed with `"script-info": {"purpose": "none"}`. A project without a main script gets the bridge as its main script (`"purpose": "main"`). An entry an earlier version wrote (`"file-info"`, purpose none, loaded by nothing) is replaced. Projects set to classic scripts get the entry without an import, with a warning. No `.bak` is written. No parameters.
+Write the bridge script and register it so Construct loads it. Construct loads only the main script on its own; other scripts run only when the main script imports them (manual, "Script files"). So in a project with a main script, one marked line goes at the top of that script (`import "./c3-runtime-bridge.js"; // construct3-mcp runtime bridge (...)`, with the relative path from the main script's folder; line endings and BOM kept), and the bridge is listed with `"script-info": {"purpose": "none"}`. A project without a main script gets the bridge as its main script (`"purpose": "main"`). An entry an earlier version wrote (`"file-info"`, purpose none, loaded by nothing) is replaced in place. Projects whose `scriptsType` property is `"classic"` get the entry without an import (a classic script cannot hold one), with a warning. Called again, it leaves the entry where it is and writes `project.c3proj` only when the registration changed. No `.bak` is written. No parameters.
 
 Returns `success`, `injected`, `path`, `registered` (whether `project.c3proj` changed), `loadedAs` (`"import"`, `"main"` or `"classic"`), for `"import"` also `mainScript` (path under `scripts/`) and `importAdded`, and `message`.
 
@@ -1264,7 +1264,7 @@ The script starts through `runOnStartup()` and processes commands each tick, on 
 
 ### `remove_runtime_bridge`
 
-Delete the bridge script, remove its entries from `project.c3proj` and the marked import line from the main script, which is then byte for byte as before. No parameters. Returns `entriesRemoved` and `importRemoved`.
+Delete the bridge script, remove its entries from `project.c3proj`, and remove every line in the project's scripts (`.js`, `.mjs`, `.ts` under `scripts/`) that only imports the bridge, with at most a comment after it: the marked line `inject_runtime_bridge` added, after which the main script is byte for byte as before (BOM and line endings included), and a line typed by hand, such as the `import "./c3-runtime-bridge.js";` the v1.9.2 instructions had you add. A script that uses the bridge in another way (`import * as bridge from "./c3-runtime-bridge.js"`, `export ... from`, `import(...)`) makes the tool refuse before it changes anything, naming the script: without the bridge file the game would not load. No parameters. Returns `entriesRemoved`, `importRemoved` and `scriptsChanged` (paths under `scripts/`).
 
 ### `get_bridge_commands`
 
@@ -1272,17 +1272,18 @@ List the commands `call_bridge` runs, with their arguments: `ping`, `callFunctio
 
 ### `connect_to_game`
 
-Open a CDP connection to the game's page and keep it for the other runtime tools. With `host` and `port`, every page the browser lists is tried at once (or only those whose URL contains `urlContains`) and the first whose bridge answers ready is kept; with `cdpEndpoint`, that page only. The bridge is looked for on the page and in the page's dedicated workers (reached through `Target.setAutoAttach`), so games with *Use worker* on work too. The tab is brought to the front (`Page.bringToFront`); a hidden page runs no ticks, so bridge calls would time out.
+Open a CDP connection to the game's page and keep it for the other runtime tools. With `host` and `port`, the pages the browser lists (narrowed by `pageUrl` and `urlContains`) are tried at once and the one whose bridge answers ready is kept. When several pages have a ready bridge (two games, or another site that defines a `globalThis.__c3bridge` of its own), the call fails and lists their URLs instead of guessing; once one page answered, the others get 1.5 seconds to finish their first check. With `cdpEndpoint`, that page only. The bridge is looked for on the page and in the page's dedicated workers (reached through `Target.setAutoAttach`), so games with *Use worker* on work too. The tab is brought to the front (`Page.bringToFront`); a hidden page runs no ticks, so bridge calls would time out.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `cdpEndpoint` | string | No | A page's CDP WebSocket endpoint (`ws://` or `wss://`), e.g. `browser.pageEndpoint` from `serve_preview` |
 | `host` | string | No | Browser debugging host (default: `127.0.0.1`) |
 | `port` | integer | No | Browser debugging port (default: 9222) |
-| `urlContains` | string | No | With `host`/`port`: only pages whose URL contains this text |
+| `pageUrl` | string | No | With `host`/`port`: only pages of this URL's origin whose path starts with its path, e.g. the `url` from `serve_preview` (`http://127.0.0.1:53817/`) |
+| `urlContains` | string | No | With `host`/`port`: only pages whose origin and path contain this text; the query and fragment do not count |
 | `timeoutMs` | integer | No | Time for the whole connection, 100 to 60000 (default: 10000) |
 
-Only hosts on this machine (`localhost`, `127.x.x.x`, `::1`) are allowed unless the server runs with `C3MCP_ALLOW_REMOTE_CDP=1`. Returns `connectionId`, `bridgeReady`, `bridgeContext` (`"page"` or `"worker"`), `pageVisible` (with a `warning` when the page stayed hidden), `gameState` (`ready`, `layoutName`, `tickCount`, `gameTime`, `dt`, `objectCount`) and, after discovery, `target` (`id`, `title`, `url`). When no page's bridge answers in time, the error lists the pages tried.
+Only hosts on this machine (`localhost`, `127.x.x.x`, `::1`) are allowed unless the server runs with `C3MCP_ALLOW_REMOTE_CDP=1`; that includes the page endpoints a debugging port on this machine lists, which are refused when they name another host. The connection lasts as long as the page: after a reload or a navigation the game starts over (its state and subscriptions are gone), so the connection is closed, and every call with its `connectionId` fails with an error that says the page reloaded; the same happens when the bridge's worker ends. Connect again. Returns `connectionId`, `bridgeReady`, `bridgeContext` (`"page"` or `"worker"`), `pageVisible` (with a `warning` when the page stayed hidden), `gameState` (`ready`, `layoutName`, `tickCount`, `gameTime`, `dt`, `objectCount`) and, after discovery, `target` (`id`, `title`, `url`). When no page's bridge answers in time, the error lists the pages tried.
 
 ### `disconnect_from_game`
 
@@ -1343,7 +1344,19 @@ The game canvas's position and CSS size in the viewport (`left`, `top`, `cssWidt
 
 ### `screenshot_game`
 
-Capture the page, or only the canvas (`canvasOnly: true`), as PNG or JPEG (`format`, `quality` 0 to 100 for JPEG) into `outputPath`. Returns `path`, `bytes`, `format` and, for the canvas, `clip`. There is no size limit on the image.
+Capture the page, or only the canvas, as a PNG or JPEG file. The file is checked before the capture: an absolute path outside the open project's folder (junctions resolved), ending in `.png` for PNG or `.jpg`/`.jpeg` for JPEG. Missing folders are created, and an existing file is replaced only with `overwrite: true`. The runtime tools leave the project as it is, so a screenshot never lands there.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `outputPath` | string | Yes | Absolute path of the image file, outside the project folder |
+| `format` | string | No | `"png"` (default) or `"jpeg"` |
+| `quality` | integer | No | JPEG quality 0 to 100 |
+| `canvasOnly` | boolean | No | Only the canvas rectangle (default: the whole viewport) |
+| `overwrite` | boolean | No | Replace an existing file (default: false, which makes an existing file an error) |
+| `timeoutMs` | integer | No | Time for the capture, 1000 to 120000 (default: 30000; a large canvas takes seconds) |
+
+Returns `success`, `path`, `bytes`, `format` and, for the canvas, `clip`. The image has no size limit of its own.
 
 ### `serve_preview`
 
@@ -1352,14 +1365,14 @@ Serve an exported game folder (the one holding `index.html`) at `http://127.0.0.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `folder` | string | Yes | The exported game folder |
-| `port` | integer | No | HTTP port on 127.0.0.1 (default: 0, any free port) |
+| `port` | integer | No | HTTP port on 127.0.0.1 (default: 0, any free port). A port another program answers on is refused |
 | `crossOriginIsolated` | boolean | No | Send COOP `same-origin`, COEP `require-corp` and CORP `same-origin`, for `SharedArrayBuffer` (default: false; `require-corp` blocks resources from other origins that do not allow it, such as a CDN script) |
 | `launchBrowser` | boolean | No | Launch a browser on the served URL (default: false) |
 | `headless` | boolean | No | Headless, with software WebGL (default: false) |
 | `windowWidth`, `windowHeight` | integer | No | Browser window size |
 | `readyTimeoutMs` | integer | No | Wait for the browser's debugging port, 1000 to 120000 (default: 15000) |
 
-The server listens on 127.0.0.1 only, answers only requests whose `Host` names this machine (127.0.0.1, localhost, [::1]; others get 403), serves only files whose real path lies in the folder (no junction or link out of it), GET and HEAD only, with `cache-control: no-store` and the usual content types (`.wasm` as `application/wasm`). The browser comes from `CHROME_PATH` or the usual Chrome and Edge install locations; the tool takes no browser path, host or interface, and refuses such parameters. It starts with a fresh profile and `--remote-debugging-port=0`: it picks a free port itself and writes it into that profile, so the port is never another program's. Returns `serverId`, `url`, `host`, `port`, `folder`, `crossOriginIsolated`, `requests`, for a launched browser `browser` (`pid`, `executable`, `cdpPort`, `pageEndpoint`, `headless`), and `next`.
+The server listens on 127.0.0.1 only, answers only requests whose `Host` names this machine (127.0.0.1, localhost, [::1]; others get 403), serves only files whose real path lies in the folder (no junction or link out of it), GET and HEAD only, with `cache-control: no-store` and the usual content types (`.wasm` as `application/wasm`). A file is opened once per request: one that disappears meanwhile (a new export into the folder) is a 404, and a download the browser aborts closes its file. The browser comes from `CHROME_PATH` (which must name a file) or the usual Chrome and Edge install locations; the tool takes no browser path, host or interface, and refuses such parameters. A browser that cannot be started is an error of the call, and its fresh profile is removed. It starts with a fresh profile and `--remote-debugging-port=0`: it picks a free port itself and writes it into that profile, so the port is never another program's. Returns `serverId`, `url`, `host`, `port`, `folder`, `crossOriginIsolated`, `requests`, for a launched browser `browser` (`pid`, `executable`, `cdpPort`, `pageEndpoint`, `headless`), and `next`.
 
 ### `stop_preview`
 
@@ -1376,7 +1389,7 @@ Generate a Python script and manual console steps that submit a bridge command a
 
 ### `export_for_preview`
 
-Pre-flight check for runtime testing: reports where the runtime runs (`workerMode`, from *Use worker*; `"dom"`/`"no"`: on the page, `"worker"`/`"yes"`: in a worker, which `connect_to_game` reaches; `"auto"`: on the page once the project uses scripts, as it does with the bridge) and, by default, injects the bridge. It does not change `useWorker`. The `nextSteps` name `serve_preview` and `connect_to_game`. With `injectBridge: false` nothing is written.
+Pre-flight check for runtime testing: reports where the runtime runs (`workerMode`, from *Use worker*; `"dom"`/`"no"` or `false` in older files: on the page, `"worker"`/`"yes"` or `true`: in a worker, which `connect_to_game` reaches; `"auto"`: on the page once the project uses scripts, as it does with the bridge) and, by default, injects the bridge like `inject_runtime_bridge`, returning its `loadedAs`, `mainScript` and `importAdded`. It does not change `useWorker`. The `nextSteps` name `serve_preview` and `connect_to_game`. With `injectBridge: false` nothing is written.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1393,14 +1406,14 @@ Copy the project folder to a new directory, optionally with the bridge injected 
 
 ### `pack_project`
 
-Pack the project folder into a `.c3p` file (ZIP archive) that the Construct 3 editor can open. Skips `.git`, `node_modules`, `.bak` files, `.DS_Store` and `Thumbs.db`.
+Pack the project folder into a `.c3p` file (ZIP archive) that the Construct 3 editor can open. Skips `.git`, `node_modules`, `.bak` files, `.DS_Store` and `Thumbs.db`. Unless `injectBridge` is false, it first adds the bridge **to the project itself**, as `inject_runtime_bridge` does (the bridge file, its entry and the marked import line in the main script), so the packed game loads the bridge. To pack a game for players, call `remove_runtime_bridge` and pack with `injectBridge: false`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `outputPath` | string | Yes | Output path for the `.c3p` file |
 | `injectBridge` | boolean | No | Inject the bridge into the project before packing (default: true) |
 
-Returns `success`, `packed`, `outputPath`, `fileCount`, `sizeBytes`, `sizeMB` and `bridgeInjected`.
+Returns `success`, `packed`, `outputPath`, `fileCount`, `sizeBytes`, `sizeMB` and `bridgeInjected`; with the bridge also `loadedAs`, `mainScript` and `importAdded` (as `inject_runtime_bridge` returns them) and a `warning` that the packed game exposes `globalThis.__c3bridge`.
 
 ---
 

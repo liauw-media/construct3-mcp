@@ -213,22 +213,22 @@ Event SIDs are not always unique in editor-saved sheets. The tools that find an 
 | Tool | Description |
 |------|-------------|
 | `inject_runtime_bridge` | Add the bridge script that exposes the running game as `globalThis.__c3bridge`, imported by the main script (or as the main script of a project without one) so Construct loads it |
-| `remove_runtime_bridge` | Remove the bridge script, its registration and the import line it added |
+| `remove_runtime_bridge` | Remove the bridge script, its registration and every line that only imports it (the one it added, or one typed by hand); refuses, changing nothing, while a script uses the bridge otherwise |
 | `get_bridge_commands` | List the commands `call_bridge` runs (callFunction, getGlobalVar, getObjectState, layerToCssPx, the subscription commands, ...) |
-| `connect_to_game` | Connect to the game's browser tab over the Chrome DevTools Protocol; finds the tab whose bridge is ready, on the page or in the runtime's worker, and brings it to the front |
+| `connect_to_game` | Connect to the game's browser tab over the Chrome DevTools Protocol; finds the tab whose bridge is ready, on the page or in the runtime's worker (`pageUrl` or `urlContains` name it; several ready tabs are refused, not guessed), and brings it to the front |
 | `disconnect_from_game` | Close a connection |
 | `call_bridge` | Run a bridge command and return its result; a command that times out is withdrawn |
 | `wait_for_condition` | Wait until a global variable, object property or layout matches (page expressions only with `C3MCP_ALLOW_EVAL=1`) |
 | `subscribe_events` / `read_events` / `unsubscribe_events` | Buffer global-variable changes, layout changes and custom events (`__c3bridge.emit`) between polls |
 | `simulate_input` | Click, move, touch (tap, long press, swipe), press keys and type text, in viewport, canvas or layout coordinates |
 | `get_canvas_size` | The game canvas's position and size, for input coordinates |
-| `screenshot_game` | Save the page or the canvas as PNG or JPEG |
+| `screenshot_game` | Save the page or the canvas as PNG or JPEG, to a new file outside the project (`overwrite: true` to replace one) |
 | `serve_preview` | Serve an exported game folder on 127.0.0.1 and optionally launch Chrome or Edge on it with its own debugging port and profile |
 | `stop_preview` | Stop preview servers and the browsers they launched |
 | `generate_bridge_eval_script` | Return the browser-console lines that submit a bridge command and read its result, plus a Python snippet that only prints those lines (nothing connects to the browser) |
 | `export_for_preview` | Pre-flight check: where the runtime runs (*Use worker*), bridge injection unless `injectBridge: false`, and the next steps |
 | `clone_project` | Deep-copy the project with optional bridge injection |
-| `pack_project` | Pack the project folder into a `.c3p` file that Construct 3 can open (injects the bridge into the project first unless `injectBridge: false`) |
+| `pack_project` | Pack the project folder into a `.c3p` file that Construct 3 can open (injects the bridge into the project first unless `injectBridge: false`, and says so with a warning) |
 
 The runtime tools test a running game from the AI tool: inject the bridge, preview the game in a browser started with `--remote-debugging-port` or export it and `serve_preview` the folder, then `connect_to_game` and drive it with `call_bridge`, `wait_for_condition`, `simulate_input` and the event tools. The connection tools need Node.js 22 or later. A game with *Use worker* on works too: the bridge is reached in the runtime's worker. See the [User Guide](docs/USER-GUIDE.md#testing-a-running-game-with-the-runtime-bridge).
 
@@ -244,7 +244,7 @@ stop_preview    {}
 
 The bridge can also be used from the browser console: `globalThis.__c3bridge.submit("getGlobalVar", { name: "Score" })` returns an id, and `getResult(id)` returns `{ ok: true, value }` once, after the next tick (`null` while pending).
 
-Remove the bridge before exporting the game for players: while it runs, anyone with the browser console can change variables and call functions. `remove_runtime_bridge` deletes the script file, its entry in `project.c3proj` and the marked import line `inject_runtime_bridge` added to your main script. See the [User Guide](docs/USER-GUIDE.md#remove-the-bridge-before-you-export).
+Remove the bridge before exporting the game for players: while it runs, anyone with the browser console can change variables and call functions. `remove_runtime_bridge` deletes the script file, its entry in `project.c3proj` and the import line in your main script, the marked one `inject_runtime_bridge` added as well as one you typed by hand for v1.9.2. See the [User Guide](docs/USER-GUIDE.md#remove-the-bridge-before-you-export).
 
 ### Prompts (Workflow Templates)
 
@@ -272,11 +272,12 @@ Mutation tools follow a strict safety protocol (exceptions below):
 Steps 2, 4 and 5 apply in full to writes that go through the project writer: objects, families, event sheets, layouts, animations, project metadata and addon auto-registration. The other write paths do less:
 - `register_addon` and `unregister_addon` replace `project.c3proj` through a temp file, with no `.bak` backup and no read-back check.
 - The timeline tools back up the timeline file and `project.c3proj` and write through a temp file, but do not read the result back.
-- The runtime tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) write `project.c3proj`, the bridge script and the one import line in the main script in place, with no backup or read-back check.
+- The runtime tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) write `project.c3proj` (only when the registration changes), the bridge script and the one import line in the main script in place, with no backup or read-back check. `remove_runtime_bridge` also takes out bridge import lines typed by hand, and refuses before writing anything while a script uses the bridge in a way it cannot take out.
 
 The runtime connection tools write nothing to the project and keep to this machine:
-- `serve_preview` listens on 127.0.0.1 only, answers only requests addressed to 127.0.0.1, localhost or [::1] (DNS rebinding), and serves only files whose real path lies in the exported folder. The interface, the browser (`CHROME_PATH` or the usual install locations) and its debugging port are not tool parameters. The browser gets a fresh profile and picks its own debugging port, and stopping ends only that browser and removes its profile.
-- `connect_to_game` reaches browsers on this machine only, unless the server runs with `C3MCP_ALLOW_REMOTE_CDP=1`; `wait_for_condition` evaluates JavaScript in the page only with `C3MCP_ALLOW_EVAL=1`. Both are settings of whoever starts the server, not tool parameters, so a prompt that steers the tool calls cannot lift them. Everything else goes through the bridge's fixed commands, which still run game functions and set variables in the connected game.
+- `serve_preview` listens on 127.0.0.1 only, refuses a port another program answers on, answers only requests addressed to 127.0.0.1, localhost or [::1] (DNS rebinding), and serves only files whose real path lies in the exported folder. The interface, the browser (`CHROME_PATH` or the usual install locations) and its debugging port are not tool parameters. The browser gets a fresh profile and picks its own debugging port, and stopping ends only that browser and removes its profile.
+- `connect_to_game` reaches browsers on this machine only, including the page endpoints their debugging port lists, unless the server runs with `C3MCP_ALLOW_REMOTE_CDP=1`; `wait_for_condition` evaluates JavaScript in the page only with `C3MCP_ALLOW_EVAL=1`. Both are settings of whoever starts the server, not tool parameters, so a prompt that steers the tool calls cannot lift them. When several tabs have a ready bridge, `connect_to_game` refuses instead of picking one, so another site that defines a bridge of its own cannot take the connection (and with it the typed input). Everything else goes through the bridge's fixed commands, which still run game functions and set variables in the connected game.
+- `screenshot_game` writes one image file you name: an absolute path outside the project folder, with the extension of its format, and an existing file only with `overwrite: true`.
 - PNG images are written without a backup, except that the frame tools keep a file they would replace or remove as `.bak` (see *Frame images move with their frames* below).
 
 **Close and reopen the project in Construct 3 before saving there.** The editor keeps an open project in memory, so saving from a session that was opened before these edits can overwrite them. Its Project Bar reload (F9) re-reads script files only, not event sheets, layouts or `project.c3proj`. Every response that reports a completed write carries this reminder as `editorNote`. Error responses do not, even when a multi-step tool (e.g. `create_object`) failed after an earlier step had already written.
