@@ -311,11 +311,12 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
 
   server.tool(
     'rename_animation',
-    'Rename an animation on a Sprite object, together with its frame image files and the "initial-animation" of layout instances that start with it. Layouts that could not be parsed (over the 10MB read limit, not valid JSON) are not updated: a warning names those whose text names the object and the animation, or that cannot be read at all (listed in unscannedFiles)',
+    'Rename an animation on a Sprite object, together with its frame image files and the "initial-animation" of layout instances that start with it. Layouts that could not be parsed (over the 10MB read limit, not valid JSON) cannot be updated: one whose text names the object and the animation (possibly instances that start with it), or that cannot be read at all, refuses the rename without force (update_blocked); with force the rename goes ahead and a warning names them. Event sheets that could not be parsed and possibly name the animation only get a warning. Such files are listed in unscannedFiles',
     {
       objectName: z.string().max(200).describe('Sprite object name'),
       animationName: z.string().min(1).max(200).describe('Current animation name'),
       newName: z.string().min(1).max(200).describe('New animation name'),
+      force: z.boolean().optional().default(false).describe('If true, rename even when layouts that could not be parsed possibly have instances that start with the animation (they are NOT updated)'),
     },
     oneAtATime(async (args) => {
       try {
@@ -418,6 +419,18 @@ export function registerAnimationTools({ server, reader, writer, idGen }: Mutati
         const sheetSearch = await checkUnscannedFiles(reader, skippedSheets, [
           { categories: ['eventSheets'], allOf: [objectClasses.map(n => nameTerm(n)), [nameTerm(oldName)]] },
         ]);
+        // Instances there that start with the animation would be left naming one that no longer exists
+        if (!args.force && layoutSearch.some(r => r.textSearch === 'possible-use' || r.textSearch === 'unreadable')) {
+          return toolResult({
+            success: false,
+            entity: args.objectName,
+            category: 'object',
+            action: 'update_blocked',
+            message: `${renameLayoutRefusal(layoutSearch, args.objectName, oldName)} Nothing was changed. ` +
+              'Use force=true to rename anyway (instances in these layouts will NOT be updated).',
+            ...unscannedFields([...layoutSearch, ...sheetSearch]),
+          });
+        }
 
         anim.name = args.newName;
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.objectName);
@@ -1063,12 +1076,31 @@ async function rollBackAnimationRename(
 }
 
 /**
+ * Why rename_animation refuses without force: layouts it could not parse
+ * whose text names the object and the old animation name (possibly instances
+ * that start with it, which it cannot update), or that it could not search.
+ */
+function renameLayoutRefusal(layouts: UnscannedFileReport[], objectName: string, oldName: string): string {
+  const possible = layouts.filter(r => r.textSearch === 'possible-use');
+  const unreadable = layouts.filter(r => r.textSearch === 'unreadable');
+  const sentences: string[] = [];
+  if (possible.length > 0) {
+    sentences.push(`Layouts that could not be parsed possibly have instances of "${objectName}" that start with "${oldName}", ` +
+      `which the rename cannot update: ${possible.map(describeUnscannedFile).join(', ')}, whose text names "${objectName}" and ` +
+      `"${oldName}" (a text search cannot tell an instance from the same names in other strings).`);
+  }
+  if (unreadable.length > 0) {
+    sentences.push(`Layouts that could not be parsed could not be searched for such instances either: ${unreadable.map(describeUnscannedFile).join(', ')}.`);
+  }
+  return sentences.join(' ');
+}
+
+/**
  * The warnings of rename_animation for layouts and event sheets it could not
  * parse (searched as text for the object and the old animation name): layout
- * instances there that may still start with the old name were not updated,
- * and parameters there were not counted. It does not refuse: it has no force
- * parameter, and these are the same kind of leftovers its other warnings
- * report.
+ * instances there that may still start with the old name were not updated
+ * (it only gets here for those with force), and parameters there were not
+ * counted (like the parameters it counts, only a warning).
  */
 function renameUnscannedWarnings(
   layouts: UnscannedFileReport[], sheets: UnscannedFileReport[], objectName: string, oldName: string,
@@ -1076,10 +1108,10 @@ function renameUnscannedWarnings(
   const warnings: string[] = [];
   for (const r of layouts) {
     if (r.textSearch === 'possible-use') {
-      warnings.push(`${describeUnscannedFile(r)} could not be parsed, and its text names "${objectName}" and "${oldName}": instances of `
+      warnings.push(`Renamed with force=true: ${describeUnscannedFile(r)} could not be parsed, and its text names "${objectName}" and "${oldName}": instances of `
         + `"${objectName}" there possibly still start with "${oldName}" and were NOT updated. Check them in the Construct 3 editor.`);
     } else if (r.textSearch === 'unreadable') {
-      warnings.push(`${describeUnscannedFile(r)}: instances of "${objectName}" there that start with "${oldName}" could not be `
+      warnings.push(`Renamed with force=true: ${describeUnscannedFile(r)}: instances of "${objectName}" there that start with "${oldName}" could not be `
         + 'checked and were NOT updated.');
     }
   }

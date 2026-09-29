@@ -633,27 +633,47 @@ describe('instance variable, behavior and member removal with event sheets that 
 // ─── rename_animation ───────────────────────────────────────
 
 describe('rename_animation with layouts that could not be parsed', () => {
-  it('warns that instances in a layout over the read cap may still start with the old name', async () => {
+  async function enemyAnimationNames(): Promise<string[]> {
+    const enemy = JSON.parse(await readFile(join(tmpDir, 'objectTypes', 'Enemy.json'), 'utf-8'));
+    return enemy.animations.items.map((a: { name: string }) => a.name);
+  }
+
+  it('refuses without force when a layout over the read cap names the object and the animation, renames with force', async () => {
     await addEnemy();
     await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Walk' })]);
     await startServer();
 
     const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
-    expect(result.success).toBe(true);
-    expect(result.warnings.join(' ')).toMatch(/layouts\/Big \(over the 10MB read limit\).*"Walk".*NOT updated/);
+    expect(result.success).toBe(false);
+    expect(result.action).toBe('update_blocked');
+    expect(result.message).toMatch(/possibly have instances of "Enemy" that start with "Walk".*layouts\/Big \(over the 10MB read limit\)/);
+    expect(result.unscannedFiles).toEqual([
+      { file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use', names: ['Enemy', 'Walk'] },
+    ]);
+    expect(await enemyAnimationNames()).toEqual(['Walk', 'Idle']);
+
+    const forced = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run', force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toMatch(/force=true: layouts\/Big \(over the 10MB read limit\).*"Walk".*NOT updated/);
+    expect(await enemyAnimationNames()).toEqual(['Run', 'Idle']);
   });
 
-  it('warns about a layout it cannot read, even as text', async () => {
+  it('refuses when a layout cannot be read, even as text', async () => {
     await addEnemy();
     await addUnreadable('layouts', 'Bad');
     await startServer();
 
     const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
-    expect(result.success).toBe(true);
-    expect(result.warnings.join(' ')).toMatch(/layouts\/Bad \(could not be read, not even as text\)/);
+    expect(result.action).toBe('update_blocked');
+    expect(result.message).toContain('layouts/Bad (could not be read, not even as text)');
+    expect(await enemyAnimationNames()).toEqual(['Walk', 'Idle']);
+
+    const forced = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run', force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toMatch(/layouts\/Bad \(could not be read, not even as text\)/);
   });
 
-  it('only notes that a layout that does not name the animation was searched as text', async () => {
+  it('renames when the layout does not name the animation, and only notes that it was searched as text', async () => {
     await addEnemy();
     await addBigLayout('Big', [instance('Enemy', { 'initial-animation': 'Idle' })]);
     await startServer();
@@ -661,8 +681,18 @@ describe('rename_animation with layouts that could not be parsed', () => {
     const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
     expect(result.success).toBe(true);
     const warnings = result.warnings.join(' ');
-    expect(warnings).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text');
+    expect(warnings).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text (for: Enemy, Walk)');
     expect(warnings).not.toContain('NOT updated');
+  });
+
+  it('only warns about an event sheet that could not be parsed and names the animation', async () => {
+    await addEnemy();
+    await addBrokenSheet('Broken', [block(760000000000010, [{ id: 'set-animation', objectClass: 'Enemy', sid: 760000000000014, parameters: { animation: '"Walk"' } }])]);
+    await startServer();
+
+    const result = await call('rename_animation', { objectName: 'Enemy', animationName: 'Walk', newName: 'Run' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toContain('possibly name "Walk" too (not counted above): eventSheets/Broken (not valid JSON)');
   });
 });
 
