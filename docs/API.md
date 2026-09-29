@@ -1351,6 +1351,8 @@ Diagnose a game that gets stuck or a feature that silently does nothing. Optiona
 
 The text is a plain message (some start with `Error ...`, e.g. `Error creating object: ...`). Arguments that do not match a tool's input schema are refused the same way, with a text that starts `MCP error -32602: Input validation error: Invalid arguments for tool <name>: [...]`.
 
+A write that would replace a change made on disk outside the tool call is an error: when an event sheet, layout, object type or family file changed after the call read it (saved in the Construct 3 editor, restored with git, or written by a tool call running in parallel on the same file), or `project.c3proj` changed since the server last loaded it, the text says `<file> was changed on disk after this server read it (...). It was not written, so that change is kept. Run the tool again: it reads the file as it is now.` A tool call whose `project.c3proj` changed on disk and is not valid JSON at the moment (still being written) fails with `project.c3proj changed on disk and could not be read again (...)`. Changes made on disk between tool calls need no reconnect: each call checks `project.c3proj`, and the files the server's caches hold when the call first uses them, and reads again what changed.
+
 Refusals by the reference checks are **not** errors: `delete_object`, `update_object_properties` and similar tools return a normal response with `"success": false`, `"action": "delete_blocked"` or `"update_blocked"`, a `message` and the `references` found, and `unscannedFiles` when files that could not be parsed possibly hold uses. Nothing is written in either case.
 
 ### WriteResult

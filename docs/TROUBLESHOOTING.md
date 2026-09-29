@@ -85,11 +85,23 @@ Known gap: tools that edit the large file itself, such as `add_instance_to_layou
 **Solutions**:
 - Check that file in the Construct 3 editor, or split a very large layout
 
-### Stale data after editing in C3 editor
+### Changes made in the C3 editor or with git
 
-**Cause**: The reader loads `project.c3proj` at startup and keeps it, so the lists of objects, event sheets and layouts (e.g. `list_objects`) stay as they were. Single entity files (an event sheet, an object type) are read from disk again, so the data can be a mix of old and new. The server reloads `project.c3proj` itself only after its own writes.
+Since the release after 1.9.2 the server picks up changes made outside it by itself: each tool call checks `project.c3proj`, and the files its caches hold, against the disk (modification time, size, file id) and reads again what changed. Reconnecting is no longer needed after a save in the editor or `git restore`. Older versions kept the project list from their start and needed a reconnect (Claude Code: `/mcp` > `construct3` > **Reconnect**).
 
-**Solution**: Restart or reconnect the MCP server to pick up changes made in the C3 editor (Claude Code: `/mcp` > `construct3` > **Reconnect**). External changes aren't detected automatically.
+A change that keeps a file's size, modification time and file id (possible on file systems with coarse timestamps, such as FAT32 or some network drives) is not seen; reconnect the server in that case.
+
+### "... was changed on disk after this server read it"
+
+**Cause**: The file (an event sheet, layout, object type, family or `project.c3proj`) changed on disk while the tool call was working with it: saved in the Construct 3 editor, restored with git, written by another program, or by another tool call running at the same time on the same file. The write was refused so that change is not lost; the file was left as it is on disk.
+
+**Solution**: Run the tool again; it reads the file as it is now. If the editor saved the file, check that its version is the one you want to keep. A tool that wrote other files before the refusal (for example `create_object` registering a plugin first) leaves those writes in place; `validate_project` shows the state of the project.
+
+### "project.c3proj changed on disk and could not be read again"
+
+**Cause**: `project.c3proj` changed and is not valid JSON at the moment, typically while the editor or git is still writing it.
+
+**Solution**: Run the tool again once the save or checkout is done. The server keeps trying on every call and does not use the old project meanwhile.
 
 ## Mutation Tool Issues
 

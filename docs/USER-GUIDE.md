@@ -365,7 +365,7 @@ Your client should show `construct3` with 71 tools (plus 5 resources, 4 resource
 
 The AI calls `get_project_summary` and answers with your project's name, layouts, object and event sheet counts. If the client shows the server as failed or "Connection closed", see [Troubleshooting](#troubleshooting-and-faq).
 
-After you save the project in Construct 3, reconnect the server (Claude Code: `/mcp` > `construct3` > **Reconnect**; other clients: restart the server or the app). The server reads the project list once at start, so lists like `list_objects` otherwise show the state from when the server started.
+After you save the project in Construct 3 you can go on right away: each tool call checks the project files on disk and reads again what changed, so there is no need to reconnect the server. (Up to version 1.9.2 the server read the project list once at start and had to be reconnected.)
 
 ## First session
 
@@ -552,7 +552,7 @@ Work in this order:
    ```
 
    If git answers `Author identity unknown` and `Please tell me who you are`, run the two `git config` commands it prints, with your name and e-mail, and commit again.
-3. **Reconnect the server** if you changed the project in the editor or with git since the server started (Claude Code: `/mcp` > `construct3` > **Reconnect**).
+3. **Changed the project in the editor or with git?** The server picks that up by itself (versions up to 1.9.2 had to be reconnected: Claude Code `/mcp` > `construct3` > **Reconnect**). A tool that would write over a file changed on disk while it worked refuses and names the file; run it again.
 4. **Ask for the changes.** Read what each write tool is about to do before you approve it, and read the answers: `"success": false` means nothing was changed.
 5. **Run `validate_project`.** `errors` are problems that can stop the editor from opening the project. `warnings` mean "check this": a project can be `"valid": true` and still have warnings such as `missing-behavior-or-variable`. `"valid": true` also requires `"complete": true`: every registered object type, family, event sheet and layout file was checked. If one exists but could not be checked (over the 10 MB read limit, invalid JSON, unreadable), `complete` is `false`, `unscannedFiles` names it and `valid` is `false`. A file over the 10 MB read limit is only an `unscanned-file` warning, so `summary.errors` can be 0; invalid JSON or an unreadable file is also a `file-existence` error. Nothing inside such a file was checked (see [Limits](#limits)). Info entries are hints: `backup-file` lists a `.bak` copy, `orphaned-object` an object that nothing uses yet (every newly created object, until an event uses it).
 6. **Review the diff** with `git diff` and `git status`. A typical session changes `project.c3proj`, event sheet and layout JSON files, and adds `objectTypes/<Name>.json` and images for new sprites. For files saved by Construct 3, line endings and tab indentation are kept, so the diff shows only the lines that changed. The test project in this repository was written by hand, so its first change also spreads a few one-line number arrays (such as `"backgroundColor": [0, 0, 0, 0]`) over several lines; projects saved by Construct 3 already store them that way. After its first new sprite, `validate_project` also warns `frame-image` for its `Sprite`, whose image file the test project lacks.
@@ -567,7 +567,7 @@ If you forgot to close the project: close it in Construct 3 **without saving**, 
 
 Before the server rewrites or deletes a JSON file or `project.c3proj`, it copies it to `<file>.bak` next to it, for example `eventSheets/MainSheet.json.bak` or `project.c3proj.bak`.
 
-- There is only **one** such `.bak` per file. The next write to the same file overwrites it, so it holds the state before the **last write** to that file, not the state before your session. One request can write the same file twice: after "Add keyboard input", `project.c3proj.bak` already contains the new `Keyboard` addon entry.
+- There is only **one** such `.bak` per file. The next tool call that writes the same file overwrites it, so it holds the state before the **last tool call** that wrote the file, not the state before your session. A tool call that writes a file twice (after "Add keyboard input", `create_object` registers the `Keyboard` addon and then the object in `project.c3proj`) backs it up once, before its first write. One request to the AI can still run several tool calls.
 - Sprite frame images work differently. The editor names a frame's image after the frame's index, so `add_frame_to_animation` with an `index` and `delete_frame_from_animation` rename the images of the later frames one index up or down, and every frame keeps its image. The image of a deleted frame, and an image file that no frame uses but sits where a moved image or the new placeholder has to go, are renamed to `<file>.bak` in `images/`, for example `images/player-animation 1-001.png.bak`. If that name is taken, the next one is `<file>.1.bak`, then `<file>.2.bak`, so older copies are kept. The tool's `warnings` name these files (the first three, then how many more).
 - Nothing deletes them. They are not listed in `project.c3proj`, and `pack_project` leaves them out of the `.c3p`. `validate_project` lists them as `backup-file` info, including those in `images/`. Whether the Construct 3 editor shows or keeps them was not tested for this guide.
 - Some writes make no `.bak` at all: `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they add the bridge) and the other image writes. `replace_sprite_image` writes the new PNG over the frame's image, and `create_object` and `add_animation_to_sprite` write their placeholder PNGs over an image file of the same name, for example one left behind by a deleted object or animation.
@@ -594,7 +594,7 @@ git clean -fd      # delete them
 
 `git restore .` alone leaves new files such as `objectTypes/Player.json` in place; `git status` shows them as untracked (`??`), and `git clean` removes them. Files in `.gitignore` (like `*.bak`) are not touched by `git clean -fd`. The `.bak` files now hold states from the session you undid, some of them for objects that no longer exist, and `validate_project` keeps listing them. Delete them (see [.bak files](#bak-files)).
 
-Then **reconnect the server** (Claude Code: `/mcp` > `construct3` > **Reconnect**) before you ask for more changes. The server keeps the lists it read at start, so it still sees the undone objects. In our test, asking for the same object again then failed with `Object "Player" already exists. Use update_object_properties to modify it.`, and placing it with `Object type "Player" does not exist.` The project files stayed unchanged (`git status` showed nothing); after a reconnect, creating the object worked again.
+You can go on right away: the next tool call sees the restored files and no longer lists the undone objects, and creating one of them again works. (Up to version 1.9.2 the server kept the lists it read at start and had to be reconnected first; asking for the same object again failed with `Object "Player" already exists. Use update_object_properties to modify it.`)
 
 ### If Construct 3 refuses to open the project
 
@@ -723,10 +723,10 @@ Single backslashes or a trailing comma in a hand-written `.mcp.json`. See [Writi
 The editor still had the old project open and saved its older state over some or all of the changes. Use git to get them back if you committed, and follow [the safe editing workflow](#the-safe-editing-workflow) next time.
 
 **The AI doesn't see a change I made in Construct 3 or with git.**
-Reconnect the server (Claude Code: `/mcp` > `construct3` > **Reconnect**). The lists of objects, sheets and layouts are read once at start.
+Update the server: since the release after 1.9.2 each tool call checks the project files and reads again what changed. With version 1.9.2 or older, reconnect the server (Claude Code: `/mcp` > `construct3` > **Reconnect**); those read the lists of objects, sheets and layouts once at start.
 
 **`Object "Player" already exists` right after I undid the session with git.**
-The server still has the lists from before the undo. Reconnect it, see [Undoing a session](#undoing-a-session).
+Version 1.9.2 and older keep the lists from before the undo: reconnect the server, or update it. See [Undoing a session](#undoing-a-session).
 
 **`validate_project` says valid, but the event is wrong or Construct 3 complains.**
 `valid: true` is not a guarantee. Action and condition ids, parameter keys and most expression syntax are not checked. Open the project and look at the new events. Read the `warnings` too.
@@ -741,7 +741,7 @@ See [Install](#install). Most come from test tools and from HTTP parts of the MC
 Only links. Paste the relevant text into the chat, or rely on `construct3://docs/pitfalls`.
 
 **How do I use a third-party addon?**
-Install it and add one object that uses the addon in the Construct 3 editor, save, close, and reconnect the server. Don't let the AI use `register_addon` for it: that only adds the name to the project's addon list and installs nothing. Global objects (Mouse, Keyboard, Audio, AJAX and similar) exist once per project and are never placed on a layout.
+Install it and add one object that uses the addon in the Construct 3 editor, save and close. The server sees the new addon on its next tool call (version 1.9.2 and older: reconnect it first). Don't let the AI use `register_addon` for it: that only adds the name to the project's addon list and installs nothing. Global objects (Mouse, Keyboard, Audio, AJAX and similar) exist once per project and are never placed on a layout.
 
 ## Limits
 

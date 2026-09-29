@@ -249,11 +249,13 @@ Remove the bridge before exporting the game for players: while it runs, anyone w
 Mutation tools follow a strict safety protocol (exceptions below):
 
 1. **Validation** — Names checked for reserved words, path traversal, format. Plugin/behavior IDs validated against `usedAddons`.
-2. **Backup** — JSON files are backed up to `<filename>.bak` before modification.
-3. **ID Generation** — SIDs (15-digit random), UIDs (sequential), and imageSpriteIds (7-digit) are collision-checked against the entire project. Layouts and object types over the 10MB read limit or with invalid JSON are scanned as text for their UIDs and SIDs; when a registered layout or object type exists but cannot be read at all, a new UID is refused instead of guessed.
+2. **Backup** — JSON files are backed up to `<filename>.bak` before modification, once per tool call: a call that writes a file twice (`create_object` registering a new plugin and then the object in `project.c3proj`) keeps the state from before the call.
+3. **ID Generation** — SIDs (15-digit random), UIDs (sequential), and imageSpriteIds (7-digit) are collision-checked against the entire project. Layouts and object types over the 10MB read limit or with invalid JSON are scanned as text for their UIDs and SIDs; when a registered layout or object type exists but cannot be read at all, a new UID is refused instead of guessed. The project is scanned on first use and again after a change on disk the server did not make; the server's own writes add their IDs without a new scan, and an ID once handed out is never handed out again.
 4. **Write** — JSON is pre-validated (round-trip test, size limit), then written to a temp file and renamed into place. Files keep their text style (see below).
 5. **Verify** — Files are read back, compared with what was written, and re-parsed to confirm integrity.
 6. **Cache Invalidation** — All reader caches and indexes are cleared so subsequent reads see fresh data.
+
+**Changes made outside the server are picked up.** Every tool call, resource read and prompt starts from the project as it is on disk: the server checks `project.c3proj`, and the files its caches hold the first time the call uses them, by modification time, size and file id, and reads again what changed, for example after `git restore` or a save in the Construct 3 editor. There is no need to reconnect. A write never replaces a change it did not read: when a file changed on disk after the tool call read it (or, for `project.c3proj`, since the server last loaded it), the write is refused with a message that names the file, and the file keeps that change; run the tool again. Of two parallel tool calls that change the same file, the second one is refused the same way. Changes that keep a file's size, modification time and file id (possible on file systems with coarse timestamps) are not seen.
 
 Steps 2, 4 and 5 apply in full to writes that go through the project writer: objects, families, event sheets, layouts, animations, project metadata and addon auto-registration. The other write paths do less:
 - `register_addon` and `unregister_addon` replace `project.c3proj` through a temp file, with no `.bak` backup and no read-back check.
@@ -265,7 +267,7 @@ Steps 2, 4 and 5 apply in full to writes that go through the project writer: obj
 
 Additional safeguards:
 - **Reference checking** — `delete_object`, `delete_family`, `delete_event_sheet`, and `delete_layout` scan for references before deleting; `delete_event_from_sheet` checks for calls and uses of the functions and event variables it removes; `update_object_properties` and `update_family` check the events before removing an instance variable, a behavior or a family member. Registered files these checks cannot parse (over the 10MB read limit, not valid JSON) are searched as text for the names they look for: a match is a *possible* use (the name may be in another string), and it refuses without `force` just like a use, as does such a file that cannot be read at all. The response lists these files in `unscannedFiles`; without a match the tool goes ahead and warns that the file was only searched as text. `delete_object` and `delete_family` also refuse when the object type's or family's own file could not be parsed, and `rename_animation` refuses when such a layout possibly has instances that start with the animation.
-- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error unless `register_addon` added them to `usedAddons` first (it does not check the ID or install anything).
+- **Addon auto-registration** — When creating objects with new plugins or adding behaviors, known Scirra addons are automatically registered in `usedAddons`. Unknown/third-party addons are blocked with an error unless `register_addon` added them to `usedAddons` first (it does not check the ID or install anything). `update_object_properties` checks all behaviors it adds before it registers the first, so an unknown one leaves `usedAddons` unchanged.
 - **Global plugin protection** — Singleglobal-inst objects (Audio, AJAX, etc.) cannot be placed on layouts.
 - **Plugin-specific defaults** — Instances are created with correct default properties for each plugin type (Sprite, Text, TiledBg, NinePatch).
 - **Image generation** — Sprite and TiledBg creation automatically generates valid placeholder PNGs, named like the editor names them: `images/<object>-<animation>-000.png`, all lowercase. Batch writes roll back on failure.
@@ -465,6 +467,7 @@ construct3-mcp/
 │   │   ├── project-reader.ts       # Project file parser and cache
 │   │   ├── project-writer.ts       # Safe write operations with backup
 │   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
+│   │   ├── disk-state.ts           # File states on disk, tool call scope, stale-write error
 │   │   ├── templates.ts            # Object, event sheet, layout templates
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
@@ -509,6 +512,7 @@ construct3-mcp/
 │   │   ├── analysis.ts             # 11 analysis tools
 │   │   ├── mutations.ts            # Registers the domain tool modules below
 │   │   ├── shared.ts               # Shared validation, result/error helpers, editor reload note
+│   │   ├── project-sync.ts         # Each handler: tool call scope + check of the project on disk
 │   │   ├── object-tools.ts         # Object and family tools (6)
 │   │   ├── event-tools.ts          # Event sheet tools (12)
 │   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators

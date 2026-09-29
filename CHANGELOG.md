@@ -2,6 +2,25 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Changes made on disk while the server runs are picked up without a reconnect. Each tool call, resource read and prompt checks `project.c3proj`, and the files the server's caches hold the first time the call uses them, by modification time, size and file id; after a save in the Construct 3 editor, `git restore` or another program, the project list, the bulk caches, the cross-reference index and the ID generator are rebuilt from the files. The check costs one file status per call, plus one per cached file when the call uses cached data (measured 7 to 25 ms for 355 files) (#51).
+
+### Changed
+
+- A write refuses to replace or delete an event sheet, layout, object type or family file that changed on disk after the tool call read it, and the writer and the timeline, addon and runtime-bridge tools refuse to update a `project.c3proj` that changed since the server loaded it. The error names the file (`... was changed on disk after this server read it ... It was not written, so that change is kept. Run the tool again ...`). Of two parallel tool calls that change the same file, the second is refused the same way; before, it silently overwrote the first one's change (#51).
+- A tool call backs each file up once, before its first write: `project.c3proj.bak` holds the state from before the call, also when the call writes `project.c3proj` twice (#51).
+- The ID generator keeps its scan of the project across the server's own writes and adds the IDs of each file it writes; it scans again only after a change on disk the server did not make, and never hands out an ID twice, also after a rescan. On a project with about 45,000 SIDs, `add_event_block` took about 40 ms per call instead of 350 ms, most of which was the rescan (#38).
+
+### Fixed
+
+- `create_object` with a plugin it had to register first (e.g. `Keyboard`) and `update_object_properties` adding more than one behavior it had to register left an intermediate state in `project.c3proj.bak` (with the new addon, without the object), not the project from before the call (#51).
+- `update_object_properties` with a known and an unknown behavior registered the known one in `usedAddons` before it refused the unknown one; it now checks all of them first and changes nothing (#51).
+- After the project was reset on disk (`git restore . && git clean -fd`) or saved in the editor, the running server still listed removed objects, refused to create them again (`Object "Hero" already exists`) and `validate_project` reported their files as missing, until the server was reconnected (#51).
+- A layout or event sheet saved in the editor while the server ran was not seen by the tools that use the cross-reference index (e.g. `find_orphaned_objects`) until a write of the server's own (#51).
+
 ## [1.9.2] - 2026-09-29
 
 ### Highlights

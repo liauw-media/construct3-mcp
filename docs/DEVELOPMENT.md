@@ -209,13 +209,16 @@ Key things to know when working with Construct 3 project files:
 
 ## Cache Invalidation
 
-After any write operation, three caches must be cleared:
+After any write operation the cached state must follow the new content:
 
 1. **Reader caches** — `reader.invalidateCaches()` clears entity caches
 2. **Project index** — `resetProjectIndex(reader)` clears the cross-reference index of that reader's project
-3. **ID generator** — `idGen.reset()` forces re-scan of existing IDs
+3. **ID generator** — `idGen.noteWrittenText(text)` adds the IDs in the written file; the generator keeps its scan (`idGen.reset()` would force a full rescan)
+4. **File state** — `reader.noteOwnWrite(path, state)` records the file's new state, so the next tool call does not take the write for a change made outside the server
 
-The `ProjectWriter.invalidateAll()` method handles all three. The `addToProject()` and `removeFromProject()` methods also call `reader.reloadProject()` which re-reads the c3proj file.
+The writer's `afterOwnWrite()` handles all four for its entity writes. The `addToProject()` and `removeFromProject()` methods also call `reader.reloadProject()` which re-reads the c3proj file and records its state.
+
+**Changes made outside the server (#51).** Register tools, resources and prompts through `withProjectSync(server, reader)` (`tools/project-sync.ts`; every `register*` function does): each handler then runs as a tool call scope and first checks `project.c3proj` on disk (`reader.checkProjectFile()`). The files the caches hold are checked the first time the call uses a bulk read, the index or the ID generator (`reader.ensureCachesFresh()`); a change drops the cached state and moves `reader.getDiskEpoch()`, on which the index and the ID generator rebuild. Inside the scope the writer backs each file up once per call and refuses (`StaleFileError`) to write a file whose state on disk differs from the state the call read it in. Outside a tool call scope (scripts, direct reader use) the caches are not checked by themselves: call `reader.syncWithDisk()` after changing files outside the reader. The writer's check still applies there, against the state the reader last read or wrote the file in. A tool that updates `project.c3proj` without the writer calls `writer.assertProjectFileCurrent()` before it reads the file.
 
 `getProjectIndex(reader)` caches one index per reader, so a script, test or embedding can open several projects in one process: give each project its own reader, writer and `IdGenerator` (a generator scans the project of the reader it is first called with), and open each project with one reader only: a second reader on the same project sees the other's writes neither in its caches nor in its index. A write through the writer or the event tools resets only its own project's index; `resetProjectIndex()` without a reader resets every project's index, which tests use between cases. The MCP server opens one project per process.
 
