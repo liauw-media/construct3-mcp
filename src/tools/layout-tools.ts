@@ -10,6 +10,15 @@ import { validateName, toolResult, toolError, notFoundError, boundedRecord, case
 import { findNameClash } from '../construct3/names.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
 import {
+  blocksWithoutForce,
+  checkUnscannedFiles,
+  describeUnscannedFile,
+  unscannedFields,
+  unscannedWarnings,
+  type UnscannedFileReport,
+} from '../construct3/analyzers/unscanned-uses.js';
+import { patternTerm } from '../construct3/raw-text-search.js';
+import {
   DEFAULT_INSTANCE_PROPERTIES,
   createLayout,
   createInstance,
@@ -30,6 +39,24 @@ import {
   layerPathLabel,
   type LayerEntry,
 } from '../construct3/layers.js';
+
+/**
+ * What delete_layout looks for in the text of a layout file it could not
+ * parse: instances (every layout instance has a "uid") and an event sheet
+ * binding (a non-empty "eventSheet").
+ */
+const LAYOUT_CONTENT_TERMS = [
+  patternTerm('instances', String.raw`"uid"\s{0,64}:\s{0,64}\d`, 140),
+  patternTerm('an event sheet binding', String.raw`"eventSheet"\s{0,64}:\s{0,64}"(?!")`, 150),
+];
+
+/** Why delete_layout refuses a layout file it could not parse (the report of its text search). */
+function layoutContentRefusal(reports: UnscannedFileReport[]): string {
+  return reports.filter(r => r.textSearch !== 'no-match').map(r => r.textSearch === 'unreadable'
+    ? `The layout file could not be parsed or searched: ${describeUnscannedFile(r)}, so its instances and event sheet binding were not checked.`
+    : `The layout file could not be parsed: ${describeUnscannedFile(r)}. A text search of it found ${(r.names ?? []).join(' and ')} ` +
+      '(possibly: the search cannot tell them from the same text in another string).').join(' ');
+}
 
 /** Every layer of a layout for messages, sub-layers as paths: "Background, Main, Main > HUD". */
 function layerList(layout: Layout): string {
@@ -328,7 +355,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_layout',
-    'Delete a layout from the project (checks references first)',
+    'Delete a layout from the project (checks references first: instances placed on it and its event sheet binding; refused without force while there are any). A layout file that could not be parsed (over the 10MB read limit, not valid JSON) is searched as text for instances and a binding: a match, or a file that cannot be read at all, refuses without force (listed in unscannedFiles).',
     {
       name: z.string().max(200).describe('Layout name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -369,19 +396,34 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           warnings.push(`Objects placed on this layout: ${placedObjects.join(', ')}. Instances were removed with the layout file.`);
         }
 
-        if (!args.force && (placedObjects.length > 0 || boundSheet)) {
+        // The layout's own file could not be parsed (over the read limit, not valid
+        // JSON): its instances and binding are not in the index, so search its text
+        const unscanned = await checkUnscannedFiles(
+          reader,
+          index.unscannedFiles.filter(f => f.category === 'layouts' && f.name === args.name),
+          [{ categories: ['layouts'], allOf: [LAYOUT_CONTENT_TERMS] }],
+        );
+        const unscannedBlock = blocksWithoutForce(unscanned);
+
+        if (!args.force && (placedObjects.length > 0 || boundSheet || unscannedBlock)) {
           return toolResult({
             success: false,
             entity: args.name,
             category: 'layout',
             action: 'delete_blocked',
-            message: 'Layout has associated data. Use force=true to delete anyway.',
+            message: `Layout has associated data.${unscannedBlock ? ` ${layoutContentRefusal(unscanned)}` : ''} ` +
+              'Use force=true to delete anyway.',
             references: {
               boundEventSheet: boundSheet || null,
               placedObjects,
             },
+            ...unscannedFields(unscanned),
           });
         }
+        if (unscannedBlock) {
+          warnings.push(`Deleted with force=true: ${layoutContentRefusal(unscanned)}`);
+        }
+        warnings.push(...unscannedWarnings(unscanned.filter(r => r.textSearch === 'no-match'), 'Deleted'));
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.name);
         const backupPath = await writer.deleteEntityFile('layouts', args.name, subfolder);
@@ -394,6 +436,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           action: 'deleted',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {

@@ -76,6 +76,7 @@ import {
   findReferencesLeftByDelete,
   definesFunctionsOrVariables,
   countDeleteReferences,
+  namesVisibleToOtherSheets,
   type DeleteReference,
   type DeleteReferenceKind,
   type DeleteReferenceReport,
@@ -83,6 +84,16 @@ import {
 import { scanLegacyEventShapes, type LegacyEventShapeHit } from '../construct3/analyzers/legacy-event-shapes.js';
 import type { ObjectRef, SidMatch } from './event-helpers.js';
 import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/index-builder.js';
+import {
+  blocksWithoutForce,
+  checkUnscannedFiles,
+  unscannedFields,
+  unscannedFilesOf,
+  unscannedRefusal,
+  unscannedWarnings,
+  type UnscannedFileReport,
+} from '../construct3/analyzers/unscanned-uses.js';
+import { nameTerm } from '../construct3/raw-text-search.js';
 import { scanLegacyBehaviorKeys } from '../construct3/analyzers/legacy-behavior-keys.js';
 import { checkBehaviorName } from '../construct3/analyzers/behavior-refs.js';
 import type { LegacyBehaviorKeyHit, LegacyBehaviorKeyConflict } from '../construct3/analyzers/legacy-behavior-keys.js';
@@ -492,7 +503,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_sheet',
-    'Delete an event sheet from the project (checks references first)',
+    'Delete an event sheet from the project (checks references first: sheets that include it and layouts bound to it; refused without force while there are any). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles).',
     {
       name: z.string().max(200).describe('Event sheet name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -521,17 +532,30 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const hasRefs = includedBy.length > 0 || boundLayouts.length > 0;
 
-        if (hasRefs && !args.force) {
+        // 3. Event sheets (includes) and layouts (bindings) that could not be parsed
+        const unscanned = await checkUnscannedFiles(
+          reader,
+          index.unscannedFiles.filter(f => !(f.category === 'eventSheets' && f.name === args.name)),
+          [{ categories: ['eventSheets', 'layouts'], allOf: [[nameTerm(args.name)]] }],
+        );
+        const unscannedBlock = blocksWithoutForce(unscanned);
+
+        if ((hasRefs || unscannedBlock) && !args.force) {
+          const reasons = [
+            ...(hasRefs ? ['Event sheet is still referenced.'] : []),
+            ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+          ];
           return toolResult({
             success: false,
             entity: args.name,
             category: 'eventsheet',
             action: 'delete_blocked',
-            message: 'Event sheet is still referenced. Use force=true to delete anyway (references will NOT be cleaned up).',
+            message: `${reasons.join(' ')} Use force=true to delete anyway (references will NOT be cleaned up).`,
             references: {
               includedBy,
               boundLayouts,
             },
+            ...unscannedFields(unscanned),
           });
         }
 
@@ -540,6 +564,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           const refList = [...includedBy.map(s => `included by "${s}"`), ...boundLayouts.map(l => `bound to layout "${l}"`)];
           warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
         }
+        warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.name);
         const backupPath = await writer.deleteEntityFile('eventSheets', args.name, subfolder);
@@ -553,6 +578,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           action: 'deleted',
           warnings: warnings.length > 0 ? warnings : undefined,
           backupFile: backupPath,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -566,7 +592,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_from_sheet',
-    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
+    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Other event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the deleted functions and global variables: a match (a possible use), or such a sheet that cannot be read at all, also refuses without force (listed in unscannedFiles). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
     {
       sheetName: z.string().max(200).describe('Target event sheet'),
       sid: z.number().int().positive().optional().describe('SID of the event to delete (for block, group, variable, function events)'),
@@ -659,25 +685,43 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // function blocks it removes (the event itself or ones inside a
         // deleted group), and event variable parameters naming the variables
         // it removes, anywhere in the project outside the deleted events.
+        // Event sheets that could not be parsed are searched as text for the
+        // functions and global variables the delete removes (issue #55).
         let dangling: DeleteReferenceReport = { functions: [], variables: [], complete: true };
+        let unscanned: UnscannedFileReport[] = [];
         if (definesFunctionsOrVariables(event)) {
+          const sheets = await reader.readAllEventSheets();
+          const sheetFailures = reader.getReadFailures('eventSheets');
           const sheetEvents = new Map<string, unknown>();
-          for (const [name, other] of await reader.readAllEventSheets()) {
+          for (const [name, other] of sheets) {
             sheetEvents.set(name, name === args.sheetName ? sheet.events : other.events);
           }
           sheetEvents.set(args.sheetName, sheet.events);
           dangling = findReferencesLeftByDelete(sheetEvents, event, functionsObjectName(reader));
+          const names = namesVisibleToOtherSheets(event, parentArray === events);
+          if (names.length > 0) {
+            const skipped = unscannedFilesOf('eventSheets', await reader.listEventSheets(), sheets, sheetFailures)
+              .filter(f => f.name !== args.sheetName);
+            unscanned = await checkUnscannedFiles(reader, skipped, [
+              { categories: ['eventSheets'], allOf: [names.map(n => nameTerm(n))] },
+            ]);
+          }
         }
         const danglingCount = countDeleteReferences(dangling);
-        if (danglingCount > 0 && !args.force) {
+        const unscannedBlock = blocksWithoutForce(unscanned);
+        if ((danglingCount > 0 || unscannedBlock) && !args.force) {
+          const reasons = [
+            ...(danglingCount > 0 ? [`${describeDanglingReferences(dangling)} ${DANGLING_REFERENCE_CONSEQUENCE}`] : []),
+            ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+          ];
           return toolResult({
             success: false,
             entity: args.sheetName,
             category: 'eventsheet',
             action: 'delete_blocked',
-            message: `${describeDanglingReferences(dangling)} ${DANGLING_REFERENCE_CONSEQUENCE} ` +
-              'Remove or change these references first, or use force=true to delete anyway.',
+            message: `${reasons.join(' ')} Remove or change these references first, or use force=true to delete anyway.`,
             references: danglingReferenceList(dangling),
+            ...unscannedFields(unscanned),
           });
         }
         if (danglingCount > 0) {
@@ -685,6 +729,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             `${DANGLING_REFERENCE_CONSEQUENCE} ${args.dryRun ? 'The delete would leave these references dangling; fix' : 'Fix'} ` +
             'them before opening the project in Construct 3.');
         }
+        warnings.push(...unscannedWarnings(unscanned, args.dryRun ? 'Would delete' : 'Deleted'));
         if (!dangling.complete) {
           warnings.push('The check for references to the deleted functions and variables stopped at its traversal limit; references further on were not checked.');
         }
@@ -743,6 +788,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             ...(eventType === 'function-block' ? { deletedFunction: event.functionName as string } : {}),
             ...references,
             ...(warnings.length > 0 ? { warnings } : {}),
+            ...unscannedFields(unscanned),
           });
         }
 
@@ -766,6 +812,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           eventPath: path,
           childrenRemoved: childCount,
           ...references,
+          ...unscannedFields(unscanned),
         });
       } catch (error) {
         console.error('[delete_event_from_sheet] failed:', error);

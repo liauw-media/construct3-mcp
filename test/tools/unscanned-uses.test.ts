@@ -334,6 +334,192 @@ describe('delete_family with registered files that could not be parsed', () => {
   });
 });
 
+// ─── delete_layout ──────────────────────────────────────────
+
+describe('delete_layout of a layout that could not be parsed', () => {
+  it('refuses without force when its text holds instances, deletes with force', async () => {
+    await addBigLayout('Big', [instance('Sprite')]);
+    await startServer();
+
+    const result = await call('delete_layout', { name: 'Big' });
+    expect(result.success).toBe(false);
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([
+      { file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use', names: ['instances'] },
+    ]);
+    expect(await exists('layouts', 'Big')).toBe(true);
+
+    const forced = await call('delete_layout', { name: 'Big', force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toContain('layouts/Big');
+    expect(await exists('layouts', 'Big')).toBe(false);
+  });
+
+  it('refuses when its text binds an event sheet', async () => {
+    await addBigLayout('Big', [], 'MainSheet');
+    await startServer();
+
+    const result = await call('delete_layout', { name: 'Big' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles[0].names).toEqual(['an event sheet binding']);
+  });
+
+  it('deletes an empty unbound layout, with a warning that it was only searched as text', async () => {
+    await addBigLayout('Big', []);
+    await startServer();
+
+    const result = await call('delete_layout', { name: 'Big' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text');
+  });
+
+  it('refuses when the layout cannot be read, even as text', async () => {
+    await addUnreadable('layouts', 'Bad');
+    await startServer();
+
+    const result = await call('delete_layout', { name: 'Bad' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([{ file: 'layouts/Bad', reason: 'could not be read', textSearch: 'unreadable' }]);
+  });
+
+  it('is not held up by other layouts that could not be parsed', async () => {
+    await addEntity('layouts', 'Spare', { name: 'Spare', layers: [], sid: 740000000000010, eventSheet: '', width: 10, height: 10 });
+    await addBigLayout('Big', [instance('Sprite')], 'MainSheet');
+    await startServer();
+
+    const result = await call('delete_layout', { name: 'Spare' });
+    expect(result.success).toBe(true);
+    expect(result.warnings).toBeUndefined();
+  });
+});
+
+// ─── delete_event_sheet ─────────────────────────────────────
+
+describe('delete_event_sheet with registered files that could not be parsed', () => {
+  beforeEach(async () => {
+    await addEntity('eventSheets', 'Extra', { name: 'Extra', events: [], sid: 750000000000020 });
+  });
+
+  it('refuses when a layout over the read cap is bound to the sheet, deletes with force', async () => {
+    await addBigLayout('Big', [], 'Extra');
+    await startServer();
+
+    const result = await call('delete_event_sheet', { name: 'Extra' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([
+      { file: 'layouts/Big', reason: 'over the 10MB read limit', textSearch: 'possible-use', names: ['Extra'] },
+    ]);
+    expect(await exists('eventSheets', 'Extra')).toBe(true);
+
+    const forced = await call('delete_event_sheet', { name: 'Extra', force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toMatch(/possible uses.*layouts\/Big/);
+    expect(await exists('eventSheets', 'Extra')).toBe(false);
+  });
+
+  it('refuses when an event sheet that is not valid JSON includes it', async () => {
+    await addBrokenSheet('Broken', [{ eventType: 'include', includeSheet: 'Extra' }]);
+    await startServer();
+
+    const result = await call('delete_event_sheet', { name: 'Extra' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles[0]).toMatchObject({ file: 'eventSheets/Broken', textSearch: 'possible-use' });
+  });
+
+  it('deletes when no such file names the sheet, with a warning', async () => {
+    await addBigLayout('Big', [], 'MainSheet');
+    await startServer();
+
+    const result = await call('delete_event_sheet', { name: 'Extra' });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toContain('layouts/Big (over the 10MB read limit) could not be parsed and was only searched as text');
+  });
+
+  it('refuses when a registered layout cannot be read, even as text', async () => {
+    await addUnreadable('layouts', 'Bad');
+    await startServer();
+
+    const result = await call('delete_event_sheet', { name: 'Extra' });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([{ file: 'layouts/Bad', reason: 'could not be read', textSearch: 'unreadable' }]);
+  });
+});
+
+// ─── delete_event_from_sheet ────────────────────────────────
+
+describe('delete_event_from_sheet with event sheets that could not be parsed', () => {
+  const FUNCTION_SID = 770000000000001;
+  const GLOBAL_SID = 770000000000002;
+  const GROUP_SID = 770000000000003;
+
+  beforeEach(async () => {
+    await addEntity('eventSheets', 'Lib', {
+      name: 'Lib',
+      events: [
+        { eventType: 'function-block', functionName: 'Spawn', functionParameters: [], sid: FUNCTION_SID, conditions: [], actions: [] },
+        { eventType: 'variable', name: 'Score', type: 'number', initialValue: '0', isStatic: false, isConstant: false, sid: GLOBAL_SID },
+        {
+          eventType: 'group', title: 'Locals', sid: GROUP_SID, isActiveOnStart: true, children: [
+            { eventType: 'variable', name: 'Local', type: 'number', initialValue: '0', isStatic: false, isConstant: false, sid: 770000000000004 },
+          ],
+        },
+      ],
+      sid: 750000000000030,
+    });
+  });
+
+  it('refuses to delete a function another sheet that is not valid JSON may call, deletes with force', async () => {
+    await addBrokenSheet('Broken', [block(760000000000010, [{ callFunction: 'spawn', sid: 760000000000012, parameters: [] }])]);
+    await startServer();
+
+    const result = await call('delete_event_from_sheet', { sheetName: 'Lib', sid: FUNCTION_SID });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([
+      { file: 'eventSheets/Broken', reason: 'not valid JSON', textSearch: 'possible-use', names: ['Spawn'] },
+    ]);
+
+    const forced = await call('delete_event_from_sheet', { sheetName: 'Lib', sid: FUNCTION_SID, force: true });
+    expect(forced.success).toBe(true);
+    expect(forced.warnings.join(' ')).toMatch(/possible uses.*eventSheets\/Broken/);
+  });
+
+  it('refuses to delete a global variable such a sheet may use', async () => {
+    await addBrokenSheet('Broken', [block(760000000000010, [setX('Score * 2')])]);
+    await startServer();
+
+    const result = await call('delete_event_from_sheet', { sheetName: 'Lib', sid: GLOBAL_SID });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles[0].names).toEqual(['Score']);
+  });
+
+  it('does not search other sheets for a local variable, which they cannot see', async () => {
+    await addBrokenSheet('Broken', [block(760000000000010, [setX('Local + 1')])]);
+    await startServer();
+
+    const result = await call('delete_event_from_sheet', { sheetName: 'Lib', sid: GROUP_SID });
+    expect(result.success).toBe(true);
+    expect(result.unscannedFiles).toBeUndefined();
+  });
+
+  it('deletes when the sheet does not name the function, with a warning', async () => {
+    await addBrokenSheet('Broken', [block(760000000000010, [setX('Spawner.X')])]);
+    await startServer();
+
+    const result = await call('delete_event_from_sheet', { sheetName: 'Lib', sid: FUNCTION_SID });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).toContain('eventSheets/Broken (not valid JSON) could not be parsed and was only searched as text');
+  });
+
+  it('refuses when a registered event sheet cannot be read, even as text', async () => {
+    await addUnreadable('eventSheets', 'Bad');
+    await startServer();
+
+    const result = await call('delete_event_from_sheet', { sheetName: 'Lib', sid: FUNCTION_SID, dryRun: true });
+    expect(result.action).toBe('delete_blocked');
+    expect(result.unscannedFiles).toEqual([{ file: 'eventSheets/Bad', reason: 'could not be read', textSearch: 'unreadable' }]);
+  });
+});
+
 // ─── update_object_properties / update_family ───────────────
 
 describe('instance variable, behavior and member removal with event sheets that could not be parsed', () => {
