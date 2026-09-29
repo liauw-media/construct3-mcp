@@ -998,6 +998,8 @@ At least one property must be provided. A new name used by another layer of the 
 - Any other string literal naming the layer (in another parameter, as part of a longer expression, as a function call argument, in a script) may name the layer or something else of the same name, such as an animation or a text: a warning lists them and they are never changed
 - Event sheets the reader could not parse are searched as text for the old name; a match, or one that cannot be read, is named in a warning (`unscannedFiles`)
 
+A rename that only changes the letter case (`Main` to `MAIN`) breaks no event, since the editor looks layer names up ignoring case: the event sheets are not searched or written.
+
 The layout is written first, then the event sheets; if one fails, everything written is restored from its backup.
 
 ### `delete_layer`

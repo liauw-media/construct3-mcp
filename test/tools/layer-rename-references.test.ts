@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { MockServer } from '../mocks/mock-server.js';
@@ -19,10 +20,13 @@ import { IdGenerator } from '../../src/construct3/id-generator.js';
 import { registerLayoutTools } from '../../src/tools/layout-tools.js';
 import { resetProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
 import { expressionStringLiterals } from '../../src/construct3/layer-references.js';
+import { isCaseInsensitiveFs } from '../helpers/fs-case.js';
 
 const FIXTURE_DIR = join(__dirname, '..', 'fixtures', 'minimal-project');
 
 type Json = Record<string, any>;
+
+const caseInsensitive = isCaseInsensitiveFs();
 
 let tmpDir: string;
 let reader: Construct3ProjectReader;
@@ -38,6 +42,19 @@ const call = async (tool: string, args: Json): Promise<Json> => {
 };
 const rename = (newName: string, extra: Json = {}) =>
   call('update_layer', { layoutName: 'Layout 1', layerName: 'Main', newName, ...extra });
+
+/** A second layout "Layout 2", with one layer named `layerName`. */
+async function addLayout2(layerName: string): Promise<void> {
+  const other = await readJson(layoutPath());
+  other.name = 'Layout 2';
+  other.layers[0].name = layerName;
+  other.layers[0].instances = [];
+  await writeFile(join(tmpDir, 'layouts', 'Layout 2.json'), JSON.stringify(other, null, '\t'));
+  const project = await readJson(join(tmpDir, 'project.c3proj'));
+  project.layouts.items.push('Layout 2');
+  await writeFile(join(tmpDir, 'project.c3proj'), JSON.stringify(project, null, '\t'));
+  await reader.loadProject();
+}
 
 /** Actions of the sheet's first event, after its set-position action. */
 async function addActions(actions: Json[]): Promise<void> {
@@ -106,20 +123,33 @@ describe('update_layer rename and the layer parameters that name the layer', () 
 
   it('changes nothing in the events while another layout has a layer of the old name', async () => {
     await addActions(LAYER_ACTIONS);
-    const other = await readJson(layoutPath());
-    other.name = 'Layout 2';
-    other.layers[0].name = 'MAIN';
-    other.layers[0].instances = [];
-    await writeFile(join(tmpDir, 'layouts', 'Layout 2.json'), JSON.stringify(other, null, '\t'));
-    const project = await readJson(join(tmpDir, 'project.c3proj'));
-    project.layouts.items.push('Layout 2');
-    await writeFile(join(tmpDir, 'project.c3proj'), JSON.stringify(project, null, '\t'));
-    await reader.loadProject();
+    await addLayout2('MAIN');
 
     const data = await rename('Game');
     expect(data.success).toBe(true);
     expect((await params()).map((p: Json) => p.layer)).toEqual(['"Main"', ' "main" ', '"Main"']);
     expect(data.warnings.join(' ')).toContain('3 "layer" parameter(s) name "Main" and were NOT changed: layout(s) "Layout 2" has a layer of that name too');
+  });
+
+  it.skipIf(!caseInsensitive)('does not count the renamed layout as another one when layoutName differs from it in case', async () => {
+    await addActions(LAYER_ACTIONS);
+    const data = await call('update_layer', { layoutName: 'layout 1', layerName: 'Main', newName: 'Game' });
+    expect(data.success).toBe(true);
+    expect((await params()).map((p: Json) => p.layer)).toEqual(['"Game"', ' "Game" ', '"Game"']);
+    expect(data.warnings.join(' ')).not.toContain('NOT changed');
+  });
+
+  it('changes no event sheet when the rename only changes the letter case', async () => {
+    await addActions(LAYER_ACTIONS);
+    await addLayout2('main');
+    const before = await readFile(sheetPath(), 'utf8');
+
+    const data = await rename('MAIN');
+    expect(data.success).toBe(true);
+    expect((await readJson(layoutPath())).layers[0].name).toBe('MAIN');
+    expect(await readFile(sheetPath(), 'utf8')).toBe(before);
+    expect(existsSync(`${sheetPath()}.bak`)).toBe(false);
+    expect(data.warnings).toBeUndefined();
   });
 
   it('only warns with updateReferences: false', async () => {

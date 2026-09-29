@@ -240,15 +240,19 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
     const definite = uses.filter(u => u.definite);
     const possible = uses.filter(u => !u.definite);
 
-    // Other layouts with a layer of the old name: a layer parameter may name that one
+    // Other layouts with a layer of the old name: a layer parameter may name that one.
+    // The renamed layout by its registered name (layoutName may differ in case, which
+    // the file system accepts), or the cached copy with the old layer name counts as another
     const layouts = await reader.readAllLayouts();
     const layoutFailures = reader.getReadFailures('layouts');
+    const registered = await reader.listLayouts();
+    const own = findNameClash(layoutName, registered) ?? layoutName;
     const key = layerNameKey(oldName);
     const sameName = [...layouts]
-      .filter(([name, other]) => name !== layoutName && layerEntries(other.layers).some(e => typeof e.layer.name === 'string' && layerNameKey(e.layer.name) === key))
+      .filter(([name, other]) => name !== own && layerEntries(other.layers).some(e => typeof e.layer.name === 'string' && layerNameKey(e.layer.name) === key))
       .map(([name]) => name);
     const unscannedLayouts = await checkUnscannedFiles(reader,
-      unscannedFilesOf('layouts', await reader.listLayouts(), layouts, layoutFailures).filter(f => f.name !== layoutName),
+      unscannedFilesOf('layouts', registered, layouts, layoutFailures).filter(f => f.name !== own),
       [{ categories: ['layouts'], allOf: [[nameTerm(oldName)]] }]);
     const unscannedSheets = await checkUnscannedFiles(reader,
       unscannedFilesOf('eventSheets', await reader.listEventSheets(), sheets, sheetFailures),
@@ -885,8 +889,9 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           }
           layer.name = args.newName!;
         }
-        // Event sheet strings that name the old name (read before any write)
-        const references = renamed && oldName !== undefined
+        // Event sheet strings that name the old name (read before any write). A rename that
+        // only changes the letter case breaks none: the editor looks layer names up ignoring case
+        const references = renamed && oldName !== undefined && layerNameKey(oldName) !== layerNameKey(args.newName!)
           ? await planLayerReferences(args.layoutName, oldName, args.newName!, args.updateReferences)
           : undefined;
 
