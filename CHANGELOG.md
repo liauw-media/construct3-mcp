@@ -6,7 +6,7 @@ All notable changes to the Construct3 MCP Server are documented here.
 
 ### Added
 
-- `validate_project` check `frame-image`: a warning for Sprite animation frames without their image file in `images/` (the name follows the frame's index and `fileType`, compared ignoring case), and info for files named like frames past an animation's last frame that no frame uses (#36).
+- `validate_project` check `frame-image`: a warning for Sprite animation frames without their image file in `images/` (the name follows the frame's index and `fileType`, compared ignoring case), and info for files named like frames past an animation's last frame that no frame uses. The `backup-file` info also lists `.bak` files directly in `images/`, where the frame tools keep images (#36).
 
 ### Fixed
 

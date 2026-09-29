@@ -1385,9 +1385,10 @@ function classifyEntityFiles(
 // ─── Check 11: Backup Files ─────────────────────────────────
 
 /**
- * .bak files in the entity folders (recursively, including timelines/) and next
- * to project.c3proj. The project root is not scanned recursively, so files/,
- * images/, scripts/ and the like stay out of it.
+ * .bak files in the entity folders (recursively, including timelines/),
+ * directly in images/ (the frame tools keep frame images there as .bak) and
+ * next to project.c3proj. The project root is not scanned recursively, so
+ * files/, scripts/, subfolders of images/ and the like stay out of it.
  */
 async function checkBackupFiles(
   reader: Construct3ProjectReader,
@@ -1399,6 +1400,8 @@ async function checkBackupFiles(
   for (const dirName of dirs) {
     await scanDirForBackups(join(projectDir, dirName), dirName, info, true);
   }
+  // add_frame_to_animation and delete_frame_from_animation keep images there as .bak
+  await scanDirForBackups(join(projectDir, 'images'), 'images', info, false);
   await scanDirForBackups(projectDir, '', info, false);
 }
 
@@ -1531,7 +1534,8 @@ async function checkFrameImages(
     if (digits !== String(frameIndex).padStart(3, '0') || usedStems.has(`${prefix}${digits}`)) continue;
     const anim = byPrefix.get(prefix)?.find(a => frameIndex >= a.frameCount);
     if (!anim) continue;
-    unused.set(anim, [...(unused.get(anim) ?? []), `images/${file}`]);
+    const list = unused.get(anim);
+    if (list) list.push(`images/${file}`); else unused.set(anim, [`images/${file}`]);
   }
   for (const [anim, unusedFiles] of unused) {
     info.push({

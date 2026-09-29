@@ -1752,19 +1752,24 @@ describe('validateProjectIntegrity file scans', () => {
     expect(orphans[0].suggestion).toContain('move it to layouts/layout1.json');
   });
 
-  it('lists .bak files in timelines (with subfolders) and next to project.c3proj, but not elsewhere in the root', async () => {
+  it('lists .bak files in timelines (with subfolders), directly in images/ and next to project.c3proj, but not elsewhere in the root', async () => {
     await writeFiles([
       'project.c3proj.bak',
       'timelines/Timeline1.json.bak',
       'timelines/Folder1/Timeline2.json.bak',
       'timelines/transitions/Transition1.json.bak',
       'eventSheets/Sheet1.json.bak',
+      'images/sprite-animation 1-000.png.bak',
+      'images/sprite-animation 1-000.png.1.bak',
+      'images/sub/other.png.bak',
       'files/data.bak',
       'scripts/main.js.bak',
     ]);
     const result = await validateProjectIntegrity(readerFor({}));
     expect(byCheck(result.info, 'backup-file')).toEqual([
       'eventSheets/Sheet1.json.bak',
+      'images/sprite-animation 1-000.png.1.bak',
+      'images/sprite-animation 1-000.png.bak',
       'project.c3proj.bak',
       'timelines/Folder1/Timeline2.json.bak',
       'timelines/Timeline1.json.bak',

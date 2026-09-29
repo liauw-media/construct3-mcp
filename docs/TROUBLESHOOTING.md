@@ -152,7 +152,7 @@ Every mutation creates `.bak` backup files next to the modified files. If someth
 3. Rename the `.bak` file to remove the `.bak` extension
 4. Restart the MCP server
 
-In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files. `validate_project` does not list `.bak` files in `images/`.
+In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files, and `validate_project` lists them as `backup-file` info.
 
 ## Build Issues
 
