@@ -153,16 +153,16 @@ export function buildInstanceVariableValues(
  * keep their value and their order; a new one goes right after the last
  * existing value that comes before it in `expected`, or else before the first
  * expected one, so a family variable lands before the object's own. Returns
- * the names added and removed.
+ * the names added, and the names and values removed.
  */
 export function syncInstanceVariables(
   instance: Record<string, unknown>,
   expected: InstanceVariableDef[],
   change: { drop?: Iterable<string> } = {},
-): { modified: boolean; added: string[]; dropped: string[] } {
+): { modified: boolean; added: string[]; dropped: Array<{ name: string; value: unknown }> } {
   const entries = Object.entries(isRecord(instance.instanceVariables) ? instance.instanceVariables : {});
   const added: string[] = [];
-  const dropped: string[] = [];
+  const dropped: Array<{ name: string; value: unknown }> = [];
   let modified = !isRecord(instance.instanceVariables);
 
   const rank = new Map(expected.map((v, i) => [v.name, i]));
@@ -175,8 +175,8 @@ export function syncInstanceVariables(
   for (const name of change.drop ?? []) {
     const i = entries.findIndex(([n]) => n === name);
     if (rank.has(name) || i === -1) continue;
-    entries.splice(i, 1);
-    dropped.push(name);
+    const [[, value]] = entries.splice(i, 1);
+    dropped.push({ name, value });
     modified = true;
   }
 
@@ -184,19 +184,28 @@ export function syncInstanceVariables(
   return { modified, added, dropped };
 }
 
+/** Whether an instance variable value is a default one (0, "" or false), which a sync adds back as it was. */
+export function isDefaultInstanceVariableValue(value: unknown): boolean {
+  return value === 0 || value === '' || value === false;
+}
+
 /**
  * Remove the effect entries named in `drop` that are no longer expected
  * (`expected`: the effects the instance's object type and families still
- * have) from an instance's `effects`. Returns the names removed.
+ * have) from an instance's `effects`. Returns the names and entries removed.
  */
-export function dropInstanceEffects(instance: Record<string, unknown>, drop: Iterable<string>, expected: readonly string[]): string[] {
+export function dropInstanceEffects(
+  instance: Record<string, unknown>,
+  drop: Iterable<string>,
+  expected: readonly string[],
+): Array<{ name: string; entry: unknown }> {
   const effects = instance.effects;
   if (!isRecord(effects)) return [];
-  const dropped: string[] = [];
+  const dropped: Array<{ name: string; entry: unknown }> = [];
   for (const name of drop) {
     if (expected.includes(name) || !Object.hasOwn(effects, name)) continue;
+    dropped.push({ name, entry: effects[name] });
     delete effects[name];
-    dropped.push(name);
   }
   return dropped;
 }

@@ -161,6 +161,30 @@ describe('update_family and delete_family', () => {
     const instance = (await instances()).get(0)!;
     expect(instance.instanceVariables).toEqual({ hp: 0 });
     expect(Object.keys(instance.effects)).toEqual(['Own']);
+    // The effect entry is named with its parameters; the default value of "shield" is not
+    const removed = data.warnings.find((w: string) => w.startsWith('Removed'));
+    expect(removed).toContain('Removed 1 effect entry from instances: "Layout 1" UID 0 effect "AdjustHSL" ' +
+      '{"isEnabled":true,"parameters":{"hue":0,"saturation":1,"luminosity":1}}');
+    expect(removed).not.toContain('shield');
+  });
+
+  it('names the values other than the default that a leaving member\'s instances lose', async () => {
+    await call('update_family', { name: 'Foes', addVariables: [{ name: 'armor', type: 'number' }, { name: 'title', type: 'string' }] });
+    await call('update_instance', { layoutName: 'Layout 1', uid: 0, instanceVariables: { armor: 42, hp: 3 } });
+
+    const data = await call('update_family', { name: 'Foes', removeMembers: ['Sprite'], force: true });
+    expect(data.success).toBe(true);
+    expect(await valuesOf()).toEqual({ hp: 3 });
+    const removed = data.warnings.find((w: string) => w.startsWith('Removed'));
+    expect(removed).toContain('Removed 1 instance variable value(s) other than the default from instances: "Layout 1" UID 0 instance variable "armor" = 42.');
+    expect(removed).toContain('Only the layouts\' .bak files hold them now');
+  });
+
+  it('says nothing about removed values that were the default', async () => {
+    await call('update_family', { name: 'Foes', addVariables: [{ name: 'armor', type: 'number' }] });
+    const data = await call('update_family', { name: 'Foes', removeVariables: ['armor'], force: true });
+    expect(data.success).toBe(true);
+    expect(data.warnings.some((w: string) => w.startsWith('Removed'))).toBe(false);
   });
 });
 

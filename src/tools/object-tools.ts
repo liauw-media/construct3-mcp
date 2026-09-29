@@ -70,6 +70,7 @@ import { planObjectImageParking, type ObjectImageParking } from '../construct3/o
 import {
   dropInstanceEffects,
   effectNamesOf,
+  isDefaultInstanceVariableValue,
   expectedInstanceEffects,
   expectedInstanceVariables,
   instanceVariablesOf,
@@ -1448,6 +1449,13 @@ async function syncLayoutInstances(
     for (const name of names) entry.names.add(name);
     map.set(type, entry);
   };
+  /**
+   * Instance variable values other than the default and effect entries removed
+   * from instances: only the layout's .bak holds them, until the layout is written again
+   */
+  const removedData: string[] = [];
+  let removedValues = 0;
+  let removedEffects = 0;
 
   for (const [layoutName, layout] of layouts) {
     let modified = false;
@@ -1462,13 +1470,22 @@ async function syncLayoutInstances(
       modified = synced.modified || modified;
       unknownDefaults.push(...synced.unknownDefaults);
       noteBackfill(backfilled, instance.type, synced.added.filter(name => !(plan.add ?? []).includes(name)));
+      const where = `"${layoutName}" UID ${String(instance.uid)}`;
       if (plan.variables) {
         const values = syncInstanceVariables(instance, plan.variables, { drop: plan.dropVariables });
         modified = values.modified || modified;
         noteBackfill(backfilledValues, instance.type, values.added.filter(name => !(plan.addVariables ?? []).includes(name)));
+        for (const { name, value } of values.dropped) {
+          if (isDefaultInstanceVariableValue(value)) continue;
+          removedData.push(`${where} instance variable "${name}" = ${shortJson(value)}`);
+          removedValues++;
+        }
       }
       if (plan.dropEffects?.length) {
-        modified = dropInstanceEffects(instance, plan.dropEffects, plan.effects ?? []).length > 0 || modified;
+        const effects = dropInstanceEffects(instance, plan.dropEffects, plan.effects ?? []);
+        modified = effects.length > 0 || modified;
+        for (const { name, entry } of effects) removedData.push(`${where} effect "${name}" ${shortJson(entry)}`);
+        removedEffects += effects.length;
       }
     };
 
@@ -1498,6 +1515,14 @@ async function syncLayoutInstances(
       + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores a value for every instance variable of the object and its families on each instance.');
   }
   if (unknownDefaults.length > 0) warnings.push(unknownDefaultsWarning(unknownDefaults));
+  if (removedData.length > 0) {
+    const what = [
+      ...(removedValues > 0 ? [`${removedValues} instance variable value(s) other than the default`] : []),
+      ...(removedEffects > 0 ? [`${removedEffects} effect entr${removedEffects === 1 ? 'y' : 'ies'}`] : []),
+    ];
+    warnings.push(`Removed ${what.join(' and ')} from instances: ` +
+      `${listSome(removedData, 10)}. Only the layouts' .bak files hold them now, until those layouts are written again; note them if they are still needed.`);
+  }
 
   const changing = [...plans].filter(([, plan]) => [plan.add, plan.drop, plan.addVariables, plan.dropVariables, plan.dropEffects]
     .some(list => (list?.length ?? 0) > 0));
@@ -1507,6 +1532,12 @@ async function syncLayoutInstances(
     : [];
   warnings.push(...unsyncedLayoutWarnings(unscanned));
   return { warnings, unscanned };
+}
+
+/** A value as JSON for a message, cut to 120 characters. */
+function shortJson(value: unknown): string {
+  const json = JSON.stringify(value) ?? String(value);
+  return json.length > 120 ? `${json.slice(0, 117)}...` : json;
 }
 
 /**
