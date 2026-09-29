@@ -1032,7 +1032,7 @@ describe('get_object_dependencies, find_orphaned_objects and get_asset_usage wit
     await startServer();
 
     const result = await call('analyze_performance', {});
-    const cleanup = result.issues.find((i: { category: string }) => i.category === 'cleanup' && i.location === 'project');
+    const cleanup = result.issues.find((i: { category: string; location?: string }) => i.category === 'cleanup' && i.location === 'project');
     expect(cleanup.message).toMatch(/^1 object\(s\) not used by any event .*; 1 more possibly used in files that could not be parsed/);
   });
 
