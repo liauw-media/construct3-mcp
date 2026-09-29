@@ -341,7 +341,7 @@ The mutation tools provide extra context:
 - **Input validation**: Zod schemas on all tool parameters with length limits
 - **Addon gating**: Unknown third-party plugins/behaviors blocked from auto-registration
 - **Load-time gate**: The five event-editing tools listed under Write Flow reject writes that add an error the editor would refuse at load
-- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole)
+- **Size limits**: 5MB maximum for any generated JSON file, 10MB for entity and script files read (the UID/SID text scan of skipped layouts and object types reads them whole, again for the first ID after each write, up to the about 512MB a JavaScript string can hold; a larger file refuses new UIDs)
 
 ---
 

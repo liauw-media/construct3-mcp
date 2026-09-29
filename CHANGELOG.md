@@ -9,10 +9,16 @@ All notable changes to the Construct3 MCP Server are documented here.
 - `add_event_to_sheet` takes the function options `functionReturnType` (`none`, `number`, `string`, `any`), `functionIsAsync` and `functionCopyPicked`, the editor's *Return type*, *Asynchronous* and *Copy picked*, instead of always writing `none`/`false`/`false` (#49).
 - `validate_project` returns `complete` and `unscannedFiles`: `complete` is false when a registered object type, family, event sheet or layout file exists but was not checked (over the 10MB read limit, invalid JSON, unreadable), and `unscannedFiles` names those files. `valid` keeps its meaning: no errors in the files that were checked (#49).
 
+### Changed
+
+- `validate_project` no longer counts a file over the 10MB read limit as an error, so a project whose only finding was such a file now returns `valid: true` (before: `false`, with a wrong "missing or contains invalid JSON" error) together with `complete: false`. Nothing in that file was checked, duplicate UIDs and SIDs included: a client that acts on `valid` should check `complete` too (#49).
+- `validate_project` checks the files of registered families too: a registered family whose file is missing, unreadable or not valid JSON is now a `file-existence` error, so `valid` can be `false` for a project that passed before (#49).
+- `add_event_to_sheet` refuses a `functionReturnType` other than `none`, `number`, `string` and `any`; before, the option was unknown and any value was dropped without an error (#49).
+
 ### Fixed
 
-- `add_instance_to_layout` and `create_object` no longer allocate a UID that a layout or object type over the 10MB read limit already uses: files the reader skips are scanned as text for their UIDs and SIDs, and when a registered file exists but cannot be read at all, a new UID is refused with the file's name instead of guessed. A registered name without a file does not block (#49).
-- `validate_project` reports a file over the 10MB read limit as an `unscanned-file` warning instead of a "missing or contains invalid JSON" error, names the path a missing file is read from, gives the reason for other read failures without the absolute project path, and checks registered family files too (#49).
+- `add_instance_to_layout` and `create_object` no longer allocate a UID that a layout or object type over the 10MB read limit already uses: files the reader skips are scanned as text for their UIDs and SIDs, and when a registered file exists but cannot be read at all, a new UID is refused with the file's name, before anything is written, instead of guessed. A registered name without a file does not block (#49).
+- `validate_project` reports a file over the 10MB read limit as an `unscanned-file` warning instead of a "missing or contains invalid JSON" error, names the path a missing file is read from, and gives the reason for other read failures without the absolute project path (#49).
 - `get_object_details`, `get_eventsheet_details` and `get_layout_details` no longer suggest other names ("Did you mean") when the file was found but could not be read, e.g. over the 10MB limit (#49).
 
 ## [1.9.0] - 2026-09-27
