@@ -374,13 +374,15 @@ export function getBridgeScriptPath(): string {
 }
 
 /**
- * Returns the entry that needs to be added to the project's
- * script files list in project.c3proj.
+ * The script entry for a project whose main script imports the bridge
+ * (purpose "none": Construct loads it only through that import). In a
+ * project without a main script, inject_runtime_bridge registers the bridge
+ * with purpose "main" instead; see installBridge in tools/runtime-tools.ts.
  */
 export function getBridgeProjectEntry(): { name: string; type: string; purpose: string } {
   return {
     name: 'c3-runtime-bridge.js',
     type: 'script',
-    purpose: 'none', // auto-runs via runOnStartup
+    purpose: 'none', // loaded through the main script's import
   };
 }

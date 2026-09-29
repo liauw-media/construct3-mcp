@@ -14,12 +14,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
 import { generateBridgeScript, getBridgeScriptPath } from '../runtime/bridge.js';
-import { writeFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, readdir, stat, unlink } from 'node:fs/promises';
 import { join, dirname, relative } from 'node:path';
-import { existsSync } from 'node:fs';
 import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
+import { resolveProjectPath } from '../construct3/path-utils.js';
 
 import { PreviewManager, isLoopbackHost } from '../runtime/preview-server.js';
 import { RuntimeConnectionManager } from '../runtime/cdp-client.js';
@@ -144,45 +144,174 @@ interface RuntimeToolDeps {
 }
 
 /**
- * C3 projects register scripts in rootFileFolders.script.items[].
- * Each entry has: { name, type: "application/javascript", sid, "file-info": { purpose: "none" } }
+ * Script files are listed in project.c3proj under rootFileFolders.script
+ * (items and nested subfolders), each with "script-info": { purpose }, where
+ * the purpose is "main", "imports-for-events" or "none" (as the editor saves
+ * them). Construct loads the main script on its own and nothing else; other
+ * scripts run only when imported (manual, "Script files"). The bridge is
+ * therefore imported by the project's main script, or registered as the
+ * main script of a project that has none.
  */
-interface C3ScriptEntry {
-  name: string;
-  type: string;
-  sid: number;
-  'file-info': { purpose: string };
+interface ScriptFolder {
+  items?: Array<Record<string, unknown>>;
+  subfolders?: ScriptFolder[];
+  name?: string;
 }
 
-function findBridgeInScripts(c3proj: Record<string, unknown>): boolean {
-  const rff = c3proj.rootFileFolders as Record<string, { items?: C3ScriptEntry[] }> | undefined;
-  const scripts = rff?.script?.items ?? [];
-  return scripts.some((s) => s.name === BRIDGE_FILENAME);
+/** The comment that marks the import line inject_runtime_bridge adds, so removal takes out exactly that line. */
+const BRIDGE_IMPORT_MARKER = '// construct3-mcp runtime bridge (remove_runtime_bridge removes this line)';
+
+function scriptPurpose(item: Record<string, unknown>): unknown {
+  const info = (item['script-info'] ?? item['file-info']) as { purpose?: unknown } | undefined;
+  return info?.purpose;
 }
 
-function addBridgeToScripts(c3proj: Record<string, unknown>): void {
-  const rff = c3proj.rootFileFolders as Record<string, { items?: C3ScriptEntry[]; subfolders?: unknown[] }>;
-  if (!rff.script) {
-    rff.script = { items: [], subfolders: [] };
+/** The project's main script other than the bridge: its path under scripts/ ("main.js", "game/main.ts"). */
+function findMainScript(folder: ScriptFolder | undefined, prefix = '', depth = 0): string | undefined {
+  if (!folder || depth > 32) return undefined;
+  for (const item of Array.isArray(folder.items) ? folder.items : []) {
+    if (item?.name !== BRIDGE_FILENAME && typeof item?.name === 'string' && scriptPurpose(item) === 'main') return prefix + item.name;
   }
-  if (!rff.script.items) {
-    rff.script.items = [];
+  for (const sub of Array.isArray(folder.subfolders) ? folder.subfolders : []) {
+    if (typeof sub?.name !== 'string') continue;
+    const found = findMainScript(sub, `${prefix}${sub.name}/`, depth + 1);
+    if (found) return found;
   }
-  // Generate a random SID matching C3's pattern (15-digit number)
-  const sid = Math.floor(Math.random() * 900_000_000_000_000) + 100_000_000_000_000;
-  rff.script.items.push({
+  return undefined;
+}
+
+/** Remove every bridge entry from the script folders; returns those removed. */
+function takeBridgeEntries(folder: ScriptFolder | undefined, depth = 0): Array<Record<string, unknown>> {
+  if (!folder || depth > 32) return [];
+  const taken: Array<Record<string, unknown>> = [];
+  if (Array.isArray(folder.items)) {
+    taken.push(...folder.items.filter((item) => item?.name === BRIDGE_FILENAME));
+    folder.items = folder.items.filter((item) => item?.name !== BRIDGE_FILENAME);
+  }
+  for (const sub of Array.isArray(folder.subfolders) ? folder.subfolders : []) taken.push(...takeBridgeEntries(sub, depth + 1));
+  return taken;
+}
+
+type BridgeLoading = 'main' | 'import' | 'classic';
+
+interface BridgeInstall {
+  /** How Construct loads the bridge: as the main script, imported by the main script, or (classic scripts) listed. */
+  loadedAs: BridgeLoading;
+  /** The main script that imports the bridge, relative to scripts/. */
+  mainScript?: string;
+  /** Whether project.c3proj was changed. */
+  registered: boolean;
+  /** Whether the import line was added to the main script. */
+  importAdded: boolean;
+}
+
+/** The main script's file, checked to stay inside the project's scripts folder. */
+function mainScriptFile(projectDir: string, mainScript: string): string {
+  return resolveProjectPath(projectDir, 'scripts', ...mainScript.split('/'));
+}
+
+const BRIDGE_IMPORT_LINE = new RegExp(`^[^\\S\\r\\n]*import\\s+["'][^"']*${BRIDGE_FILENAME.replace(/[.]/gu, '\\.')}["'];?[^\\r\\n]*(?:\\r?\\n)?`, 'mu');
+const MARKED_IMPORT_LINE = new RegExp(`^import "[^"]*${BRIDGE_FILENAME.replace(/[.]/gu, '\\.')}"; ${BRIDGE_IMPORT_MARKER.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?:\\r?\\n)?`, 'gmu');
+
+/** Add `import "<...>/c3-runtime-bridge.js";` as the first line of the main script, unless it imports the bridge already. */
+async function addBridgeImport(projectDir: string, mainScript: string): Promise<boolean> {
+  const file = mainScriptFile(projectDir, mainScript);
+  const text = await readFile(file, 'utf-8');
+  if (BRIDGE_IMPORT_LINE.test(text)) return false;
+  const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
+  const body = bom ? text.slice(1) : text;
+  const eol = body.includes('\r\n') ? '\r\n' : '\n';
+  const depth = mainScript.split('/').length - 1;
+  const specifier = `${depth === 0 ? './' : '../'.repeat(depth)}${BRIDGE_FILENAME}`;
+  await writeFile(file, `${bom}import "${specifier}"; ${BRIDGE_IMPORT_MARKER}${eol}${body}`, 'utf-8');
+  return true;
+}
+
+/** Remove the import line inject_runtime_bridge added to the main script (the marked line only). */
+async function removeBridgeImport(projectDir: string, mainScript: string): Promise<boolean> {
+  const file = mainScriptFile(projectDir, mainScript);
+  let text: string;
+  try {
+    text = await readFile(file, 'utf-8');
+  } catch {
+    return false;
+  }
+  const without = text.replace(MARKED_IMPORT_LINE, '');
+  if (without === text) return false;
+  await writeFile(file, without, 'utf-8');
+  return true;
+}
+
+/**
+ * Write the bridge script into `projectDir` and register it so Construct
+ * loads it: imported by the main script, or as the main script when the
+ * project has none. A registration an earlier version wrote (a
+ * "file-info" entry with purpose none, which nothing loaded) is replaced.
+ */
+async function installBridge(projectDir: string, c3projPath: string): Promise<BridgeInstall> {
+  const bridgePath = join(projectDir, getBridgeScriptPath());
+  await mkdir(dirname(bridgePath), { recursive: true });
+  await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
+
+  const raw = await readFile(c3projPath, 'utf-8');
+  const c3proj = parseJsonText(raw) as Record<string, unknown>;
+  const folders = (c3proj.rootFileFolders ??= {}) as Record<string, ScriptFolder>;
+  const scripts = (folders.script ??= { items: [], subfolders: [] });
+  scripts.items ??= [];
+  scripts.subfolders ??= [];
+
+  const mainScript = findMainScript(scripts);
+  const loadedAs: BridgeLoading = c3proj.scriptsType === 'classic' ? 'classic' : mainScript ? 'import' : 'main';
+  const purpose = loadedAs === 'main' ? 'main' : 'none';
+
+  const existing = takeBridgeEntries(scripts);
+  const current = existing.length === 1 && scripts.items !== undefined ? existing[0] : undefined;
+  const upToDate = current !== undefined
+    && current['file-info'] === undefined
+    && (current['script-info'] as { purpose?: unknown } | undefined)?.purpose === purpose;
+  const sid = typeof existing[0]?.sid === 'number'
+    ? existing[0].sid
+    : Math.floor(Math.random() * 900_000_000_000_000) + 100_000_000_000_000;
+  const entry = upToDate ? current : {
     name: BRIDGE_FILENAME,
     type: 'application/javascript',
     sid,
-    'file-info': { purpose: 'none' },
-  });
+    'script-info': { purpose },
+  };
+  scripts.items.push(entry);
+  // Unchanged when exactly one up-to-date entry sat at the end of the root list.
+  const registered = !(upToDate && raw === serializeJson(c3proj, jsonTextStyleOf(raw)));
+  if (registered) await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
+
+  const importAdded = loadedAs === 'import' ? await addBridgeImport(projectDir, mainScript!) : false;
+  return { loadedAs, mainScript: loadedAs === 'import' ? mainScript : undefined, registered, importAdded };
 }
 
-function removeBridgeFromScripts(c3proj: Record<string, unknown>): void {
-  const rff = c3proj.rootFileFolders as Record<string, { items?: C3ScriptEntry[] }> | undefined;
-  if (rff?.script?.items) {
-    rff.script.items = rff.script.items.filter((s) => s.name !== BRIDGE_FILENAME);
+/** Take the bridge out again: its import line in the main script, its entry, its file. */
+async function uninstallBridge(projectDir: string, c3projPath: string): Promise<{ entries: number; importRemoved: boolean }> {
+  try {
+    await unlink(join(projectDir, getBridgeScriptPath()));
+  } catch {
+    // no bridge file
   }
+  const raw = await readFile(c3projPath, 'utf-8');
+  const c3proj = parseJsonText(raw) as Record<string, unknown>;
+  const scripts = (c3proj.rootFileFolders as Record<string, ScriptFolder> | undefined)?.script;
+  const mainScript = findMainScript(scripts);
+  const importRemoved = mainScript ? await removeBridgeImport(projectDir, mainScript) : false;
+  const entries = takeBridgeEntries(scripts).length;
+  if (entries > 0) await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
+  return { entries, importRemoved };
+}
+
+function loadingMessage(install: BridgeInstall): string {
+  if (install.loadedAs === 'main') {
+    return 'The bridge is registered as the project\'s main script (it had none), so Construct loads it on startup.';
+  }
+  if (install.loadedAs === 'import') {
+    return `The bridge is imported by the main script scripts/${install.mainScript}, so Construct loads it on startup.`;
+  }
+  return 'The project uses classic scripts, where imports are not available; the bridge is listed with purpose none. Loading it that way is not verified: switch the project to module scripts if the bridge does not start.';
 }
 
 export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps): RuntimeToolController {
@@ -193,48 +322,21 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'inject_runtime_bridge',
-    'Inject the C3 runtime bridge script into the project. This enables external automation tools (Playwright, browser console, curl) to control the running game via globalThis.__c3bridge. The bridge script auto-runs via runOnStartup() and processes commands each tick.',
+    'Add the runtime bridge script (scripts/c3-runtime-bridge.js) to the project so the running game exposes globalThis.__c3bridge to connect_to_game, call_bridge and the other runtime tools. Construct loads only the main script on its own, so the bridge is imported by the project\'s main script (one marked line at its top) or, in a project without one, registered as the main script. It starts through runOnStartup() and processes commands each tick, on the page or in the runtime\'s worker. remove_runtime_bridge undoes all of it.',
     {},
     async () => {
       try {
         const projectDir = reader.getProjectDir();
-        const bridgePath = join(projectDir, getBridgeScriptPath());
-        const bridgeDir = dirname(bridgePath);
-
-        // Ensure scripts directory exists
-        if (!existsSync(bridgeDir)) {
-          await mkdir(bridgeDir, { recursive: true });
-        }
-
-        // Write the bridge script
-        await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
-
-        // Register in project.c3proj (rootFileFolders.script.items)
-        const c3projPath = reader.getProjectPath();
-        const c3projRaw = await readFile(c3projPath, 'utf-8');
-        const c3proj = parseJsonText(c3projRaw);
-
-        if (!findBridgeInScripts(c3proj)) {
-          addBridgeToScripts(c3proj);
-          await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
-          await reader.loadProject();
-
-          return toolResult({
-            success: true,
-            injected: true,
-            path: bridgePath,
-            registered: true,
-            message: 'Runtime bridge injected and registered in project.c3proj. The bridge will activate when the game starts via runOnStartup().',
-          }, { projectWritten: true });
-        }
-
-        // The bridge script inside the project folder was still rewritten
+        const install = await installBridge(projectDir, reader.getProjectPath());
+        await reader.loadProject();
         return toolResult({
           success: true,
           injected: true,
-          path: bridgePath,
-          registered: false,
-          message: 'Runtime bridge script updated (was already registered in project.c3proj).',
+          path: join(projectDir, getBridgeScriptPath()),
+          registered: install.registered,
+          loadedAs: install.loadedAs,
+          ...(install.mainScript ? { mainScript: install.mainScript, importAdded: install.importAdded } : {}),
+          message: loadingMessage(install),
         }, { projectWritten: true });
       } catch (error) {
         console.error('[inject_runtime_bridge] failed:', error);
@@ -247,33 +349,18 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   server.tool(
     'remove_runtime_bridge',
-    'Remove the runtime bridge script from the project. Use this to clean up after testing.',
+    'Remove the runtime bridge from the project: the script file, its entry in project.c3proj and the import line inject_runtime_bridge added to the main script. Use this to clean up after testing.',
     {},
     async () => {
       try {
         const projectDir = reader.getProjectDir();
-        const bridgePath = join(projectDir, getBridgeScriptPath());
-
-        // Remove the file
-        const { unlink } = await import('node:fs/promises');
-        try {
-          await unlink(bridgePath);
-        } catch {
-          // File might not exist
-        }
-
-        // Remove from project.c3proj
-        const c3projPath = reader.getProjectPath();
-        const c3projRaw = await readFile(c3projPath, 'utf-8');
-        const c3proj = parseJsonText(c3projRaw);
-
-        removeBridgeFromScripts(c3proj);
-        await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
+        const removed = await uninstallBridge(projectDir, reader.getProjectPath());
         await reader.loadProject();
-
         return toolResult({
           success: true,
           removed: true,
+          entriesRemoved: removed.entries,
+          importRemoved: removed.importRemoved,
           message: 'Runtime bridge removed from project.',
         }, { projectWritten: true });
       } catch (error) {
@@ -773,27 +860,9 @@ print(json.dumps({
 
         // Inject bridge if requested
         if (injectBridge) {
-          const bridgePath = join(projectDir, getBridgeScriptPath());
-          const bridgeDir = dirname(bridgePath);
-
-          if (!existsSync(bridgeDir)) {
-            await mkdir(bridgeDir, { recursive: true });
-          }
-
-          await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
-
-          // Register in c3proj if needed
-          const c3projPath = reader.getProjectPath();
-          const c3projRaw = await readFile(c3projPath, 'utf-8');
-          const c3proj = parseJsonText(c3projRaw);
-
-          if (!findBridgeInScripts(c3proj)) {
-            addBridgeToScripts(c3proj);
-            await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
-            await reader.loadProject();
-          }
-
-          checks.push({ check: 'runtimeBridge', status: 'ok' });
+          const install = await installBridge(projectDir, reader.getProjectPath());
+          await reader.loadProject();
+          checks.push({ check: 'runtimeBridge', status: install.loadedAs === 'classic' ? 'warning' : 'ok', detail: loadingMessage(install) });
         }
 
         return toolResult({
@@ -835,24 +904,10 @@ print(json.dumps({
         await cp(sourceDir, targetDir, { recursive: true });
 
         if (includeBridge) {
-          const bridgePath = join(targetDir, getBridgeScriptPath());
-          const bridgeDir = dirname(bridgePath);
-          if (!existsSync(bridgeDir)) {
-            await mkdir(bridgeDir, { recursive: true });
-          }
-          await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
-
-          // Register bridge in cloned project
-          const { readFile: rf, writeFile: wf, readdir } = await import('node:fs/promises');
+          // Register the bridge in the cloned project, the same way as in the open one
           const c3projFiles = (await readdir(targetDir)).filter(f => f.endsWith('.c3proj'));
           if (c3projFiles.length > 0) {
-            const c3projPath = join(targetDir, c3projFiles[0]);
-            const raw = await rf(c3projPath, 'utf-8');
-            const c3proj = parseJsonText(raw);
-            if (!findBridgeInScripts(c3proj)) {
-              addBridgeToScripts(c3proj);
-              await wf(c3projPath, serializeJson(c3proj, jsonTextStyleOf(raw)), 'utf-8');
-            }
+            await installBridge(targetDir, join(targetDir, c3projFiles[0]));
           }
         }
 
@@ -886,21 +941,8 @@ print(json.dumps({
 
         // Optionally inject bridge first
         if (injectBridge) {
-          const bridgePath = join(projectDir, getBridgeScriptPath());
-          const bridgeDir = dirname(bridgePath);
-          if (!existsSync(bridgeDir)) {
-            await mkdir(bridgeDir, { recursive: true });
-          }
-          await writeFile(bridgePath, generateBridgeScript(), 'utf-8');
-
-          const c3projPath = reader.getProjectPath();
-          const c3projRaw = await readFile(c3projPath, 'utf-8');
-          const c3proj = parseJsonText(c3projRaw);
-          if (!findBridgeInScripts(c3proj)) {
-            addBridgeToScripts(c3proj);
-            await writeFile(c3projPath, serializeJson(c3proj, jsonTextStyleOf(c3projRaw)), 'utf-8');
-            await reader.loadProject();
-          }
+          await installBridge(projectDir, reader.getProjectPath());
+          await reader.loadProject();
         }
 
         // Collect all project files
