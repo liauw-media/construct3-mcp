@@ -10,12 +10,19 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { isLoopbackHost } from "./preview-server.js";
 
 const BRIDGE_POLL_INTERVAL_MS = 100;
 const CDP_CALL_TIMEOUT_MS = 5_000;
 const LONG_PRESS_MS = 500;
 const SWIPE_STEPS = 8;
 const SWIPE_STEP_MS = 16;
+/**
+ * Once one page's bridge answered ready, how long the other pages still get
+ * to finish their first check: a second ready bridge makes the choice
+ * ambiguous, and connect_to_game refuses to guess.
+ */
+const SECOND_BRIDGE_GRACE_MS = 1_500;
 
 export interface GameState {
   ready: boolean;
@@ -30,8 +37,12 @@ export interface ConnectToGameOptions {
   cdpEndpoint?: string;
   host?: string;
   port?: number;
-  /** Discovery only: consider only pages whose URL contains this text. */
+  /** Discovery only: consider only pages whose origin and path (not query or fragment) contain this text. */
   urlContains?: string;
+  /** Discovery only: consider only pages of this URL's origin whose path starts with its path. */
+  pageUrl?: string;
+  /** Follow page endpoints the browser lists on other hosts (C3MCP_ALLOW_REMOTE_CDP=1). */
+  allowRemoteHosts?: boolean;
   /** For connecting as a whole: discovery, opening and waiting for the bridge. */
   timeoutMs: number;
 }
@@ -474,6 +485,15 @@ async function pressKey(connection: CdpConnection, descriptor: KeyDescriptor, mo
   });
 }
 
+/** The host name of a ws:// endpoint, or the endpoint itself when it does not parse (and so is no loopback name). */
+function endpointHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return endpoint;
+  }
+}
+
 function formatDiscoveryHost(host: string): string {
   if (!host || /[\s\/@?#]/u.test(host)) {
     throw new Error("CDP host must be a hostname or IP address without a URL scheme or path");
@@ -487,12 +507,45 @@ interface PageCandidate {
   target?: ConnectedGame["target"];
 }
 
-/** The page targets a browser's debugging port lists, in its order, optionally only those whose URL contains `urlContains`. */
+/** A page URL's origin and path, without query and fragment: what urlContains is matched against. */
+function originAndPath(url: string | undefined): string {
+  if (typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === "null" ? `${parsed.protocol}${parsed.pathname}` : `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url.split(/[?#]/u)[0];
+  }
+}
+
+/** True when `url` has `wanted`'s origin and a path that starts with `wanted`'s path. */
+function isUnderPageUrl(url: string | undefined, wanted: URL): boolean {
+  if (typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.origin !== "null" && parsed.origin === wanted.origin && parsed.pathname.startsWith(wanted.pathname);
+  } catch {
+    return false;
+  }
+}
+
+interface PageFilter {
+  urlContains?: string;
+  pageUrl?: URL;
+}
+
+/**
+ * The page targets a browser's debugging port lists, in its order, narrowed
+ * by `filter`. A page endpoint on another host than this machine is refused
+ * unless `allowRemoteHosts`: a debugging port reached on 127.0.0.1 has no
+ * reason to send the connection elsewhere.
+ */
 async function discoverPageTargets(
   host: string,
   port: number,
   timeoutMs: number,
-  urlContains?: string,
+  filter: PageFilter,
+  allowRemoteHosts: boolean,
 ): Promise<PageCandidate[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -515,12 +568,26 @@ async function discoverPageTargets(
     if (pages.length === 0) {
       throw new Error("CDP discovery found no page target with a WebSocket endpoint");
     }
-    const matching = urlContains === undefined
-      ? pages
-      : pages.filter((candidate) => typeof candidate.url === "string" && candidate.url.includes(urlContains));
+    if (!allowRemoteHosts) {
+      const elsewhere = [...new Set(pages
+        .map((page) => endpointHost(page.webSocketDebuggerUrl!))
+        .filter((endpoint) => !isLoopbackHost(endpoint)))];
+      if (elsewhere.length > 0) {
+        throw new Error(
+          `The debugging port lists page endpoints on another host (${elsewhere.join(", ")}); refusing to follow them. Only this machine is reached unless the server was started with the environment variable C3MCP_ALLOW_REMOTE_CDP=1.`,
+        );
+      }
+    }
+    const matching = pages.filter((candidate) =>
+      (filter.urlContains === undefined || originAndPath(candidate.url).includes(filter.urlContains))
+      && (filter.pageUrl === undefined || isUnderPageUrl(candidate.url, filter.pageUrl)));
     if (matching.length === 0) {
+      const wanted = [
+        filter.urlContains !== undefined ? `whose origin and path contain ${JSON.stringify(filter.urlContains)}` : undefined,
+        filter.pageUrl !== undefined ? `under ${filter.pageUrl.href}` : undefined,
+      ].filter(Boolean).join(" and ");
       throw new Error(
-        `No page's URL contains ${JSON.stringify(urlContains)}; the open pages are ${pages.map((page) => page.url ?? "(no URL)").join(", ")}`,
+        `No page ${wanted}; the open pages are ${pages.map((page) => page.url ?? "(no URL)").join(", ")}`,
       );
     }
 
@@ -780,35 +847,64 @@ export class RuntimeConnectionManager {
   private readonly connections = new Map<string, StoredConnection>();
 
   async connect(options: ConnectToGameOptions): Promise<ConnectedGame> {
-    if (options.cdpEndpoint && (options.host !== undefined || options.port !== undefined || options.urlContains !== undefined)) {
-      throw new Error("Provide either cdpEndpoint or host/port (with urlContains), not both");
+    if (options.cdpEndpoint && (options.host !== undefined || options.port !== undefined || options.urlContains !== undefined || options.pageUrl !== undefined)) {
+      throw new Error("Provide either cdpEndpoint or host/port (with urlContains or pageUrl), not both");
+    }
+    let pageUrl: URL | undefined;
+    if (options.pageUrl !== undefined) {
+      try {
+        pageUrl = new URL(options.pageUrl);
+      } catch {
+        throw new Error(`pageUrl is not a URL: ${JSON.stringify(options.pageUrl)}`);
+      }
+      if (pageUrl.origin === "null") throw new Error(`pageUrl needs an http(s) origin: ${JSON.stringify(options.pageUrl)}`);
     }
     const deadline = Date.now() + options.timeoutMs;
     const remaining = () => Math.max(1, deadline - Date.now());
 
     const candidates: PageCandidate[] = options.cdpEndpoint
       ? [{ endpoint: options.cdpEndpoint }]
-      : await discoverPageTargets(options.host ?? "127.0.0.1", options.port ?? 9222, remaining(), options.urlContains);
+      : await discoverPageTargets(
+        options.host ?? "127.0.0.1",
+        options.port ?? 9222,
+        remaining(),
+        { urlContains: options.urlContains, pageUrl },
+        options.allowRemoteHosts === true,
+      );
 
-    // Every candidate page is tried at once; the first whose bridge answers
-    // ready wins, so a browser with the editor or other tabs open still
-    // reaches the game's tab.
+    // Every candidate page is tried at once, so a browser with the editor or
+    // other tabs open still reaches the game's tab. Once a bridge answers
+    // ready, the other pages get a short grace to finish their first check:
+    // a second ready bridge (another game, or another site that defines one)
+    // makes the choice ambiguous, and it is refused instead of raced.
     const opened: CdpConnection[] = [];
     const failures: Error[] = [];
-    let winner: { connection: CdpConnection; found: FoundBridge; candidate: PageCandidate } | undefined;
+    const ready: Array<{ connection: CdpConnection; found: FoundBridge; candidate: PageCandidate }> = [];
+    let firstReadyAt: number | undefined;
     await new Promise<void>((resolve) => {
       let pending = candidates.length;
-      const settle = () => { if (--pending === 0) resolve(); };
+      let grace: NodeJS.Timeout | undefined;
+      const finish = () => { if (grace) clearTimeout(grace); resolve(); };
+      const settle = () => { if (--pending === 0) finish(); };
+      const pastGrace = () => firstReadyAt !== undefined && Date.now() >= firstReadyAt + SECOND_BRIDGE_GRACE_MS;
       for (const candidate of candidates) {
         void (async () => {
           try {
             const connection = new CdpConnection(candidate.endpoint);
             opened.push(connection);
             await connection.open(remaining());
-            const found = await this.findBridge(connection, deadline, () => winner !== undefined);
-            if (found && !winner) {
-              winner = { connection, found, candidate };
-              resolve();
+            if (pastGrace()) return;
+            const found = await this.findBridge(
+              connection,
+              deadline,
+              (rounds) => firstReadyAt !== undefined && (rounds >= 1 || pastGrace()),
+            );
+            if (found && !pastGrace()) {
+              ready.push({ connection, found, candidate });
+              if (firstReadyAt === undefined) {
+                firstReadyAt = Date.now();
+                grace = setTimeout(finish, SECOND_BRIDGE_GRACE_MS);
+              }
             }
           } catch (error) {
             failures.push(error instanceof Error ? error : new Error(String(error)));
@@ -818,13 +914,20 @@ export class RuntimeConnectionManager {
         })();
       }
     });
+    const winner = ready.length === 1 ? ready[0] : undefined;
     for (const connection of opened) if (connection !== winner?.connection) connection.terminate();
 
+    if (ready.length > 1) {
+      const pages = ready.map((page) => page.candidate.target?.url ?? page.candidate.endpoint).join(", ");
+      throw new Error(
+        `${ready.length} pages have a ready runtime bridge (${pages}); connect_to_game does not guess which is the game. Name it with pageUrl (the game's URL, such as the url serve_preview returns), urlContains, or cdpEndpoint (serve_preview's pageEndpoint).`,
+      );
+    }
     if (!winner) {
       if (failures.length === candidates.length) throw failures[0];
       const pages = candidates.map((candidate) => candidate.target?.url ?? candidate.endpoint).join(", ");
       throw new Error(
-        `Runtime bridge was not ready after ${options.timeoutMs}ms in ${candidates.length === 1 ? "the page" : `any of ${candidates.length} pages`} (${pages}). Inject the bridge (inject_runtime_bridge) before exporting or previewing, check the game has started, and pick its tab with urlContains or cdpEndpoint if the browser shows several.`,
+        `Runtime bridge was not ready after ${options.timeoutMs}ms in ${candidates.length === 1 ? "the page" : `any of ${candidates.length} pages`} (${pages}). Inject the bridge (inject_runtime_bridge) before exporting or previewing, check the game has started, and pick its tab with pageUrl, urlContains or cdpEndpoint if the browser shows several.`,
       );
     }
 
@@ -1317,10 +1420,10 @@ export class RuntimeConnectionManager {
    * Poll until a bridge answers ready, on the page itself or in one of its
    * dedicated workers (Construct runs the runtime in a worker with "Use
    * worker" on). Workers are reached through Target.setAutoAttach with flat
-   * sessions. Returns undefined at the deadline, or once `stop` says another
-   * page won.
+   * sessions. Returns undefined at the deadline, or once `stop`, given the
+   * number of complete check rounds so far, says to.
    */
-  private async findBridge(connection: CdpConnection, deadline: number, stop: () => boolean): Promise<FoundBridge | undefined> {
+  private async findBridge(connection: CdpConnection, deadline: number, stop: (rounds: number) => boolean): Promise<FoundBridge | undefined> {
     const expression = `(() => {
       const bridge = globalThis.__c3bridge;
       if (!bridge || typeof bridge.getState !== "function") return JSON.stringify(null);
@@ -1344,10 +1447,11 @@ export class RuntimeConnectionManager {
         if (!connection.isOpen()) throw error;
         // without auto-attach only the page itself is checked
       }
-      while (!stop() && Date.now() < deadline) {
+      let rounds = 0;
+      while (!stop(rounds) && Date.now() < deadline) {
         for (const sessionId of [undefined, ...workers]) {
           const remaining = deadline - Date.now();
-          if (remaining <= 0 || stop()) break;
+          if (remaining <= 0 || stop(rounds)) break;
           try {
             const state = await connection.evaluateJson<GameState | null>(
               expression,
@@ -1359,6 +1463,8 @@ export class RuntimeConnectionManager {
             if (!connection.isOpen()) throw error;
           }
         }
+        rounds++;
+        if (stop(rounds)) break;
         const waitMs = Math.min(BRIDGE_POLL_INTERVAL_MS, deadline - Date.now());
         if (waitMs > 0) await delay(waitMs);
       }

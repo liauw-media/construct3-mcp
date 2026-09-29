@@ -37,6 +37,8 @@ interface FakePage {
   bridge?: "page" | "worker" | "none";
   hidden?: boolean;
   frontMakesVisible?: boolean;
+  /** The host /json/list names in the page's WebSocket endpoint (default 127.0.0.1, where the fake listens). */
+  endpointHost?: string;
 }
 
 interface FakeCdp {
@@ -85,7 +87,7 @@ async function startFakeCdp(options: FakeCdpOptions = {}): Promise<FakeCdp> {
         type: "page",
         title: page.id === "page-1" ? "Construct Preview" : page.id,
         url: page.url ?? "http://localhost/game",
-        webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${page.id}`,
+        webSocketDebuggerUrl: `ws://${page.endpointHost ?? "127.0.0.1"}:${port}/devtools/page/${page.id}`,
       }));
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(targets));
@@ -384,26 +386,73 @@ describe("connect_to_game", () => {
     expect(fake.cdpCommands().filter((c) => c.method === "Input.dispatchMouseEvent")).toHaveLength(2);
   });
 
-  it("picks the page whose bridge is ready, or the one urlContains names, among several tabs", async () => {
+  it("picks the one page whose bridge is ready among several tabs", async () => {
     const fake = await startFakeCdp({
       pages: [
         { id: "editor", url: "https://editor.construct.net/", bridge: "none" },
         { id: "game", url: "http://localhost:8080/index.html", bridge: "page" },
-        { id: "other-game", url: "http://localhost:9090/index.html", bridge: "page" },
+        { id: "blank", url: "about:blank", bridge: "none" },
       ],
     });
     openFakes.push(fake);
     const { server, controller } = registerConnectionTools();
     openControllers.push(controller);
 
-    const first = parseToolResult(await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, timeoutMs: 1_000 }));
-    expect(["game", "other-game"]).toContain(first.target.id);
-    const named = parseToolResult(await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, urlContains: ":9090/", timeoutMs: 1_000 }));
-    expect(named.target.id).toBe("other-game");
+    const connected = parseToolResult(await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, timeoutMs: 1_000 }));
+    expect(connected.target.id).toBe("game");
+  });
 
-    const none = await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, urlContains: "no-such-page", timeoutMs: 300 });
+  it("refuses to guess when several pages have a ready bridge, and takes the one pageUrl or urlContains names", async () => {
+    const fake = await startFakeCdp({
+      pages: [
+        { id: "editor", url: "https://editor.construct.net/", bridge: "none" },
+        { id: "game", url: "http://localhost:8080/index.html", bridge: "page" },
+        { id: "other-game", url: "http://localhost:9090/index.html", bridge: "page" },
+        // Another site in the same browser that defines a bridge of its own and names the game in its query.
+        { id: "lure", url: "http://localhost:7070/?from=http://localhost:8080/index.html", bridge: "page" },
+      ],
+    });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const connect = (args: Record<string, unknown>) => server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, timeoutMs: 1_000, ...args });
+
+    const ambiguous = await connect({});
+    expect(ambiguous.isError).toBe(true);
+    for (const url of ["http://localhost:8080/index.html", "http://localhost:9090/index.html", "http://localhost:7070/"]) {
+      expect(ambiguous.content[0].text).toContain(url);
+    }
+    expect(ambiguous.content[0].text).toMatch(/pageUrl/u);
+    // No page was kept.
+    await vi.waitFor(() => expect(fake.activeConnectionCount()).toBe(0), { timeout: 1_000 });
+
+    // A text in the query or fragment does not make a page match.
+    expect(parseToolResult(await connect({ urlContains: "localhost:8080" })).target.id).toBe("game");
+    expect(parseToolResult(await connect({ urlContains: ":9090/" })).target.id).toBe("other-game");
+    expect(parseToolResult(await connect({ pageUrl: "http://localhost:8080/" })).target.id).toBe("game");
+    expect(parseToolResult(await connect({ pageUrl: "http://localhost:7070/" })).target.id).toBe("lure");
+
+    const none = await connect({ urlContains: "no-such-page", timeoutMs: 300 });
     expect(none.isError).toBe(true);
     expect(none.content[0].text).toContain("no-such-page");
+    const otherPort = await connect({ pageUrl: "http://localhost:8081/", timeoutMs: 300 });
+    expect(otherPort.isError).toBe(true);
+    expect(otherPort.content[0].text).toContain("http://localhost:8081/");
+    const mixed = await server.callTool("connect_to_game", { cdpEndpoint: fake.endpoint, pageUrl: "http://localhost:8080/", timeoutMs: 300 });
+    expect(mixed.isError).toBe(true);
+  });
+
+  it("does not follow a discovered page endpoint to another machine unless the server environment allows it", async () => {
+    vi.stubEnv("C3MCP_ALLOW_REMOTE_CDP", undefined);
+    const fake = await startFakeCdp({ pages: [{ id: "page-1", url: "http://localhost/game", bridge: "page", endpointHost: "10.9.8.7" }] });
+    openFakes.push(fake);
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+
+    const refused = await server.callTool("connect_to_game", { host: "127.0.0.1", port: fake.port, timeoutMs: 500 });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain("10.9.8.7");
+    expect(refused.content[0].text).toContain("C3MCP_ALLOW_REMOTE_CDP=1");
   });
 
   it("brings the game tab to the front and warns when it stays hidden", async () => {
