@@ -67,7 +67,11 @@ async function main() {
     registerMutationTools(server, reader, writer, idGen);
 
     // Runtime Control (for live game testing via browser automation)
-    registerRuntimeTools({ server, reader, writer });
+    const runtimeTools = registerRuntimeTools({ server, reader, writer });
+    const stop = () => { void runtimeTools.close().finally(() => process.exit(0)); };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    process.stdin.once('end', () => { void runtimeTools.close(); });
 
     // Start transport
     const transport = new StdioServerTransport();

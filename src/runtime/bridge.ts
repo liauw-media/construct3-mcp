@@ -1,28 +1,24 @@
 /**
- * C3 Runtime Bridge — injectable script for Construct 3 projects.
+ * C3 Runtime Bridge: an injectable script for Construct 3 projects.
  *
- * This module generates a JavaScript file that, when added to a C3 project's
- * script files, exposes the C3 runtime via a command queue on globalThis.
- * External tools (Playwright, browser console, desktop automation, etc.) can
- * then submit commands to control the game and read state.
+ * This module generates a JavaScript file that, added to a project's script
+ * files, exposes the runtime through a command queue on globalThis. The MCP
+ * tools reach it over the Chrome DevTools Protocol (connect_to_game and
+ * call_bridge submit a command and poll for its result); a browser console
+ * or any CDP-capable tool can do the same.
  *
- * The bridge runs INSIDE the browser alongside the C3 game. It:
+ * The bridge runs inside the browser alongside the game. It:
  * 1. Captures the IRuntime reference via runOnStartup()
- * 2. Starts a fetch-polling endpoint (no WebSocket needed)
- * 3. Exposes: callFunction, getGlobalVar, setGlobalVar, getObjectInstance,
- *    evaluateExpression, getLayout, subscribeEvent
+ * 2. Keeps a command queue and a result store on globalThis.__c3bridge
+ * 3. Processes queued commands on every documented runtime tick
+ * 4. Keeps event subscriptions (global-variable changes, layout changes and
+ *    explicit custom events) in bounded per-subscription buffers, filled
+ *    from documented runtime state each tick
  *
- * Why fetch-polling instead of WebSocket:
- * - No additional server needed on the host machine
- * - Works via browser console or any CDP-capable automation tool
- * - Simpler to implement, debug, and doesn't require extra ports
- *
- * Architecture:
- *   Host machine
- *   ├── Browser with C3 game loaded
- *   │   └── runtime-bridge.js (this script)
- *   │       └── window.__c3bridge = { command queue + result store }
- *   └── curl / python / Playwright reads __c3bridge via CDP or DOM injection
+ * Only documented scripting interfaces are used: IRuntime.globalVars,
+ * IRuntime.layout, tickCount and the tick event. There is no documented
+ * observer of every event-sheet signal or plugin trigger, so a generic
+ * "signal" subscription is not offered.
  */
 
 /**
@@ -46,6 +42,80 @@ runOnStartup(async (runtime) => {
     _results: {},
     // Auto-incrementing command ID
     _nextId: 1,
+
+    // Event subscriptions: bounded FIFO buffers filled from documented
+    // runtime state each tick, and from explicit custom events.
+    _subs: new Map(),
+    _nextSub: 1,
+
+    subscribe(eventType, filter, bufferSize) {
+      filter = filter || {};
+      var size = bufferSize === undefined ? 100 : bufferSize;
+      if (!Number.isInteger(size) || size < 1 || size > 1000) throw new Error("bufferSize must be an integer from 1 to 1000");
+      var sub = { id: "sub-" + this._nextSub++, type: eventType, filter: filter, size: size, buffer: [], baseline: undefined };
+      if (eventType === "globalVarChange") {
+        if (typeof filter.variable !== "string" || !filter.variable) throw new Error("globalVarChange needs filter.variable");
+        if (!(filter.variable in runtime.globalVars)) throw new Error("Unknown global variable: " + filter.variable);
+        sub.baseline = runtime.globalVars[filter.variable];
+      } else if (eventType === "layoutChange") {
+        sub.baseline = runtime.layout ? runtime.layout.name : null;
+      } else if (eventType === "custom") {
+        if (filter.name !== undefined && typeof filter.name !== "string") throw new Error("custom filter.name must be a string");
+      } else {
+        throw new Error("Unknown event type: " + eventType);
+      }
+      this._subs.set(sub.id, sub);
+      return sub.id;
+    },
+
+    // Drop the oldest event before appending when the buffer is full.
+    _push(sub, event) {
+      if (sub.buffer.length >= sub.size) sub.buffer.shift();
+      sub.buffer.push(event);
+    },
+
+    readEvents(id, clear) {
+      var sub = this._subs.get(id);
+      if (!sub) throw new Error("Unknown subscription: " + id);
+      var events = sub.buffer.slice();
+      if (clear === undefined || clear) sub.buffer.length = 0;
+      return events;
+    },
+
+    unsubscribe(id) {
+      return this._subs.delete(id);
+    },
+
+    // A custom event from the game's own script, or from a page evaluation.
+    emit(name, data) {
+      var delivered = 0;
+      for (var sub of this._subs.values()) {
+        if (sub.type !== "custom") continue;
+        if (sub.filter.name !== undefined && sub.filter.name !== name) continue;
+        this._push(sub, { type: "custom", name: name, value: data, timestamp: Date.now(), tick: runtime.tickCount });
+        delivered++;
+      }
+      return delivered;
+    },
+
+    // Compare each subscription's baseline with the runtime; emit only real changes.
+    _poll() {
+      for (var sub of this._subs.values()) {
+        if (sub.type === "globalVarChange") {
+          var value = runtime.globalVars[sub.filter.variable];
+          if (!Object.is(value, sub.baseline)) {
+            this._push(sub, { type: "globalVarChange", name: sub.filter.variable, value: value, previousValue: sub.baseline, timestamp: Date.now(), tick: runtime.tickCount });
+            sub.baseline = value;
+          }
+        } else if (sub.type === "layoutChange") {
+          var layoutName = runtime.layout ? runtime.layout.name : null;
+          if (!Object.is(layoutName, sub.baseline)) {
+            this._push(sub, { type: "layoutChange", name: layoutName, value: layoutName, previousValue: sub.baseline, timestamp: Date.now(), tick: runtime.tickCount });
+            sub.baseline = layoutName;
+          }
+        }
+      }
+    },
 
     // External tools call this to submit a command
     submit(type, args) {
@@ -189,6 +259,31 @@ runOnStartup(async (runtime) => {
             break;
           }
 
+          case "layerToCssPx": {
+            // Layout coordinates on a layer to CSS pixels relative to the
+            // page viewport (client coordinates), through Construct's own
+            // transform, so callers need not model scaling or letterboxing.
+            const layer = runtime.layout.getLayer(cmd.args.layer ?? 0);
+            if (!layer) {
+              result = { error: "Layer not found: " + cmd.args.layer };
+              break;
+            }
+            const [cssX, cssY] = layer.layerToCssPx(cmd.args.x, cmd.args.y);
+            result = { x: cssX, y: cssY, layer: layer.name };
+            break;
+          }
+
+          case "cssPxToLayer": {
+            const layer = runtime.layout.getLayer(cmd.args.layer ?? 0);
+            if (!layer) {
+              result = { error: "Layer not found: " + cmd.args.layer };
+              break;
+            }
+            const [layerX, layerY] = layer.cssPxToLayer(cmd.args.x, cmd.args.y);
+            result = { x: layerX, y: layerY, layer: layer.name };
+            break;
+          }
+
           case "listObjects":
             result = Object.keys(runtime.objects);
             break;
@@ -199,6 +294,25 @@ runOnStartup(async (runtime) => {
               return acc;
             }, {});
             break;
+
+          case "subscribeEvents":
+            result = { subscription_id: bridge.subscribe(cmd.args.eventType, cmd.args.filter, cmd.args.bufferSize) };
+            break;
+
+          case "readEvents": {
+            const events = bridge.readEvents(cmd.args.subscriptionId, cmd.args.clear);
+            result = { events: events, count: events.length };
+            break;
+          }
+
+          case "unsubscribeEvents": {
+            if (!bridge.unsubscribe(cmd.args.subscriptionId)) {
+              result = { error: "Unknown subscription: " + cmd.args.subscriptionId };
+              break;
+            }
+            result = { subscription_id: cmd.args.subscriptionId, unsubscribed: true };
+            break;
+          }
 
           case "ping":
             result = { pong: true, time: Date.now() };
@@ -212,6 +326,9 @@ runOnStartup(async (runtime) => {
         bridge._results[cmd.id] = { ok: false, error: String(e) };
       }
     }
+    // Commands first, so a subscription made this tick records its baseline
+    // and starts observing on the next one instead of reporting a false change.
+    bridge._poll();
   });
 
   console.log("[c3-bridge] Runtime bridge initialized. Access via globalThis.__c3bridge");
