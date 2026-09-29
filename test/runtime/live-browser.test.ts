@@ -41,7 +41,7 @@ afterEach(async () => {
 
 function register(): Registered {
   const server = new MockServer();
-  const controller = registerRuntimeTools({ server, reader: {} as never, writer: {} as never });
+  const controller = registerRuntimeTools({ server: server as never, reader: {} as never, writer: {} as never });
   controllers.push(controller);
   return { server, controller };
 }

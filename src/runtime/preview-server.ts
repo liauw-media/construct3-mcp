@@ -1,6 +1,9 @@
 /**
  * Serve an exported Construct game over loopback HTTP, and optionally launch
  * Chrome on it with a remote-debugging port so `connect_to_game` can follow.
+ * The server listens on 127.0.0.1 only; which interface to listen on and
+ * which browser to start are not the tool caller's to choose (the browser
+ * comes from CHROME_PATH or the platform's usual locations).
  *
  * The input is an exported HTML5 folder (one that contains `index.html`).
  * A source project folder (`project.c3proj`) or a `.c3p` archive is refused:
@@ -52,13 +55,18 @@ const MIME_TYPES: Record<string, string> = {
 
 export interface ServePreviewOptions {
   folder: string;
-  host?: string;
   port?: number;
 }
 
+/**
+ * The address the preview server listens on. Not "localhost": that name can
+ * resolve to ::1 first, where nothing would listen, and 127.0.0.1 is a secure
+ * context in browsers just the same.
+ */
+export const PREVIEW_HOST = '127.0.0.1';
+
 export interface LaunchBrowserOptions {
   url: string;
-  chromePath?: string;
   headless: boolean;
   windowWidth?: number;
   windowHeight?: number;
@@ -161,13 +169,12 @@ export class PreviewServer {
   ) {}
 
   get url(): string {
-    const host = this.host.includes(':') && !this.host.startsWith('[') ? `[${this.host}]` : this.host;
-    return `http://${host}:${this.port}/`;
+    return `http://${this.host}:${this.port}/`;
   }
 
   static async start(options: ServePreviewOptions): Promise<PreviewServer> {
     const root = await checkExportFolder(options.folder);
-    const host = options.host ?? 'localhost';
+    const host = PREVIEW_HOST;
     let instance: PreviewServer | undefined;
     const server = createServer((request, response) => {
       void serve(root, request, response).then(() => { if (instance) instance.requests++; });
@@ -269,19 +276,24 @@ export function chromeCandidates(env: NodeJS.ProcessEnv = process.env, os: strin
   return out;
 }
 
-/** The Chrome (or Edge) executable to launch: the explicit path, `CHROME_PATH`, or the first platform default that exists. */
-export function findChrome(explicit?: string): string {
+/**
+ * The Chrome (or Edge) executable to launch: `CHROME_PATH` when it is set,
+ * otherwise the first platform default that exists. Set by whoever runs the
+ * server, never by a tool call.
+ */
+export function findChrome(env: NodeJS.ProcessEnv = process.env): string {
   // Messages stay free of paths: the client sees a message with paths
-  // redacted to nothing, so the list of locations tried goes to the log.
-  if (explicit) {
-    if (existsSync(explicit)) return explicit;
-    throw new Error('Chrome executable not found at the given chromePath.');
+  // redacted to nothing, so the locations tried go to the log.
+  if (env.CHROME_PATH) {
+    if (existsSync(env.CHROME_PATH)) return env.CHROME_PATH;
+    console.error(`[serve_preview] CHROME_PATH names no file: ${env.CHROME_PATH}`);
+    throw new Error('CHROME_PATH is set but names no file (the path is in the server log).');
   }
-  const candidates = chromeCandidates();
+  const candidates = chromeCandidates(env);
   const found = candidates.find(candidate => existsSync(candidate));
   if (!found) {
     console.error(`[serve_preview] no browser executable at any of: ${candidates.join('; ')}`);
-    throw new Error(`No Chrome or Edge executable found in the ${candidates.length} usual locations (listed in the server log). Pass chromePath or set CHROME_PATH.`);
+    throw new Error(`No Chrome or Edge executable found in the ${candidates.length} usual locations (listed in the server log). Set CHROME_PATH in the server's environment.`);
   }
   return found;
 }
@@ -430,7 +442,7 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
  * removed first. The child is not detached: it ends with the server process.
  */
 export async function launchBrowser(options: LaunchBrowserOptions): Promise<LaunchedBrowser> {
-  const executable = findChrome(options.chromePath);
+  const executable = findChrome();
   await removeStaleProfiles();
   const userDataDir = await mkdtemp(join(tmpdir(), `${PROFILE_PREFIX}${process.pid}-`));
   const args = [

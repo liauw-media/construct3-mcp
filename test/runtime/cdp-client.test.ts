@@ -206,7 +206,7 @@ function registerConnectionTools(): {
 } {
   const server = new MockServer();
   const controller = registerRuntimeTools({
-    server,
+    server: server as never,
     reader: {} as any,
     writer: {} as any,
   });
@@ -857,24 +857,23 @@ describe("simulate_input in layout coordinates", () => {
 });
 
 describe("serve_preview and stop_preview", () => {
-  it("refuses a non-loopback interface and a source project, serves an export, and stops it", async () => {
+  it("serves only on this machine at a 127.0.0.1 URL, refuses a source project, and stops", async () => {
     const { server, controller } = registerConnectionTools();
     openControllers.push(controller);
     const root = await mkdtemp(join(tmpdir(), "c3-serve-"));
     try {
       await mkdir(join(root, "game"));
       await writeFile(join(root, "game", "index.html"), "<title>Served</title>", "utf8");
-
-      const remote = await server.callTool("serve_preview", { folder: join(root, "game"), host: "0.0.0.0" });
-      expect(remote.isError).toBe(true);
-      expect(remote.content[0].text).toContain("allowRemoteHost");
+      const folder = join(root, "game");
 
       const archive = await server.callTool("serve_preview", { folder: join(root, "game.c3p") });
       expect(archive.isError).toBe(true);
       expect(archive.content[0].text).toContain("source project, not an exported game");
 
-      const served = parseToolResult(await server.callTool("serve_preview", { folder: join(root, "game"), host: "127.0.0.1" }));
-      expect(served).toMatchObject({ success: true, host: "127.0.0.1", folder: join(root, "game") });
+      const served = parseToolResult(await server.callTool("serve_preview", { folder }));
+      expect(served).toMatchObject({ success: true, host: "127.0.0.1", folder });
+      // 127.0.0.1, not localhost: localhost can resolve to ::1 first, where nothing listens.
+      expect(served.url).toBe(`http://127.0.0.1:${served.port}/`);
       expect(served.next).toContain("launchBrowser: true");
       expect(await (await fetch(served.url)).text()).toBe("<title>Served</title>");
 
@@ -882,9 +881,31 @@ describe("serve_preview and stop_preview", () => {
       expect(stopped.stopped.map((p: { serverId: string }) => p.serverId)).toEqual([served.serverId]);
       await expect(fetch(served.url)).rejects.toThrow();
 
-      const again = parseToolResult(await server.callTool("serve_preview", { folder: join(root, "game"), host: "127.0.0.1" }));
+      const again = parseToolResult(await server.callTool("serve_preview", { folder }));
       const all = parseToolResult(await server.callTool("stop_preview", {}));
       expect(all.stopped.map((p: { serverId: string }) => p.serverId)).toEqual([again.serverId]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a listening interface or a browser executable as parameters", async () => {
+    const { server, controller } = registerConnectionTools();
+    openControllers.push(controller);
+    const root = await mkdtemp(join(tmpdir(), "c3-serve-"));
+    try {
+      await writeFile(join(root, "index.html"), "<title>Served</title>", "utf8");
+      // Whoever calls the tool must not open the folder to the network or
+      // start a program of their choice: those are the operator's settings.
+      for (const extra of [
+        { host: "0.0.0.0", allowRemoteHost: true },
+        { allowRemoteHost: true },
+        { launchBrowser: true, chromePath: process.execPath },
+        { chromeDebuggingPort: 9222 },
+      ]) {
+        await expect(server.callTool("serve_preview", { folder: root, ...extra })).rejects.toThrow(/Unrecognized key/u);
+      }
+      expect(parseToolResult(await server.callTool("stop_preview", {})).stopped).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

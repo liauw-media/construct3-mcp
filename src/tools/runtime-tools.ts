@@ -610,32 +610,30 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
 
   // ── serve_preview / stop_preview ─────────────────────────
 
-  server.tool(
+  // Registered with a strict schema: the listening interface and the browser
+  // executable are the operator's settings, so a call that names them (as the
+  // first version of this tool allowed) is refused instead of silently
+  // ignored.
+  server.registerTool(
     'serve_preview',
-    'Serve an exported Construct game (the HTML5 export folder that holds index.html) over HTTP on this machine, and optionally launch Chrome on it with a fresh profile and a remote-debugging port the browser picks itself, so connect_to_game can follow (the result names the port and the page endpoint). A source project folder or a .c3p is refused: Construct exports only from its editor.',
     {
-      folder: z.string().min(1).max(4096).describe('The exported game folder (contains index.html)'),
-      port: z.number().int().min(0).max(65535).optional().default(0).describe('HTTP port (default 0: any free port)'),
-      host: z.string().min(1).max(255).optional().default('localhost').describe('Interface to listen on (default: localhost)'),
-      allowRemoteHost: z.boolean().optional().default(false).describe('Allow listening on an interface other than this machine (default: false)'),
-      launchBrowser: z.boolean().optional().default(false).describe('Launch Chrome (or Edge) on the served URL with a remote-debugging port (default: false)'),
-      chromePath: z.string().max(4096).optional().describe('Browser executable (default: CHROME_PATH, then the platform\'s usual Chrome and Edge locations)'),
-      headless: z.boolean().optional().default(false).describe('Launch the browser headless with software WebGL (default: false, a visible window)'),
-      windowWidth: z.number().int().min(100).max(10_000).optional().describe('Browser window width in pixels'),
-      windowHeight: z.number().int().min(100).max(10_000).optional().describe('Browser window height in pixels'),
-      readyTimeoutMs: z.number().int().min(1000).max(120_000).optional().default(15_000).describe('How long to wait for the browser\'s debugging port (default: 15000)'),
+      description: 'Serve an exported Construct game (the HTML5 export folder that holds index.html) over HTTP on this machine (127.0.0.1 only), and optionally launch Chrome or Edge on it with a fresh profile and a remote-debugging port the browser picks itself, so connect_to_game can follow (the result names the port and the page endpoint). The browser comes from the CHROME_PATH environment variable or the usual install locations. A source project folder or a .c3p is refused: Construct exports only from its editor.',
+      inputSchema: z.object({
+        folder: z.string().min(1).max(4096).describe('The exported game folder (contains index.html)'),
+        port: z.number().int().min(0).max(65535).optional().default(0).describe('HTTP port on 127.0.0.1 (default 0: any free port)'),
+        launchBrowser: z.boolean().optional().default(false).describe('Launch Chrome (or Edge) on the served URL with a remote-debugging port (default: false)'),
+        headless: z.boolean().optional().default(false).describe('Launch the browser headless with software WebGL (default: false, a visible window)'),
+        windowWidth: z.number().int().min(100).max(10_000).optional().describe('Browser window width in pixels'),
+        windowHeight: z.number().int().min(100).max(10_000).optional().describe('Browser window height in pixels'),
+        readyTimeoutMs: z.number().int().min(1000).max(120_000).optional().default(15_000).describe('How long to wait for the browser\'s debugging port (default: 15000)'),
+      }).strict(),
     },
     async (args) => {
       try {
-        if (!args.allowRemoteHost && !isLoopbackHost(args.host)) {
-          return toolError(`Refusing to listen on "${args.host}": only this machine (localhost, 127.0.0.1, ::1) is allowed unless allowRemoteHost is true.`);
-        }
         const info = await previews.serve({
           folder: args.folder,
-          host: args.host,
           port: args.port,
           launch: args.launchBrowser ? {
-            chromePath: args.chromePath,
             headless: args.headless,
             windowWidth: args.windowWidth,
             windowHeight: args.windowHeight,

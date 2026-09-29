@@ -59,7 +59,7 @@ describe('checkExportFolder', () => {
 describe('PreviewServer', () => {
   it('serves the export with content types, refuses escapes and other methods, and stops', async () => {
     const { game } = await makeExport();
-    const server = await PreviewServer.start({ folder: game, host: '127.0.0.1' });
+    const server = await PreviewServer.start({ folder: game });
     cleanups.push(() => server.stop());
     expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
 
@@ -95,8 +95,8 @@ describe('PreviewManager', () => {
     const { game } = await makeExport();
     const manager = new PreviewManager();
     cleanups.push(() => manager.closeAll());
-    const first = await manager.serve({ folder: game, host: '127.0.0.1' });
-    const second = await manager.serve({ folder: game, host: '127.0.0.1' });
+    const first = await manager.serve({ folder: game });
+    const second = await manager.serve({ folder: game });
     expect(manager.list().map(p => p.serverId).sort()).toEqual([first.serverId, second.serverId].sort());
     expect(first.browser).toBeUndefined();
 
@@ -125,9 +125,10 @@ describe('browser discovery', () => {
     expect(chromeCandidates({}, 'linux')).toContain('/usr/bin/google-chrome');
   });
 
-  it('names a missing explicit executable', () => {
+  it('takes CHROME_PATH when it is set, and says so when it names no file', () => {
+    expect(findChrome({ CHROME_PATH: process.execPath })).toBe(process.execPath);
     // Path-free on purpose: a message with a path reaches the client blanked by the redactor.
-    expect(() => findChrome('Z:/does/not/exist/chrome.exe')).toThrow('Chrome executable not found at the given chromePath.');
+    expect(() => findChrome({ CHROME_PATH: 'Z:/does/not/exist/chrome.exe' })).toThrow('CHROME_PATH is set but names no file (the path is in the server log).');
   });
 
   it('knows which hosts are this machine', () => {
