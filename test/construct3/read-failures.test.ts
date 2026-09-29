@@ -195,7 +195,8 @@ describe('Construct3ProjectReader.scanEntityIdsRaw (real files)', () => {
 
       await expect(reader.scanEntityIdsRaw('layouts', name)).rejects.toThrow(/Path traversal/);
       // The outside file's UID is never used; the unreadable registration blocks minting instead
-      await expect(new IdGenerator().generateUid(reader)).rejects.toThrow(/Cannot generate a safe UID/);
+      await expect(new IdGenerator().generateUid(reader))
+        .rejects.toThrow(/Cannot generate a safe UID.*Secret: Path traversal detected/);
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
     }
@@ -236,6 +237,16 @@ describe('IdGenerator — real files', () => {
 
     await expect(new IdGenerator().generateUid(reader))
       .rejects.toThrow(/Cannot generate a safe UID.*layouts\/Bad/);
+  });
+
+  it('names why each file could not be scanned, without the absolute project path', async () => {
+    await registerInProject(tmpDir, 'layouts', 'Bad');
+    await mkdir(join(tmpDir, 'layouts', 'Bad.json'));
+    const reader = await openReader(tmpDir);
+
+    const error = await new IdGenerator().generateUid(reader).then(() => undefined, (e: Error) => e);
+    expect(error?.message).toContain('(layouts/Bad: a folder in place of the file)');
+    expect(error?.message).not.toContain(tmpDir);
   });
 
   it('recovers IDs from a layout whose JSON is invalid', async () => {

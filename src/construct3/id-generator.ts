@@ -19,6 +19,19 @@ const MAX_SID_RETRIES = 100;
 const IMAGE_SPRITE_ID_MIN = 1_000_000; // 7-digit minimum
 const IMAGE_SPRITE_ID_MAX = 9_999_999; // 7-digit maximum
 
+/**
+ * Why the raw scan of a file failed, for the UID refusal: from the fs error
+ * code (its message carries the absolute path), or the message of an error
+ * without one (the path traversal check).
+ */
+function scanFailureReason(error: unknown): string {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  if (code === 'EISDIR') return 'a folder in place of the file';
+  if (code === 'EACCES' || code === 'EPERM') return 'no read access';
+  if (typeof code === 'string') return `could not be read (${code})`;
+  return error instanceof Error && error.message ? error.message : 'could not be read';
+}
+
 export class IdGenerator {
   private existingSids: Set<number> | null = null;
   private existingImageSpriteIds: Set<number> | null = null;
@@ -113,9 +126,9 @@ export class IdGenerator {
    *
    * Driven by the registered names, not by the failure records alone, so a
    * skipped file is scanned even if its record went missing. Returns the
-   * files ("category/name") that exist but could not be scanned either;
-   * generateUid() refuses while there are any, instead of risking a
-   * duplicate UID.
+   * files that exist but could not be scanned either, with the reason
+   * ("category/name: reason"); generateUid() refuses while there are any,
+   * instead of risking a duplicate UID.
    */
   private async recoverSkippedIds(
     reader: Construct3ProjectReader,
@@ -142,7 +155,7 @@ export class IdGenerator {
         } catch (error) {
           // No file (or it vanished since the bulk read): same as above.
           if (isFileNotFoundError(error)) continue;
-          unscanned.push(`${category}/${name}`);
+          unscanned.push(`${category}/${name}: ${scanFailureReason(error)}`);
         }
       }
     }
