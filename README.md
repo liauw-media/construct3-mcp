@@ -1,6 +1,6 @@
 # Construct3 MCP Server
 
-> A Model Context Protocol (MCP) server that enables AI assistants (Claude, Cursor, Antigravity, and any MCP-compatible tool) to safely read, analyze, and modify Construct 3 game engine projects.
+> An MCP server that lets Claude, Cursor and other AI assistants read, analyze and safely edit Construct 3 projects — editor-faithful writes with backups and validation. New here? Start with the [User Guide](docs/USER-GUIDE.md).
 
 > **v1.9.0** — Writes follow what the Construct 3 editor itself saves and checks: load-time rules before every event sheet write, the editor's event shapes and name rules, and a `validate_project` without the false reports it gave on editor-saved projects. See [What's new in 1.9.0](#whats-new-in-190) and the [CHANGELOG](CHANGELOG.md).
 
