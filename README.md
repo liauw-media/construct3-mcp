@@ -143,8 +143,8 @@ Claude Desktop, Cursor, VS Code and others use a JSON config instead, see [Usage
 | `update_object_properties` | Add/remove instance variables and behaviors, change global status; removing one that events still use is refused, listing the uses, unless forced |
 | `delete_object` | Delete an object; refused while anything uses it (events, instances on any layer or sub-layer, families), listing where, unless forced; its image files are kept as `.bak` |
 | `create_family` | Create a family; refuses name clashes and members of mixed plugins (load-time checked) |
-| `update_family` | Add/remove members and shared instance variables; refuses member changes that mix plugins (load-time checked), and removing an instance variable or member through which events still use the family's instance variables or behaviors, unless forced |
-| `delete_family` | Delete a family; refused while events or object properties name it or events use its instance variables or behaviors through a member, listing where, unless forced |
+| `update_family` | Add/remove members and shared instance variables; refuses member changes that mix plugins (load-time checked), and removing an instance variable or member through which events still use the family's instance variables, behaviors or effects, unless forced |
+| `delete_family` | Delete a family; refused while events or object properties name it or events use its instance variables, behaviors or effects through a member, listing where, unless forced |
 
 **Event sheets**
 

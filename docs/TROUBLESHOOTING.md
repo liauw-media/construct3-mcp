@@ -138,7 +138,7 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "Family is still referenced"
 
-**Cause**: `delete_family` found events or object properties that name the family, or conditions, actions and expressions that use its instance variables or behaviors through a member object type (`references.memberUses`).
+**Cause**: `delete_family` found events or object properties that name the family, or conditions, actions and expressions that use its instance variables or behaviors through a member object type (`references.memberUses`), or conditions and actions on a member that name one of its effects (`references.effectUses`).
 
 **Solutions**:
 - Remove those uses first, then delete

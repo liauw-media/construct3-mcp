@@ -76,6 +76,12 @@ import {
   syncInstanceVariables,
   type InstanceVariableDef,
 } from '../construct3/instance-variables.js';
+import {
+  effectUseLocation,
+  familyEffectUsesThroughMembers,
+  findEffectUses,
+  type EffectUse,
+} from '../construct3/analyzers/effect-uses.js';
 
 export function registerObjectTools({ server, reader, writer, idGen }: MutationToolDeps) {
   // ─── create_object ──────────────────────────────────────────
@@ -644,6 +650,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           // all of the family's instance variables and behaviors
           const familyVariables = entryNamesOf(family.instanceVariables);
           const familyBehaviors = entryNamesOf(family.behaviorTypes);
+          const familyEffects = effectNamesOf(family);
           // Event sheets that could not be parsed: a use names what is removed and the
           // family or member it goes through
           unscanned = await checkUnscannedFiles(reader, index.unscannedFiles, [
@@ -653,13 +660,16 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             },
             {
               categories: ['eventSheets'],
-              allOf: [[...familyVariables, ...familyBehaviors].map(n => nameTerm(n)), leaving.map(n => nameTerm(n))],
+              allOf: [[...familyVariables, ...familyBehaviors, ...familyEffects].map(n => nameTerm(n)), leaving.map(n => nameTerm(n))],
             },
           ]);
-          if ((broken.length > 0 || blocksWithoutForce(unscanned)) && !args.force) {
-            return toolResult(removalBlocked(args.name, 'family', broken, unscanned));
+          // The family's effects, named by conditions and actions on a leaving member
+          const effects = await familyEffectUses(reader, args.name, { ...family, members: currentMembers.filter(m => !leaving.includes(m)) }, leaving);
+          if ((broken.length > 0 || effects.broken.length > 0 || blocksWithoutForce(unscanned)) && !args.force) {
+            return toolResult(removalBlocked(args.name, 'family', broken, unscanned, effects.broken));
           }
           warnings.push(...removalForcedWarnings(args.name, broken));
+          warnings.push(...effectUseWarnings(effects, 'Removed'));
           warnings.push(...unscannedWarnings(unscanned, 'Removed'));
           warnings.push(...await scriptReadWarnings(reader, index, removal, [...new Set(currentMembers)].flatMap(member => [
             ...(leaving.includes(member) ? familyVariables : variablesToRemove)
@@ -797,7 +807,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_family',
-    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions and runtime.objects in script actions; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. References in project script files and script access to instance variables and behaviors of member instances are not detected.',
+    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions and runtime.objects in script actions; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. The family\u2019s effects count too, when a condition or action on a member names one ("effect" parameter, e.g. Set effect parameter) and the member has no effect of that name itself or through another family. References in project script files and script access to instance variables and behaviors of member instances are not detected.',
     {
       name: z.string().max(200).describe('Family name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -809,18 +819,33 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           return toolError(`Family "${args.name}" not found. Use list_families to see available families.`);
         }
 
+        // Read before deleting: its effects are checked, and the members' instances lose
+        // the entries for its behaviors and effects and the values of its variables
+        let family: Record<string, unknown> | undefined;
+        try {
+          family = await reader.readFamily(args.name);
+        } catch {
+          family = undefined;
+        }
+
         // Check references: uses by name (as for delete_object) and uses through members
         const index = await getProjectIndex(reader);
         const { events, instanceProperties } = index.getObjectUsage(args.name);
         const usage: ObjectUsage = { events, placements: [], instanceProperties, families: [], usedFamilies: [] };
         const memberUses = index.getFamilyMemberUses(args.name);
-        const hasRefs = events.length > 0 || instanceProperties.length > 0 || memberUses.length > 0;
-        const description = [describeObjectUsage(usage), describeMemberUses(memberUses)].filter(Boolean).join('; ');
+        // Its effects, named by conditions and actions on a member
+        const effects = family
+          ? await familyEffectUses(reader, args.name, undefined, index.familyMembers.get(args.name) ?? [], family)
+          : { broken: [], unknown: [] };
+        const hasRefs = events.length > 0 || instanceProperties.length > 0 || memberUses.length > 0 || effects.broken.length > 0;
+        const description = [describeObjectUsage(usage), describeMemberUses(memberUses), describeEffectUses(effects.broken)]
+          .filter(Boolean).join('; ');
         // Files the index could not parse: the family's name and SID, and in event sheets its
-        // instance variables and behaviors together with a member's name
+        // instance variables, behaviors and effects together with a member's name
         const familyMemberNames = [
           ...index.memberNamesOf(args.name, 'instance variable'),
           ...index.memberNamesOf(args.name, 'behavior'),
+          ...effectNamesOf(family),
         ];
         // The family's own file: without it, its members, names and SID are unknown
         let unscanned = mergeUnscannedReports(
@@ -852,9 +877,12 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
             action: 'delete_blocked',
             message: `${reasons.join(' ')} Use force=true to delete anyway (references will NOT be cleaned up).`,
             references: {
-              eventSheets: [...new Set([...events, ...memberUses].map(r => r.eventSheet))],
+              eventSheets: [...new Set([...events, ...memberUses, ...effects.broken].map(r => r.eventSheet))],
               layouts: [...new Set(instanceProperties.map(p => p.layout))],
-              ...boundedLists({ events: eventUseList(events), instanceProperties, memberUses }),
+              ...boundedLists({
+                events: eventUseList(events), instanceProperties, memberUses,
+                ...(effects.broken.length > 0 ? { effectUses: effectUseList(effects.broken) } : {}),
+              }),
             },
             ...unscannedFields(unscanned),
           });
@@ -871,15 +899,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           const unreported = unreportedUsesWarning(events, unreportedMemberUses);
           if (unreported) warnings.push(unreported);
         }
+        warnings.push(...effectUseWarnings({ broken: args.force ? effects.broken : [], unknown: effects.unknown }, 'Deleted'));
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
-
-        // Read before deleting: the members' instances lose the entries for the family's behaviors
-        let family: Record<string, unknown> | undefined;
-        try {
-          family = await reader.readFamily(args.name);
-        } catch {
-          family = undefined;
-        }
 
         const subfolder = writer.getSubfolderForEntity('families', args.name);
         const backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
@@ -965,6 +986,81 @@ async function planDeletedObjectImages(
       'which may use them.');
   }
   return { parking, warnings };
+}
+
+/**
+ * Conditions and actions on `members` that name an effect of the family
+ * `familyName` that the member no longer has once the change is made
+ * (`broken`), and those on such a member whose effect parameter is another
+ * expression than a quoted name (`unknown`, which cannot be checked). The
+ * family's effects come from `familyBefore` (default: `familyAfter`);
+ * `familyAfter` is the family after the change (undefined: deleted). A member
+ * whose object type file cannot be read counts as having none of the effects
+ * itself.
+ */
+async function familyEffectUses(
+  reader: Construct3ProjectReader,
+  familyName: string,
+  familyAfter: Record<string, unknown> | undefined,
+  members: readonly string[],
+  familyBefore: Record<string, unknown> | undefined = familyAfter,
+): Promise<{ broken: EffectUse[]; unknown: EffectUse[] }> {
+  const familyEffects = effectNamesOf(familyBefore);
+  if (familyEffects.length === 0 || members.length === 0) return { broken: [], unknown: [] };
+  const families = new Map(await readFamiliesForInstances(reader));
+  if (familyAfter) families.set(familyName, familyAfter); else families.delete(familyName);
+  const kept = new Map<string, string[]>();
+  for (const member of members) {
+    let obj: unknown;
+    try {
+      obj = await reader.readObjectType(member);
+    } catch {
+      obj = undefined;
+    }
+    kept.set(member, expectedInstanceEffects(member, obj, families));
+  }
+  let sheets;
+  try {
+    sheets = await reader.readAllEventSheets();
+  } catch {
+    return { broken: [], unknown: [] };
+  }
+  return familyEffectUsesThroughMembers(findEffectUses(sheets), familyEffects, members, kept);
+}
+
+/** One sentence on uses of a family's effects through members, e.g. 'effect "Glow" of "Sprite1" used 2 time(s) in events of "Sheet1"'. */
+function describeEffectUses(uses: EffectUse[]): string {
+  if (uses.length === 0) return '';
+  const what = [...new Set(uses.map(u => `effect "${u.name ?? u.expression}" of "${u.objectClass}"`))];
+  const sheets = [...new Set(uses.map(u => `"${u.eventSheet}"`))];
+  return `its effects used ${uses.length} time(s) through members in events of ${listSome(sheets)} (${listSome(what)})`;
+}
+
+/** Effect uses as listed in a refusal. */
+function effectUseList(uses: EffectUse[]): Array<Record<string, unknown>> {
+  return uses.map(u => ({
+    eventSheet: u.eventSheet, eventPath: u.eventPath, ace: u.ace, ...(u.sid !== undefined ? { sid: u.sid } : {}),
+    member: u.objectClass, effect: u.name,
+  }));
+}
+
+/**
+ * Warnings about a family's effects used through members: uses a forced
+ * change leaves behind (validate_project does not check effect names), and
+ * uses whose effect cannot be told.
+ */
+function effectUseWarnings(uses: { broken: EffectUse[]; unknown: EffectUse[] }, verb: 'Removed' | 'Deleted'): string[] {
+  const warnings: string[] = [];
+  if (uses.broken.length > 0) {
+    warnings.push(`${verb} although events still use the family's effects through members: ${describeEffectUses(uses.broken)} ` +
+      `(${listSome([...new Set(uses.broken.map(effectUseLocation))])}). The uses were NOT changed, and validate_project does not check ` +
+      'effect names: fix them now.');
+  }
+  if (uses.unknown.length > 0) {
+    warnings.push(`Conditions or actions on a member name an effect with an expression that is not a quoted name, so whether they use ` +
+      `the family's effects could not be checked: ${listSome([...new Set(uses.unknown.map(u => `${effectUseLocation(u)} (${u.expression})`))])}. Review them.`);
+  }
+  return warnings;
 }
 
 /** At most this many uses of each kind are listed in a delete_object or delete_family response. */
@@ -1136,9 +1232,11 @@ async function scriptReadWarnings(
  */
 function removalBlocked(
   entity: string, category: 'object' | 'family', uses: MemberReference[], unscanned: UnscannedFileReport[],
+  effectUses: EffectUse[] = [],
 ): Record<string, unknown> {
   const reasons = [
     ...(uses.length > 0 ? [`Events still use what this update removes: ${describeMemberReferences(entity, uses)}.`] : []),
+    ...(effectUses.length > 0 ? [`Events still use the family's effects through a leaving member: ${describeEffectUses(effectUses)}.`] : []),
     ...(blocksWithoutForce(unscanned) ? [unscannedRefusal(unscanned)] : []),
   ];
   return {
@@ -1148,8 +1246,8 @@ function removalBlocked(
     action: 'update_blocked',
     message: `${reasons.join(' ')} Nothing was changed. Use force=true to remove anyway (the uses will NOT be changed).`,
     references: {
-      eventSheets: [...new Set(uses.map(u => u.eventSheet))],
-      ...boundedLists({ uses: memberUseList(uses) }),
+      eventSheets: [...new Set([...uses, ...effectUses].map(u => u.eventSheet))],
+      ...boundedLists({ uses: memberUseList(uses), ...(effectUses.length > 0 ? { effectUses: effectUseList(effectUses) } : {}) }),
     },
     ...unscannedFields(unscanned),
   };
