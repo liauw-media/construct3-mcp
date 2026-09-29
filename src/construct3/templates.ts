@@ -466,6 +466,7 @@ export function createFunctionEvent(
   funcName: string,
   sid: number,
   params?: Array<{ name: string; type: string; sid: number }>,
+  options?: { returnType?: string; isAsync?: boolean; copyPicked?: boolean },
 ): FunctionBlockEvent {
   const functionParameters: Array<{ name: string; type: string; initialValue: string; comment: string; sid: number }> = [];
   if (params) {
@@ -484,9 +485,9 @@ export function createFunctionEvent(
     functionName: funcName,
     functionDescription: '',
     functionCategory: '',
-    functionReturnType: 'none',
-    functionCopyPicked: false,
-    functionIsAsync: false,
+    functionReturnType: options?.returnType ?? 'none',
+    functionCopyPicked: options?.copyPicked ?? false,
+    functionIsAsync: options?.isAsync ?? false,
     functionParameters,
     eventType: 'function-block',
     conditions: [],
