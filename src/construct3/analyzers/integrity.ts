@@ -1535,9 +1535,10 @@ async function checkOrphanedObjects(
       check: 'orphaned-object',
       entity: `objectTypes/${orphan.name}`,
       message: `Object "${orphan.name}" (${orphan.pluginId}) is not used by any event (as condition/action object, object parameter, ` +
-        'expression or in a script action), not used through a family, has no instance in any layout (on any layer or sub-layer, ' +
+        'expression, in a script action or as the literal name of Create object (by name)), not used through a family, ' +
+        'has no instance in any layout (on any layer or sub-layer, ' +
         'including non-world instances) and no other instance names it in an object property',
-      suggestion: 'Before removing it, check what this analysis cannot see: project script files, objects created by name at runtime, ' +
+      suggestion: 'Before removing it, check what this analysis cannot see: project script files, objects created by a name built at runtime, ' +
         'and script references it does not recognise. delete_object refuses objects that are still referenced.' +
         (families.length > 0
           ? ` It is a member of ${families.map(f => `"${f}"`).join(', ')}: remove it from the family first (update_family removeMembers).`

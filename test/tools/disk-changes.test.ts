@@ -723,6 +723,22 @@ describe('the ID generator keeps its scan across the server\'s own writes (#38)'
     });
   });
 
+  it('the refusal after the second try names the file and the reason of that try', async () => {
+    await writeFile(join(dir, 'layouts', 'Broken.json'), '{ "name": "Broken" ,,,', 'utf-8');
+    await editJson('project.c3proj', project => { project.layouts.items.push('Broken'); });
+    await reader.syncWithDisk();
+    // Locked at the first scan, no read access when generateUid() tries it again
+    vi.spyOn(reader, 'scanEntityIdsRaw')
+      .mockRejectedValueOnce(Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }))
+      .mockRejectedValue(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }));
+
+    await runInToolCall(async () => {
+      const error = await idGen.generateUid(reader).then(() => undefined, (e: Error) => e);
+      expect(error?.message).toContain('(layouts/Broken: no read access)');
+      expect(error?.message).not.toContain('EBUSY');
+    });
+  });
+
   it('a layout that could not be read stops blocking UIDs once it is deleted', async () => {
     await writeFile(join(dir, 'layouts', 'Broken.json'), '{ "name": "Broken" ,,,', 'utf-8');
     await editJson('project.c3proj', project => { project.layouts.items.push('Broken'); });
