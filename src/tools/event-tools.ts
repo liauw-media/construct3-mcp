@@ -116,6 +116,7 @@ import {
   createFunctionEvent,
   createIncludeEvent,
 } from '../construct3/templates.js';
+import { withProjectSync } from './project-sync.js';
 
 /** Per-sheet cap on change details returned by fix_legacy_behavior_keys. */
 const MAX_REPORTED_CHANGES = 100;
@@ -202,7 +203,8 @@ function parameterlessRowError(action: Record<string, unknown>, index: number): 
   return null;
 }
 
-export function registerEventTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerEventTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // ─── create_event_sheet ───────────────────────────────────
 
   server.tool(

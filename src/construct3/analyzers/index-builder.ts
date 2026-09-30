@@ -21,7 +21,11 @@
  * - script: runtime.objects.Name or runtime.objects["Name"] (any `objects`
  *   property, e.g. this.runtime.objects) in script actions and script events.
  *   Dynamic lookups (runtime.objects[name]), destructuring and project script
- *   files are not analysed.
+ *   files are not analysed;
+ * - create-by-name: the name System "Create object (by name)" creates when it
+ *   is one string literal ("object-name": "\"Bullet\""), matched ignoring
+ *   case as the runtime looks it up (createByNameTarget, the rule
+ *   get_asset_usage uses). A name built by an expression is not analysed.
  * Only names of existing object types and families are recorded this way, so
  * these references never show up as broken references; the exception are the
  * object parameter keys below, whose values name an object type or family in
@@ -81,6 +85,7 @@ import type {
   FileFolderSubfolder,
 } from '../types.js';
 import {
+  createByNameTarget,
   functionsObjectName,
   findExpressionCalls,
   mappedFunctionName,
@@ -88,6 +93,7 @@ import {
 } from '../event-shapes.js';
 import { forEachLayoutInstance, layerPathLabel } from '../layers.js';
 import { unscannedFilesOf, type UnscannedFile } from './unscanned-uses.js';
+import { diskEpochOf, ensureCachesFreshOf } from '../disk-state.js';
 
 /** Instances of an object type in one layout, on one layer (or among the non-world instances). */
 export interface InstancePlacement {
@@ -447,6 +453,18 @@ function scriptText(script: unknown): string {
 }
 
 /**
+ * Parameter names of a function block: its `functionParameters`, the key the
+ * editor saves them under, or `parameters` on a block without that key.
+ */
+function functionParameterNames(func: FunctionBlockEvent): string[] {
+  const list = Array.isArray(func.functionParameters) ? func.functionParameters
+    : Array.isArray(func.parameters) ? func.parameters : [];
+  return list
+    .map(p => (p && typeof p === 'object' ? (p as { name?: unknown }).name : undefined))
+    .filter((name): name is string => typeof name === 'string');
+}
+
+/**
  * Names of the event variables (global and local) and function parameters
  * declared in a sheet's events, added to `into`.
  */
@@ -530,6 +548,8 @@ export class ProjectIndex {
 
   /** Object type and family names that parameters, expressions and scripts can refer to */
   private referableNames: Set<string> = new Set();
+  /** Lower-cased object type or family name → the name (for names matched ignoring case) */
+  private referableNamesLower: Map<string, string> = new Map();
   /** Event variable and function parameter names declared in any event sheet */
   private variableNames: Set<string> = new Set();
   /** SID → name of every object type and family (for object properties that store a SID) */
@@ -564,6 +584,9 @@ export class ProjectIndex {
     this.allObjects = await reader.listObjectTypes();
     this.allLayouts = await reader.listLayouts();
     this.referableNames = new Set([...this.allObjects, ...(await reader.listFamilies())]);
+    for (const name of this.referableNames) {
+      if (!this.referableNamesLower.has(name.toLowerCase())) this.referableNamesLower.set(name.toLowerCase(), name);
+    }
 
     // Instance variables and behaviors of object types and families (for the uses found in events).
     // Each bulk read's failures are taken right away: a reload by a concurrent call clears them.
@@ -682,8 +705,9 @@ export class ProjectIndex {
         const funcName = func.functionName || 'unknown';
         const funcPath = path ? `${path} > function:${funcName}` : `function:${funcName}`;
 
-        // Record function definition
-        const paramNames = func.parameters?.map(p => p.name) || [];
+        // Record function definition. The editor (and add_event_to_sheet) saves the
+        // parameters under functionParameters; "parameters" is only read when that is absent
+        const paramNames = functionParameterNames(func);
         this.functionDefinitions.set(funcName, { sheet: sheetName, params: paramNames });
 
         this.functionDefinitionList.push({ name: funcName, sheet: sheetName, params: paramNames });
@@ -781,6 +805,11 @@ export class ProjectIndex {
     }
     this.indexParameters(sheetName, stdAction.parameters, path, stdAction.objectClass);
     this.indexMemberReferences(sheetName, action as unknown as Record<string, unknown>, path, eventPath, 'action');
+
+    // System "Create object (by name)" with a literal name creates that object type (or a family member)
+    const created = createByNameTarget(record);
+    const createdName = typeof created === 'string' ? this.referableNamesLower.get(created.toLowerCase()) : undefined;
+    if (createdName !== undefined) this.addObjectReference(createdName, sheetName, path, 'create-by-name');
 
     // Check for function calls
     if (typeof stdAction.callFunction === 'string' && stdAction.callFunction) {
@@ -1261,17 +1290,25 @@ export class ProjectIndex {
 
 /**
  * The built index of each project, keyed by its reader: two projects opened in
- * one process (scripts, tests, embeddings) never see each other's index.
+ * one process (scripts, tests, embeddings) never see each other's index. Each
+ * notes the reader's disk epoch it was built in.
  */
-let cachedIndexes = new WeakMap<Construct3ProjectReader, ProjectIndex>();
+let cachedIndexes = new WeakMap<Construct3ProjectReader, { index: ProjectIndex; epoch: number }>();
 
-/** The cross-reference index of the reader's project: built on first use, then cached for that reader. */
+/**
+ * The cross-reference index of the reader's project: built on first use, then
+ * cached for that reader until a write resets it or the reader finds a change
+ * on disk the server did not make (its disk epoch moves, #51).
+ */
 export async function getProjectIndex(reader: Construct3ProjectReader): Promise<ProjectIndex> {
+  // In a tool call: a file the index was built from may have changed on disk since
+  await ensureCachesFreshOf(reader);
+  const epoch = diskEpochOf(reader);
   const cached = cachedIndexes.get(reader);
-  if (cached && cached.isBuilt()) return cached;
+  if (cached && cached.epoch === epoch && cached.index.isBuilt()) return cached.index;
   const index = new ProjectIndex();
   // Cached before the build: a reset while it runs drops it, so the next call rebuilds
-  cachedIndexes.set(reader, index);
+  cachedIndexes.set(reader, { index, epoch });
   await index.build(reader);
   return index;
 }

@@ -78,18 +78,30 @@ Same as above — use the corresponding `list_` tool to find the correct name.
 
 **Cause**: The server reads object type, event sheet, layout and family files up to 10MB. `get_object_details`, `get_eventsheet_details` and `get_layout_details` refuse a larger file (without a "Did you mean" hint, since the name was right), and the cross-reference index leaves it out. The reference checks of the delete and update tools, `find_orphaned_objects` and `get_object_dependencies` search it as text instead (see "Possible uses in files that could not be parsed" below). `validate_project` reports it as an `unscanned-file` warning and returns `complete: false`: duplicate UIDs and SIDs, references and load-time errors inside that file are not reported, and `valid` is `false`, also when `summary.errors` is 0.
 
-New UIDs are still allocated above the UIDs in the file, so `add_instance_to_layout` and `create_object` keep working: the file is scanned as text for its UIDs and SIDs. That scan reads the whole file, again for the first new UID or SID after each write, so it costs time and memory in proportion to the file's size (for a 150MB layout, one to two seconds per call). A file too large to read into memory as text (about 512MB) cannot be scanned, and new UIDs are refused (see "Cannot generate a safe UID" below).
+New UIDs are still allocated above the UIDs in the file, so `add_instance_to_layout` and `create_object` keep working: the file is scanned as text for its UIDs and SIDs. The scan streams the file, so memory does not grow with its size (beyond the SIDs it finds), and there is no size limit; it reads the whole file on the first new UID or SID and again after each change on disk the server did not make (its own writes add their IDs without a new scan), so the time of such a scan grows with the size. Measured (Node 22, Windows 11, three runs, other processes busy): a 50MB layout with 218,000 instances about 0.2 to 0.4 seconds per scan, a 608MB layout about 1.5 to 1.8 seconds, with a peak of about 100 to 120MB of process memory in both. Version 1.9.2 and older read the file into memory whole (a peak of about 290MB for the 50MB layout) and refused new UIDs next to a file over about 512MB, the most a JavaScript string can hold. The scan reads a file with a UTF-16LE byte order mark as such and leaves out NUL characters, so it also finds the UIDs of a file in UTF-16 without a byte order mark or in UTF-16BE, and of a file whose end is zeros (a save cut short); version 1.9.2 read every file as UTF-8 and missed the UIDs of UTF-16 files, so a new UID could repeat one of them.
 
 Known gap: tools that edit the large file itself, such as `add_instance_to_layout` on that layout, report it as not found and suggest its own name.
 
 **Solutions**:
 - Check that file in the Construct 3 editor, or split a very large layout
 
-### Stale data after editing in C3 editor
+### Changes made in the C3 editor or with git
 
-**Cause**: The reader loads `project.c3proj` at startup and keeps it, so the lists of objects, event sheets and layouts (e.g. `list_objects`) stay as they were. Single entity files (an event sheet, an object type) are read from disk again, so the data can be a mix of old and new. The server reloads `project.c3proj` itself only after its own writes.
+Since the release after 1.9.2 the server picks up changes made outside it by itself: each tool call checks `project.c3proj`, and the files its caches hold, against the disk (modification time, size, file id) and reads again what changed. Reconnecting is no longer needed after a save in the editor or `git restore`. Older versions kept the project list from their start and needed a reconnect (Claude Code: `/mcp` > `construct3` > **Reconnect**).
 
-**Solution**: Restart or reconnect the MCP server to pick up changes made in the C3 editor (Claude Code: `/mcp` > `construct3` > **Reconnect**). External changes aren't detected automatically.
+A change that keeps a file's size, modification time and file id (possible on file systems with coarse timestamps, such as FAT32 or some network drives) is not seen; reconnect the server in that case.
+
+### "... was changed on disk after this server read it"
+
+**Cause**: The file changed on disk while the tool call was working with it: saved in the Construct 3 editor, restored with git, written by another program, or by another tool call running at the same time on the same file. Every tool refuses this way for an event sheet, layout, object type or family file; for `project.c3proj` only the timeline, addon and runtime-bridge tools do (the server's other updates of `project.c3proj` keep such a change and go on). The write was refused so that change is not lost; the file was left as it is on disk.
+
+**Solution**: Run the tool again; it reads the file as it is now. If the editor saved the file, check that its version is the one you want to keep. When the tool call had already written other files (for example `move_events_between_sheets` the target sheet, or `update_object_properties` the object and `project.c3proj`), it put them back as they were before the call, so it changed nothing; the error lists them. If one of them had changed on disk again meanwhile, it is left as it is and the error names it with its `.bak`: check the project with `validate_project` and `git diff` before you run the tool again. Image files a call wrote before the refusal (placeholder PNGs) are not removed.
+
+### "project.c3proj changed on disk and could not be read again"
+
+**Cause**: `project.c3proj` changed and is not valid JSON at the moment, typically while the editor or git is still writing it.
+
+**Solution**: Run the tool again once the save or checkout is done. The server keeps trying on every call and does not use the old project meanwhile.
 
 ## Mutation Tool Issues
 
@@ -103,7 +115,7 @@ Known gap: tools that edit the large file itself, such as `add_instance_to_layou
 
 **Cause**: The plugin is a third-party addon not in the project's `usedAddons` list. The server can only auto-register known Scirra built-in addons.
 
-**Solution**: Open the project in the Construct 3 editor, add an object using that plugin (which registers it), save, then restart the MCP server.
+**Solution**: Open the project in the Construct 3 editor, add an object using that plugin (which registers it), save and close it. The server sees the new addon on its next tool call (1.9.2 and older: restart the MCP server first).
 
 ### "Behavior X is not registered in usedAddons"
 
@@ -161,6 +173,7 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 - Fix a file with invalid JSON (`validate_project` names it as a `file-existence` error), or split a very large layout, so the server can read it
 - Use `force: true` if the match is a false alarm; the warning names the files again, and nothing in them is changed
 - `find_orphaned_objects` and `get_object_dependencies` report such objects as possibly used (`possiblyUsed`, `possiblyUsedObjects`, `possiblyReferencedIn`) instead of unused, for the same reason
+- An object whose own object type file is such a file has an unknown SID: `find_orphaned_objects` and `get_object_dependencies` list it in `unanalysedObjects` (with the file and reason) instead of calling it unused, `get_object_dependencies` marks it with `unanalysed`, and `analyze_performance` names it apart
 - *Its own file could not be parsed* (`"textSearch": "not-searched"`): `delete_object` or `delete_family` refuses because the object type's or family's own file is over the limit or not valid JSON, so its SID is unknown; `delete_event_sheet` refuses for the sheet's own file, since the functions and global variables it defines are unknown. Fix the file, or delete with `force: true`
 - A file saved as UTF-16 without a byte order mark, or in UTF-16BE, cannot be searched and refuses as `unreadable`; save it as UTF-8 (the editor does)
 
@@ -174,11 +187,11 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "Cannot generate a safe UID: project file(s) could not be scanned"
 
-**Cause**: `add_instance_to_layout` or `create_object` (for a global plugin) needs a new UID, which must be above every UID in the project. A layout or object type named in the error is registered in `project.c3proj` and exists, but could not be read at all, not even as text (e.g. a folder where the file should be, no read access, or a file too large to read into memory as text, about 512MB), so its UIDs are unknown. Nothing was written. Files over the 10MB read limit (up to that size) and files with invalid JSON do not cause this: they are scanned as text. A registered name whose file does not exist does not cause it either.
+**Cause**: `add_instance_to_layout` or `create_object` (for a global plugin) needs a new UID, which must be above every UID in the project. A layout or object type named in the error is registered in `project.c3proj` and exists, but could not be read at all, not even as text, so its UIDs are unknown. The error gives the reason after each name: `a folder in place of the file`, `no read access`, `could not be read (<code>)` for another file system error (such as a lock held by another program, e.g. a virus scanner or sync client), or the message of the path check for a name that leads out of the project folder. Nothing was written. Files over the 10MB read limit, whatever their size, and files with invalid JSON do not cause this: they are scanned as text, in any encoding, also when they hold NUL characters (UTF-16, or zeros at the end of a save cut short). A registered name whose file does not exist does not cause it either.
 
 **Solutions**:
 - Fix the file named in the error (`validate_project` lists it in `unscannedFiles` and gives the reason), or remove its name from `project.c3proj` if it is not needed
-- Then restart the MCP server, so the project is scanned again (a completed write through the tools also starts a new scan)
+- Then run the tool again: each UID request first scans the files named in the error again, so it works as soon as they can be read (1.9.2 and older: restart the MCP server, or make a write through the tools, so the project is scanned again)
 
 ### "... not found: names are matched with their letter case"
 
@@ -194,14 +207,14 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### Backup files (.bak)
 
-Writes through the project writer copy each file to `<file>.bak` next to it before changing or deleting it. There is only one `.bak` per file and every write to the same file overwrites it, so it holds the state before the **last** write to that file, not the state before your session (one request can write the same file twice, e.g. `create_object` with a new built-in addon writes `project.c3proj` twice). `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) and PNG image writes make no `.bak` (see [Safety Model](../README.md#safety-model)). Nothing deletes `.bak` files; `validate_project` lists them as `backup-file` info entries.
+Writes through the project writer copy each file to `<file>.bak` next to it before changing or deleting it, once per tool call. There is only one `.bak` per file and the next tool call that writes the same file overwrites it, so it holds the state before the **last tool call** that wrote that file, not the state before your session. A tool call that writes a file twice (e.g. `create_object` with a new built-in addon writes `project.c3proj` twice) backs it up before its first write (1.9.2 and older backed it up before each write, so the `.bak` could hold the call's own intermediate state). `register_addon`, `unregister_addon`, the runtime-bridge tools (`inject_runtime_bridge`, `remove_runtime_bridge`, and `export_for_preview` / `pack_project` when they inject the bridge) and PNG image writes make no `.bak` (see [Safety Model](../README.md#safety-model)). Nothing deletes `.bak` files; `validate_project` lists them as `backup-file` info entries.
 
 For undo across several steps, keep the project under git and commit before each session (see the [User Guide](USER-GUIDE.md#the-safe-editing-workflow)). To undo only the last change to one file:
 
 1. Find the `.bak` file next to the affected file
 2. Delete or rename the corrupted file
 3. Rename the `.bak` file to remove the `.bak` extension
-4. Restart the MCP server
+4. Go on: the next tool call sees the restored file (1.9.2 and older: restart the MCP server first)
 
 In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files, and `validate_project` lists them as `backup-file` info.
 

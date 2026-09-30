@@ -10,8 +10,10 @@ import { toolResult, toolError } from './shared.js';
 import { KNOWN_SCIRRA_PLUGINS, KNOWN_SCIRRA_BEHAVIORS } from '../construct3/templates.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
 import { atomicReplace } from '../construct3/atomic-write.js';
+import { withProjectSync } from './project-sync.js';
 
-export function registerProjectTools({ server, reader, writer }: MutationToolDeps) {
+export function registerProjectTools({ server: mcpServer, reader, writer }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   server.tool(
     'update_project_metadata',
     'Update project metadata (name, version, author, description)',
@@ -100,6 +102,8 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
         }
 
         const projectPath = reader.getProjectPath();
+        // Changed on disk since it was loaded: refused, like the writer's own updates (#51)
+        await writer.assertProjectFileCurrent();
         const content = await readFile(projectPath, 'utf-8');
         const project = parseJsonText(content);
 
@@ -154,6 +158,8 @@ export function registerProjectTools({ server, reader, writer }: MutationToolDep
         }
 
         const projectPath = reader.getProjectPath();
+        // Changed on disk since it was loaded: refused, like the writer's own updates (#51)
+        await writer.assertProjectFileCurrent();
         const content = await readFile(projectPath, 'utf-8');
         const project = parseJsonText(content);
 

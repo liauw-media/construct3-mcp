@@ -39,6 +39,7 @@ import {
   layerPathLabel,
   type LayerEntry,
 } from '../construct3/layers.js';
+import { withProjectSync } from './project-sync.js';
 
 /**
  * What delete_layout looks for in the text of a layout file it could not
@@ -112,7 +113,8 @@ function describeInstancePlace(entry: LayerEntry | undefined): string {
   return `${entry.depth > 0 ? 'sub-layer' : 'layer'} "${layerPathLabel(entry)}"`;
 }
 
-export function registerLayoutTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // ─── create_layout ────────────────────────────────────────
 
   server.tool(

@@ -20,6 +20,7 @@ import { existsSync } from 'node:fs';
 import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
+import { withProjectSync } from './project-sync.js';
 
 const BRIDGE_FILENAME = 'c3-runtime-bridge.js';
 
@@ -71,7 +72,8 @@ function removeBridgeFromScripts(c3proj: Record<string, unknown>): void {
   }
 }
 
-export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps) {
+export function registerRuntimeTools({ server: mcpServer, reader, writer }: RuntimeToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
 
   // ── inject_runtime_bridge ─────────────────────────────────
 
@@ -84,6 +86,8 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
         const projectDir = reader.getProjectDir();
         const bridgePath = join(projectDir, getBridgeScriptPath());
         const bridgeDir = dirname(bridgePath);
+        // project.c3proj changed on disk during this call: refused before the first write (#51)
+        await writer.assertProjectFileCurrent();
 
         // Ensure scripts directory exists
         if (!existsSync(bridgeDir)) {
@@ -137,6 +141,8 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
       try {
         const projectDir = reader.getProjectDir();
         const bridgePath = join(projectDir, getBridgeScriptPath());
+        // project.c3proj changed on disk during this call: refused before the script is deleted (#51)
+        await writer.assertProjectFileCurrent();
 
         // Remove the file
         const { unlink } = await import('node:fs/promises');
@@ -326,6 +332,8 @@ print(json.dumps({
         if (injectBridge) {
           const bridgePath = join(projectDir, getBridgeScriptPath());
           const bridgeDir = dirname(bridgePath);
+          // project.c3proj changed on disk during this call: refused before the first write (#51)
+          await writer.assertProjectFileCurrent();
 
           if (!existsSync(bridgeDir)) {
             await mkdir(bridgeDir, { recursive: true });
@@ -439,6 +447,8 @@ print(json.dumps({
         if (injectBridge) {
           const bridgePath = join(projectDir, getBridgeScriptPath());
           const bridgeDir = dirname(bridgePath);
+          // project.c3proj changed on disk during this call: refused before the first write (#51)
+          await writer.assertProjectFileCurrent();
           if (!existsSync(bridgeDir)) {
             await mkdir(bridgeDir, { recursive: true });
           }

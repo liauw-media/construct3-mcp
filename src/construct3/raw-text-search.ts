@@ -36,6 +36,19 @@
  * all). The start of the word, and a continuation outside ASCII, are checked
  * where a literal matched, looking up the literals of each length there
  * (not every name). docs/TROUBLESHOOTING.md has the measured times.
+ *
+ * The UID/SID scan of the ID generator (issue #49) reads such files the same
+ * way (scanFileIds, issue #59): streamed, so a file of any size costs memory
+ * for one chunk (and the SIDs found), not a string as long as the file, which
+ * JavaScript cannot hold beyond about 512MB. Unlike the search, it drops NUL
+ * characters instead of rejecting the file, and reads UTF-16BE as UTF-8. The
+ * entries it looks for are ASCII, and UTF-8 decoding keeps every ASCII byte
+ * as it is: in UTF-16 without a byte order mark, and in UTF-16BE, only NUL
+ * bytes stand between their characters, and the zeros at the end of a save
+ * cut short hold no entry. Dropping NUL characters can only make it find
+ * more entries or longer numbers, never miss a UID, so such a file does not
+ * block new UIDs. (A name search could miss a name outside ASCII in such a
+ * file, so searchFileText still rejects it.)
  */
 
 import { createReadStream } from 'fs';
@@ -370,18 +383,55 @@ export class RawTextEncodingError extends Error {
   readonly code = 'E_TEXT_ENCODING';
 }
 
+/**
+ * What streamFileText does with NUL characters and UTF-16BE: "reject" the
+ * file (the text search, which could miss a name outside ASCII in such a
+ * file), or "drop" the NUL characters and read UTF-16BE as UTF-8 (the
+ * UID/SID scan, whose entries are ASCII; see the top of this file).
+ */
+type NulHandling = 'reject' | 'drop';
+
 /** The encoding to stream a file in, from its first bytes: UTF-16LE after its byte order mark, otherwise UTF-8. */
-async function textEncodingOf(path: string): Promise<BufferEncoding> {
+async function textEncodingOf(path: string, nul: NulHandling): Promise<BufferEncoding> {
   const handle = await open(path, 'r');
   try {
     const { buffer, bytesRead } = await handle.read(Buffer.alloc(2), 0, 2, 0);
     if (bytesRead === 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return 'utf16le';
-    if (bytesRead === 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    if (bytesRead === 2 && buffer[0] === 0xfe && buffer[1] === 0xff && nul === 'reject') {
       throw new RawTextEncodingError('The file is UTF-16BE text, which the text search does not read');
     }
     return 'utf8';
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Stream a file as text, one chunk of CHUNK_SIZE bytes at a time, to
+ * `onPiece`, until it returns true (nothing more needed). The file is read
+ * as UTF-8, or as UTF-16LE after that byte order mark. With `nul` "reject"
+ * (the default), a file in UTF-16BE or with a NUL character rejects with a
+ * RawTextEncodingError; with "drop", UTF-16BE is read as UTF-8 and NUL
+ * characters are left out of the pieces. fs errors propagate unwrapped.
+ */
+async function streamFileText(
+  path: string,
+  onPiece: (piece: string) => boolean,
+  nul: NulHandling = 'reject',
+): Promise<void> {
+  const encoding = await textEncodingOf(path, nul);
+  const stream = createReadStream(path, { encoding, highWaterMark: CHUNK_SIZE });
+  try {
+    for await (const chunk of stream) {
+      let piece = chunk as string;
+      if (piece.includes('\u0000')) {
+        if (nul === 'reject') throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
+        piece = piece.replaceAll('\u0000', '');
+      }
+      if (onPiece(piece)) break;
+    }
+  } finally {
+    stream.destroy();
   }
 }
 
@@ -395,18 +445,145 @@ async function textEncodingOf(path: string): Promise<BufferEncoding> {
 export async function searchFileText(path: string, terms: readonly RawTextTerm[]): Promise<Set<string>> {
   const search = new RawTextSearch(terms);
   if (search.done) return search.finish();
-  const encoding = await textEncodingOf(path);
-  const stream = createReadStream(path, { encoding, highWaterMark: CHUNK_SIZE });
-  try {
-    for await (const piece of stream) {
-      if ((piece as string).includes('\u0000')) {
-        throw new RawTextEncodingError('The file holds NUL characters: it is not UTF-8 text');
-      }
-      search.push(piece as string);
-      if (search.done) break;
-    }
-  } finally {
-    stream.destroy();
-  }
+  await streamFileText(path, piece => {
+    search.push(piece);
+    return search.done;
+  });
   return search.finish();
+}
+
+// ─── UID and SID scan ────────────────────────────────────────
+
+/**
+ * `"uid": <digits>`, `"parent-uid": <digits>` (the parent a hierarchy link
+ * names) or `"sid": <digits>`, whitespace allowed around the colon; group 1
+ * is the key, group 2 the digits
+ */
+const ID_ENTRY = /"(uid|parent-uid|sid)"\s*:\s*(\d+)/g;
+/** The keys of ID_ENTRY with their quotes */
+const ID_KEYS = ['"uid"', '"parent-uid"', '"sid"'];
+/**
+ * Digits of a number that a piece boundary cuts off that are kept, leading
+ * zeros dropped: more than any finite double has, so Number() of the kept
+ * digits is Number() of all of them (Infinity beyond about 309 digits).
+ */
+const MAX_KEPT_DIGITS = 400;
+
+/** The digits of a number cut off by a piece boundary, as kept: leading zeros dropped, at most MAX_KEPT_DIGITS. */
+function keptDigits(digits: string): string {
+  return digits.replace(/^0+(?=\d)/, '').slice(0, MAX_KEPT_DIGITS);
+}
+
+/** The key of ID_KEYS (with its quotes) that `text` ends with, if one. */
+function idKeyAtEnd(text: string): string | undefined {
+  return ID_KEYS.find(key => text.endsWith(key));
+}
+
+/** The longest start of a key of ID_KEYS (`"`, `"u`, ..., `"parent-uid`, without the closing quote) that `text` ends with, or ''. */
+function idKeyStartAtEnd(text: string): string {
+  let longest = '';
+  for (const key of ID_KEYS) {
+    for (let length = key.length - 1; length > longest.length; length--) {
+      if (text.endsWith(key.slice(0, length))) {
+        longest = key.slice(0, length);
+        break;
+      }
+    }
+  }
+  return longest;
+}
+
+/**
+ * The start of an ID entry at the end of `text` that the next piece may
+ * complete, in the shortest form that matches the same way: the key or part
+ * of it (`"`, `"u`, `"ui`, `"uid`, `"uid"`, or of `"parent-uid"`), the key
+ * followed by whitespace (kept as one space), or the key and the colon
+ * (whitespace around it dropped). '' when the text does not end with one.
+ */
+function cutOffIdEntry(text: string): string {
+  const trimmed = text.trimEnd();
+  if (trimmed.endsWith(':')) {
+    const key = idKeyAtEnd(trimmed.slice(0, -1).trimEnd());
+    return key ? `${key}:` : '';
+  }
+  const key = idKeyAtEnd(trimmed);
+  if (key) return trimmed.length < text.length ? `${key} ` : key;
+  if (trimmed.length < text.length) return '';
+  return idKeyStartAtEnd(text);
+}
+
+/**
+ * Incremental scan for the UIDs and SIDs in the text of a layout or object
+ * type file the reader skipped (issue #49): every `"uid": <n>` and
+ * `"sid": <n>`, wherever it is, without parsing the JSON, and the UIDs that
+ * hierarchy links name as `"parent-uid": <n>` (a link to a deleted instance
+ * keeps its UID taken; a children entry's is a `"uid"`). push() each piece
+ * in order, then finish(): the highest UID and every SID, in text order.
+ * Between pieces only the start of an entry that the boundary cut off is
+ * kept (a few characters, and the digits of a number cut in two), so the
+ * scan finds what a scan of the whole text finds while its memory does not
+ * grow with the text (the SIDs aside).
+ */
+export class RawIdScan {
+  private highestUid = 0;
+  private readonly sids: number[] = [];
+  private carry = '';
+  private finished = false;
+
+  push(piece: string): void {
+    if (this.finished || piece.length === 0) return;
+    this.carry = this.scan(this.carry + piece, false);
+  }
+
+  finish(): { highestUid: number; sids: number[] } {
+    if (!this.finished && this.carry.length > 0) this.scan(this.carry, true);
+    this.carry = '';
+    this.finished = true;
+    return { highestUid: this.highestUid, sids: this.sids };
+  }
+
+  /**
+   * Record the entries in `text`. Unless it is the end of the file, an
+   * entry whose number reaches the end of `text` may go on in the next
+   * piece: it is returned (the carry for the next piece) instead, as is the
+   * start of an entry at the end.
+   */
+  private scan(text: string, last: boolean): string {
+    for (const match of text.matchAll(ID_ENTRY)) {
+      if (!last && match.index + match[0].length === text.length) {
+        return `"${match[1]}":${keptDigits(match[2])}`;
+      }
+      const value = Number(match[2]);
+      if (match[1] === 'sid') {
+        this.sids.push(value);
+      } else if (value > this.highestUid) {
+        this.highestUid = value;
+      }
+    }
+    return last ? '' : cutOffIdEntry(text);
+  }
+}
+
+/** The UIDs and SIDs in a whole text (see RawIdScan). */
+export function scanIdsInText(content: string): { highestUid: number; sids: number[] } {
+  const scan = new RawIdScan();
+  scan.push(content);
+  return scan.finish();
+}
+
+/**
+ * Scan a file for its UIDs and SIDs (see RawIdScan), streaming it: no size
+ * limit, memory for one chunk and the SIDs found. Read as UTF-8, or as
+ * UTF-16LE after its byte order mark, without its NUL characters, so UTF-16
+ * without a byte order mark and UTF-16BE are read too (see the top of this
+ * file): no file is rejected for its encoding. fs errors propagate unwrapped
+ * (ENOENT: no file).
+ */
+export async function scanFileIds(path: string): Promise<{ highestUid: number; sids: number[] }> {
+  const scan = new RawIdScan();
+  await streamFileText(path, piece => {
+    scan.push(piece);
+    return false;
+  }, 'drop');
+  return scan.finish();
 }
