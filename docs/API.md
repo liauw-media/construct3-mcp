@@ -514,6 +514,7 @@ Delete an object type from the project.
 - Backs up the JSON file and removes from c3proj
 - Keeps the object's image files as `<file>.bak` (`<file>.1.bak`, … when that name is taken), as `delete_frame_from_animation` keeps the image of a deleted frame: every frame image of every animation (animation folders included), `images/<object>-<animation>-NNN.<ext>` with the extension of the frame's `fileType`, or the single image `images/<object>.<ext>` of a Tiled Background, 9-patch and other plugins that save one `image`; names are compared ignoring case and Unicode normalization. A warning names them. A file that another object type's frames also use (the same name) is left in place, as is one named after an object type whose file could not be parsed. The image files are renamed first; if the object file cannot be deleted or `project.c3proj` cannot be updated, the object file is restored from its backup and the images are renamed back (the error names any file that could not be put back; an object file saved again in the editor meanwhile is left as it is, see [Error Response](#error-response)). When the object's own file could not be parsed (deleted with `force`), its images are unknown and left as they are, with a warning
 
+### `create_family`
 
 Create a new family. Families group object types of one plugin and share instance variables and behaviors across them.
 
