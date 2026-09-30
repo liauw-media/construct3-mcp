@@ -393,8 +393,10 @@ describe('event variable names follow the editor\'s scope rules', () => {
     expect((await readJson('eventSheets/MainSheet.json')).events.some((e: { name?: string }) => e.name === 'Score')).toBe(false);
   });
 
-  it('move_events_between_sheets copies a function or a group with locals to another sheet', async () => {
-    await expectCreated('move_events_between_sheets', { sourceSheet: 'MainSheet', targetSheet: 'Rules', sids: [700000000000008, 700000000000002] });
+  it('move_events_between_sheets moves a function and copies a group with locals to another sheet', async () => {
+    // A copied function block would share its name with the original, so functions are moved (#38)
+    await expectCreated('move_events_between_sheets', { sourceSheet: 'MainSheet', targetSheet: 'Rules', sids: [700000000000008], deleteSource: true });
+    await expectCreated('move_events_between_sheets', { sourceSheet: 'MainSheet', targetSheet: 'Rules', sids: [700000000000002] });
     const titles = (await readJson('eventSheets/Rules.json')).events.map((e: { functionName?: string; title?: string }) => e.functionName ?? e.title);
     expect(titles.slice(-2)).toEqual(['AddPoints', 'Combat']);
   });

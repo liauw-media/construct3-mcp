@@ -166,7 +166,7 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "Possible uses in files that could not be parsed"
 
-**Cause**: A delete or removal (`delete_object`, `delete_family`, `delete_layout`, `delete_event_sheet`, `delete_event_from_sheet`, `update_object_properties`, `update_family`, `rename_animation`) refused with `delete_blocked` or `update_blocked` because a registered layout, event sheet or family file it could not parse (over the 10MB read limit, not valid JSON) names what the tool checks for. The cross-reference index cannot see inside such a file, so the tool searched its text for the names instead (whole words, ignoring case; `delete_layout` looks for instances and an event sheet binding in the layout's own file). A match is a *possible* use: the name may just as well be in another string there. `unscannedFiles` lists each file with its reason and `textSearch`: `possible-use` (with the `names` found), `unreadable` (the file exists but cannot be read even as text, e.g. a folder in its place or no read access; this refuses too) or `no-match` (only a warning). A registered name without a file is not listed and does not block.
+**Cause**: A delete, removal or move (`delete_object`, `delete_family`, `delete_layout`, `delete_event_sheet`, `delete_event_from_sheet`, `move_events_between_sheets`, `update_object_properties`, `update_family`, `rename_animation`) refused with `delete_blocked`, `move_blocked` or `update_blocked` because a registered layout, event sheet or family file it could not parse (over the 10MB read limit, not valid JSON) names what the tool checks for. The cross-reference index cannot see inside such a file, so the tool searched its text for the names instead (whole words, ignoring case; `delete_layout` looks for instances and an event sheet binding in the layout's own file). A match is a *possible* use: the name may just as well be in another string there. `unscannedFiles` lists each file with its reason and `textSearch`: `possible-use` (with the `names` found), `unreadable` (the file exists but cannot be read even as text, e.g. a folder in its place or no read access; this refuses too) or `no-match` (only a warning). A registered name without a file is not listed and does not block.
 
 **Solutions**:
 - Open the project in the Construct 3 editor and check the named file for the use; remove it there if it is real
@@ -174,8 +174,16 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 - Use `force: true` if the match is a false alarm; the warning names the files again, and nothing in them is changed
 - `find_orphaned_objects` and `get_object_dependencies` report such objects as possibly used (`possiblyUsed`, `possiblyUsedObjects`, `possiblyReferencedIn`) instead of unused, for the same reason
 - An object whose own object type file is such a file has an unknown SID: `find_orphaned_objects` and `get_object_dependencies` list it in `unanalysedObjects` (with the file and reason) instead of calling it unused, `get_object_dependencies` marks it with `unanalysed`, and `analyze_performance` names it apart
-- *Its own file could not be parsed* (`"textSearch": "not-searched"`): `delete_object` or `delete_family` refuses because the object type's or family's own file is over the limit or not valid JSON, so its SID is unknown. Fix the file, or delete with `force: true`
+- *Its own file could not be parsed* (`"textSearch": "not-searched"`): `delete_object` or `delete_family` refuses because the object type's or family's own file is over the limit or not valid JSON, so its SID is unknown; `delete_event_sheet` refuses for the sheet's own file, since the functions and global variables it defines are unknown. Fix the file, or delete with `force: true`
 - A file saved as UTF-16 without a byte order mark, or in UTF-16BE, cannot be searched and refuses as `unreadable`; save it as UTF-8 (the editor does)
+
+### "The check ... stopped at its traversal limit"
+
+**Cause**: `delete_event_sheet`, `delete_event_from_sheet` or `move_events_between_sheets` looks for the uses of the functions and event variables it deletes or moves by walking the events of all event sheets, and stops after 100,000 events (sub-events included). In a project that large, the uses beyond that point are unknown, so the tool refuses with `delete_blocked` or `move_blocked`, as it does for a file it could not parse. Nothing was written. A sheet that defines no function or global variable, an event that removes neither, and a move of events that declare no event variable need no such check.
+
+**Solutions**:
+- Find the uses yourself: `get_function_map` lists the call sites of a function; for a variable, search the event sheet files for its name
+- Then use `force: true`; the warning says again that the check stopped at its limit
 
 ### "Cannot generate a safe UID: project file(s) could not be scanned"
 
@@ -187,9 +195,9 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "... not found: names are matched with their letter case"
 
-**Cause**: `update_object_properties` or `update_family` was given a name that differs from the registered object type or family name only in letter case. On Windows and macOS such a name would open the file too, but the checks and the layout updates know the entity by its registered name only, so the call is refused.
+**Cause**: `update_object_properties` or `update_family` was given a name that differs from the registered object type or family name only in letter case, or `add_event_to_sheet`, `delete_event_from_sheet`, `update_event_variable` or `move_events_between_sheets` a sheet name that differs from the registered event sheet name only in letter case. On Windows and macOS such a name would open the file too, but the checks and the layout updates know the entity by its registered name only, so the call is refused. (For event sheets, the checks across sheets saw the sheet twice, and a move into the source sheet spelled in another case lost the moved events.)
 
-**Solution**: Use the registered name the error suggests (`list_objects`, `list_families`).
+**Solution**: Use the registered name the error suggests (`list_objects`, `list_families`, `list_eventsheets`).
 
 ### Sprite frames show the wrong image, or `validate_project` reports `frame-image`
 

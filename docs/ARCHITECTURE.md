@@ -233,7 +233,7 @@ Supporting modules next to the templates:
 | `construct3/disk-state.ts` | File states (modification time, size, file id), the tool call scope (`AsyncLocalStorage`: states the call read, files it backed up and changed, readers it checked), `StaleFileError` |
 | `construct3/atomic-write.ts` | Temp-file-and-rename writes that keep an existing file's name on disk; case-insensitive file lookup |
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
-| `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names: scope, System expression names, characters it refuses |
+| `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names (scope, System expression names, characters it refuses) and for function names (unique in the project ignoring case, characters only with a return type) |
 | `construct3/instance-behaviors.ts` | The behavior entries every layout instance carries (object and family behaviors, with default property values) |
 | `construct3/animation-rename.ts` | Sprite animations in animation folders, and what renaming one changes: frame image file names, `initial-animation` of layout instances, event sheet strings naming it (counted for a warning); the frame image files that move one index up or down when a frame is inserted or deleted |
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
@@ -262,7 +262,7 @@ A shared cross-reference index and sixteen analysis modules, several of which bu
 | `load-rules.ts` | Rules the Construct 3 editor enforces when it opens a project (expression syntax, empty parameters, trigger and else placement, name and SID clashes, family plugins); used by `validate_project` and the pre-write checks |
 | `legacy-behavior-keys.ts` | Scan and repair of the legacy `"behavior-type"` key |
 | `legacy-event-shapes.ts` | Scan and repair of event shapes older versions wrote (block `isElse`, condition `isOr`, old function calls, one-string scripts) |
-| `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event would leave pointing at nothing (`delete_event_from_sheet`) |
+| `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event or a whole event sheet would leave pointing at nothing (`delete_event_from_sheet`, `delete_event_sheet`) |
 | `unscanned-uses.ts` | Possible uses in registered files the bulk reads skipped (over the 10MB read limit, not valid JSON): the index lists these files (`unscannedFiles`), and the reference checks and `find_orphaned_objects` / `get_object_dependencies` search them as text; a match or an unreadable file refuses without force |
 | `behavior-refs.ts` | Behavior name checks against objects and families |
 | `group-settings.ts` | Event group settings (`get_group_settings`) |

@@ -23,6 +23,8 @@
  *
  * Object type and family names are not compared: the editor accepts event
  * variables named like an object.
+ *
+ * Function names follow rules of their own (see Function names below).
  */
 
 import type { C3Event } from './types.js';
@@ -309,4 +311,104 @@ export function findEventVariableNameProblem(
   const expression = findNameClash(name, SYSTEM_EXPRESSION_NAMES);
   if (expression !== undefined) return { problem: 'system-expression', expression };
   return undefined;
+}
+
+// ─── Function names ──────────────────────────────────────────
+
+/**
+ * Function names, as the editor's Function dialog checks them (the
+ * EditFunctionBlock dialog of releases r449 and r495.2, which agree):
+ * 1. A function with a return type ("number", "string", "any") can be used in
+ *    expressions, so its name must come out of the name cleanup unchanged
+ *    (the rules of invalidEventVariableNameReason). A function without one
+ *    ("none") only needs a name that is not empty: the dialog then accepts
+ *    spaces and punctuation too.
+ * 2. It must not match, ignoring case, a System expression the editor treats
+ *    as a built-in function ("reserved"). The editor code names these by a
+ *    set of expression ids that could not be read out, so every System
+ *    expression name is refused (SYSTEM_EXPRESSION_NAMES, a superset).
+ * 3. It must not match, ignoring case, the name of another function block
+ *    anywhere in the project ("already used"): the editor looks functions up
+ *    ignoring case, and a call to such a name is ambiguous.
+ * The editor renames a pasted function block whose name is in use. Its loader
+ * reads function names without checking them.
+ */
+
+/** A function block in an event sheet. */
+export interface FunctionBlockName {
+  name: string;
+  sheet: string;
+  /** JSON path of the function block, e.g. "events[2].children[0]" */
+  eventPath: string;
+  sid?: number;
+}
+
+/** Every function block in `sheets` (sheet name → events), in sheet order. */
+export function functionBlockNames(sheets: ReadonlyMap<string, readonly C3Event[]>): FunctionBlockName[] {
+  const found: FunctionBlockName[] = [];
+  const walk = (events: readonly C3Event[], sheet: string, path: string, depth: number) => {
+    if (depth > 50) return;
+    events.forEach((event, i) => {
+      const eventPath = `${path}[${i}]`;
+      const name = (event as { functionName?: unknown }).functionName;
+      if (event.eventType === 'function-block' && typeof name === 'string') {
+        const sid = (event as { sid?: unknown }).sid;
+        found.push({ name, sheet, eventPath, ...(typeof sid === 'number' ? { sid } : {}) });
+      }
+      walk(childEvents(event), sheet, `${eventPath}.children`, depth + 1);
+    });
+  };
+  for (const [sheet, events] of sheets) walk(events, sheet, 'events', 0);
+  return found;
+}
+
+/** Why the editor would refuse a function name, in the order its dialog checks. */
+export type FunctionNameProblem =
+  | { problem: 'invalid'; reason: string }
+  | { problem: 'reserved'; expression: string }
+  | { problem: 'in-use'; use: FunctionBlockName };
+
+/**
+ * The first reason the editor would refuse `name` for a new function with
+ * `returnType` next to the function blocks `existing` (from
+ * functionBlockNames), or undefined when it would accept it.
+ */
+export function findFunctionNameProblem(
+  name: string,
+  returnType: string,
+  existing: readonly FunctionBlockName[],
+): FunctionNameProblem | undefined {
+  if (returnType !== 'none') {
+    const reason = invalidEventVariableNameReason(name);
+    if (reason) return { problem: 'invalid', reason };
+  }
+  if (name === '') return { problem: 'invalid', reason: 'it is empty' };
+  const expression = findNameClash(name, SYSTEM_EXPRESSION_NAMES);
+  if (expression !== undefined) return { problem: 'reserved', expression };
+  const clash = findNameClash(name, existing.map(e => e.name));
+  if (clash !== undefined) return { problem: 'in-use', use: existing.find(e => e.name === clash)! };
+  return undefined;
+}
+
+/** Groups of two or more function blocks whose names match ignoring case, in the order found. */
+export function duplicateFunctionNames(functions: readonly FunctionBlockName[]): FunctionBlockName[][] {
+  const groups = new Map<string, FunctionBlockName[]>();
+  for (const f of functions) {
+    const key = nameKey(f.name);
+    groups.set(key, [...(groups.get(key) ?? []), f]);
+  }
+  return [...groups.values()].filter(g => g.length > 1);
+}
+
+/**
+ * The duplicate groups of `after` that a change created or grew: function
+ * names (ignoring case) held by more function blocks after it than before.
+ */
+export function newDuplicateFunctionNames(
+  before: readonly FunctionBlockName[],
+  after: readonly FunctionBlockName[],
+): FunctionBlockName[][] {
+  const countBefore = new Map<string, number>();
+  for (const f of before) countBefore.set(nameKey(f.name), (countBefore.get(nameKey(f.name)) ?? 0) + 1);
+  return duplicateFunctionNames(after).filter(g => g.length > (countBefore.get(nameKey(g[0].name)) ?? 0));
 }

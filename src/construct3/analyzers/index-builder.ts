@@ -513,6 +513,12 @@ export class ProjectIndex {
    * looks functions up ignoring case); use getFunctionCalls.
    */
   functionDefinitions: Map<string, { sheet: string; params: string[] }> = new Map();
+  /**
+   * Every function block, in sheet order. functionDefinitions keeps one
+   * entry per exact name, so function blocks whose names match (which the
+   * editor refuses to create) are listed here only.
+   */
+  functionDefinitionList: Array<{ name: string; sheet: string; params: string[] }> = [];
   functionCalls: Map<string, FunctionCallSite[]> = new Map();
 
   /** Family membership */
@@ -701,7 +707,10 @@ export class ProjectIndex {
 
         // Record function definition. The editor (and add_event_to_sheet) saves the
         // parameters under functionParameters; "parameters" is only read when that is absent
-        this.functionDefinitions.set(funcName, { sheet: sheetName, params: functionParameterNames(func) });
+        const paramNames = functionParameterNames(func);
+        this.functionDefinitions.set(funcName, { sheet: sheetName, params: paramNames });
+
+        this.functionDefinitionList.push({ name: funcName, sheet: sheetName, params: paramNames });
 
         // Index conditions & actions
         if (func.conditions) {

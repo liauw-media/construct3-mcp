@@ -29,7 +29,7 @@ This guide is for Construct 3 developers who want to use the server with Claude 
 construct3-mcp is a small program (an "MCP server") that your AI tool starts in the background. It gives the AI 71 tools, 9 resources (5 fixed ones and 4 templates that take the name of an object, event sheet, layout or manual topic) and 7 prompts for one Construct 3 project:
 
 - **Read and explain**: list objects, layouts, event sheets, families, timelines and addons, show an event sheet as a readable outline with the editor's event numbers, find where an object is used, map functions, find unused objects and assets.
-- **Check**: `validate_project` runs 26 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
+- **Check**: `validate_project` runs 27 checks, including rules the Construct 3 editor enforces when it opens a project. `find_runtime_traps` looks for logic that loads fine but hangs or does nothing.
 - **Edit**: create, change and delete objects, families, event sheets and events, layouts, layers, instances, animations and timelines, and change the project metadata (name, version, author, description). Names and references are checked before anything is written, and most rewritten files get a `.bak` copy (exceptions under [.bak files](#bak-files)).
 - **Prepare runtime testing**: add a "bridge" script to your project so you (or a browser-automation tool) can read variables and call functions in a running preview.
 
@@ -402,7 +402,7 @@ You don't need tool names. Ask in plain language and the AI picks the tools. The
 "Is the project OK?" calls `validate_project`:
 
 ```json
-{ "valid": true, "complete": true, "summary": { "errors": 0, "warnings": 0, "info": 0, "checksRun": 26, "entitiesScanned": 3, "unscanned": 0 }, "errors": [], "warnings": [], "info": [], "unscannedFiles": [] }
+{ "valid": true, "complete": true, "summary": { "errors": 0, "warnings": 0, "info": 0, "checksRun": 27, "entitiesScanned": 3, "unscanned": 0 }, "errors": [], "warnings": [], "info": [], "unscannedFiles": [] }
 ```
 
 ### Make changes
@@ -626,6 +626,7 @@ Defaults to know:
 - `fix_legacy_behavior_keys` and `fix_legacy_event_shapes` only report by default (`dryRun: true`).
 - `force: true` means different things per tool:
   - On `delete_object`, `delete_family`, `delete_event_sheet`, `delete_event_from_sheet`, `delete_layout`, `update_object_properties` and `update_family` it skips the reference checks and leaves the references behind.
+  - On `move_events_between_sheets` it moves an event variable out of the scope of events that still use it (e.g. a used global variable into a group) and lists those uses; without it such a move is refused.
   - On `delete_layer` it deletes the layer together with the instances on it.
   - `unregister_addon` checks no references at all; `force` only allows removing a Scirra built-in addon. It also removes an addon that objects still use (it only adds the warning `If any objects/behaviors still reference it, C3 will error on load.`). Before you approve it, ask which objects use the addon. Afterwards `validate_project` reports leftover uses as `missing-addon` warnings, while the project still counts as `"valid": true`.
   - The other delete tools (`delete_animation`, `delete_frame_from_animation`, `delete_instance_from_layout`, `delete_timeline`, `remove_event_from_sheet`) have no `force` option.
