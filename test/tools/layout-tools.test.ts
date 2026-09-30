@@ -433,7 +433,7 @@ describe('add_instance_to_layout', () => {
     expect(world.originY).toBe(1);
   });
 
-  it('warns on unknown instanceVariable key', async () => {
+  it('refuses an instanceVariables key the object and its families have no variable of', async () => {
     const { server } = setup({
       objects: new Map([['Player', {
         name: 'Player', 'plugin-id': 'Sprite', sid: 1,
@@ -454,10 +454,9 @@ describe('add_instance_to_layout', () => {
       x: 0, y: 0,
       instanceVariables: { unknownVar: 42 },
     });
-    const data = parseResult(result);
-    expect(data.success).toBe(true);
-    expect(data.warnings).toBeDefined();
-    expect(data.warnings.some((w: string) => w.includes('unknownVar'))).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('"Player" and its families have no instance variable "unknownVar"');
+    expect(result.content[0].text).toContain('Its instance variables: health (number)');
   });
 
   it('warns on unknown behavior key', async () => {
@@ -902,6 +901,10 @@ describe('update_instance', () => {
 
   it('updates instance variables', async () => {
     const { server, writer } = setup({
+      objects: new Map([['Player', {
+        name: 'Player', 'plugin-id': 'Sprite', sid: 1, isGlobal: false, behaviorTypes: [],
+        instanceVariables: [{ name: 'health', type: 'number', sid: 2 }, { name: 'speed', type: 'number', sid: 3 }],
+      }]]),
       layouts: new Map([['Level 1', {
         ...makeLayout(),
         layers: [

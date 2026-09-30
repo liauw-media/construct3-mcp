@@ -56,6 +56,10 @@ construct3-mcp/
 │   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
+│   │   ├── instance-variables.ts   # Instance variable values and effect entries on layout instances
+│   │   ├── hierarchy.ts            # Hierarchy (scene graph) links between layout instances
+│   │   ├── layer-references.ts     # Event sheet strings that name a layer (update_layer rename)
+│   │   ├── object-images.ts        # An object type's image files in images/ (kept as .bak on delete)
 │   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes, frame image moves on frame insert/delete
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
@@ -81,6 +85,7 @@ construct3-mcp/
 │   │       ├── delete-references.ts # Function and variable names an event or sheet delete would leave dangling
 │   │       ├── unscanned-uses.ts   # Possible uses in registered files the bulk reads skipped
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
+│   │       ├── effect-uses.ts      # Conditions/actions that name an effect of their object
 │   │       ├── group-settings.ts   # Event group settings
 │   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
 │   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
@@ -199,7 +204,8 @@ Key things to know when working with Construct 3 project files:
 - **c3proj containers** use `{ items: string[], subfolders: Subfolder[] }` recursive structure
 - **usedAddons** in c3proj must list every plugin, behavior, and effect used
 - **Global plugins** (Audio, AJAX, Mouse, etc.) use `singleglobal-inst` instead of layout placement
-- **Layout instances** carry a `behaviors` entry (`{ properties: {...} }`) for every behavior of their object type and of its families, family behaviors first (`instance-behaviors.ts`)
+- **Layout instances** carry a `behaviors` entry (`{ properties: {...} }`) for every behavior of their object type and of its families, family behaviors first (`instance-behaviors.ts`), a value in `instanceVariables` for every instance variable of the object and its families, family variables first, and an `effects` entry per effect (`instance-variables.ts`)
+- **Hierarchies**: both sides of a link are stored in `sceneGraphData` (the child's `"parent-uid"`, the parent's `children` entry), by UID; a tool that removes instances removes the links to them (`hierarchy.ts`)
 - **Image files** are named `images/<object>-<animation>-<frame, 3 digits>.png` (TiledBg: `images/<object>.png`), the whole name lowercased; `.jpg` for a JPEG frame. The number is the frame's index, so inserting or deleting a frame renames the image files of the frames after it (`planFrameImageShift` in `animation-rename.ts`)
 - **Event shapes** follow editor-saved sheets (`event-shapes.ts`): Else is a System `else` condition at index 0 (conditions after it make an else-if), an OR block has `"isOrBlock": true` on the event, a function call is `{ callFunction, sid, parameters: [positional arguments] }` without `id`/`objectClass`, and a script action is `{ type: "script", language: "javascript", script: [lines] }`. Never write the block-level `isElse` or per-condition `isOr` keys older versions wrote
 - **Behavior conditions/actions** name their behavior under `behaviorType`; a condition or action that names its behavior only under the legacy `behavior-type` key makes the editor refuse to open the project (a leftover `behavior-type` next to a valid `behaviorType` is ignored)

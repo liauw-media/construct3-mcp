@@ -273,7 +273,8 @@ describe('update_object_properties on sub-layer instances', () => {
     expect(data.warnings).toContain('Updated instances in layout(s): Layout1');
     const synced = subLayer(writtenLayout(writer), 'Main', 'HUD', 'Buttons').instances[0];
     expect(synced.behaviors).toEqual({});
-    expect(synced.instanceVariables).toEqual({});
+    // The new variable's default value, as the editor stores a value for every variable
+    expect(synced.instanceVariables).toEqual({ hp: 0 });
   });
 });
 

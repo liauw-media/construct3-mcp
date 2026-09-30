@@ -150,7 +150,7 @@ Same as above but for behaviors. Add a behavior of that type to any object in th
 
 ### "Family is still referenced"
 
-**Cause**: `delete_family` found events or object properties that name the family, or conditions, actions and expressions that use its instance variables or behaviors through a member object type (`references.memberUses`).
+**Cause**: `delete_family` found events or object properties that name the family, or conditions, actions and expressions that use its instance variables or behaviors through a member object type (`references.memberUses`), or conditions and actions on a member that name one of its effects (`references.effectUses`).
 
 **Solutions**:
 - Remove those uses first, then delete
@@ -216,7 +216,7 @@ For undo across several steps, keep the project under git and commit before each
 3. Rename the `.bak` file to remove the `.bak` extension
 4. Go on: the next tool call sees the restored file (1.9.2 and older: restart the MCP server first)
 
-In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken); their `warnings` name these files, and `validate_project` lists them as `backup-file` info.
+In `images/`, `add_frame_to_animation` and `delete_frame_from_animation` keep a deleted frame's image and any file they would otherwise replace as `<file>.bak` (`<file>.1.bak`, … when that name is taken), and `delete_object` keeps the image files of the object it deletes the same way; their `warnings` name these files, and `validate_project` lists them as `backup-file` info. Image files that older versions of `delete_object` left in place are listed as `orphaned-image` info.
 
 ## Build Issues
 

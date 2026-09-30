@@ -20,6 +20,7 @@ import {
 } from './project-reader.js';
 import type { AnimationsContainer, C3Event, Layout, RootFileFolders } from './types.js';
 import { forEachLayoutInstance, layerEntries } from './layers.js';
+import { hierarchyUids } from './hierarchy.js';
 import { diskEpochOf, ensureCachesFreshOf } from './disk-state.js';
 
 const SID_MIN = 100_000_000_000_000; // 15-digit minimum
@@ -443,6 +444,9 @@ export class IdGenerator {
     forEachLayoutInstance(layout, instance => {
       ids.sid(instance.sid);
       ids.uid(instance.uid);
+      // A hierarchy link to a deleted instance keeps its UID taken: a new
+      // instance with that UID would otherwise become the link's target
+      for (const uid of hierarchyUids(instance)) ids.uid(uid);
     });
   }
 }

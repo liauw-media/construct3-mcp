@@ -19,7 +19,7 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
 │  ┌──────────▼───────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                    │  │
 │  │  ProjectReader · ProjectWriter · IdGenerator             │  │
-│  │  Templates · Analyzers (16) · Cross-Reference Index      │  │
+│  │  Templates · Analyzers (17) · Cross-Reference Index      │  │
 │  │  Runtime bridge · ZIP writer · PNG generator             │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
@@ -235,6 +235,10 @@ Supporting modules next to the templates:
 | `construct3/names.ts` | Name comparison the way the editor does it (ignoring case) for names and project-bar folders |
 | `construct3/event-variable-names.ts` | The editor's rules for event variable and function parameter names (scope, System expression names, characters it refuses) and for function names (unique in the project ignoring case, characters only with a return type) |
 | `construct3/instance-behaviors.ts` | The behavior entries every layout instance carries (object and family behaviors, with default property values) |
+| `construct3/instance-variables.ts` | The instance variable values and effect entries every layout instance carries (object and family variables, family first), kept in step when variables, members or families change |
+| `construct3/hierarchy.ts` | Hierarchy (scene graph) links between the instances of a layout: removing links to deleted instances, the UIDs links name, links that do not hold up |
+| `construct3/layer-references.ts` | Event sheet strings that name a layer: `"layer"` parameters that are the quoted name (rewritten by a rename) and other string literals (reported) |
+| `construct3/object-images.ts` | The frame and single image files of an object type in `images/`, kept as `.bak` when the object is deleted |
 | `construct3/animation-rename.ts` | Sprite animations in animation folders, and what renaming one changes: frame image file names, `initial-animation` of layout instances, event sheet strings naming it (counted for a warning); the frame image files that move one index up or down when a frame is inserted or deleted |
 | `construct3/json-format.ts` | On-disk text style: detects and reapplies line endings, trailing newline and BOM |
 | `construct3/layers.ts` | The layer tree of a layout: walks every layer and nested sub-layer and their instances (non-world instances included), finds layers and instances, compares layer names ignoring case; every walk over layers or layout instances goes through it |
@@ -248,7 +252,7 @@ Supporting modules next to the templates:
 
 ### 6. Analyzers (`src/construct3/analyzers/`)
 
-A shared cross-reference index and sixteen analysis modules, several of which build on the index:
+A shared cross-reference index and seventeen analysis modules, several of which build on the index:
 
 | Module | Purpose |
 |--------|---------|
@@ -265,6 +269,7 @@ A shared cross-reference index and sixteen analysis modules, several of which bu
 | `delete-references.ts` | Calls, function map registrations and variable uses that deleting an event or a whole event sheet would leave pointing at nothing (`delete_event_from_sheet`, `delete_event_sheet`) |
 | `unscanned-uses.ts` | Possible uses in registered files the bulk reads skipped (over the 10MB read limit, not valid JSON): the index lists these files (`unscannedFiles`), and the reference checks and `find_orphaned_objects` / `get_object_dependencies` search them as text; a match or an unreadable file refuses without force |
 | `behavior-refs.ts` | Behavior name checks against objects and families |
+| `effect-uses.ts` | Conditions and actions that name an effect of their object (`"effect"` parameters), for the family effect checks of `delete_family` and `update_family` |
 | `group-settings.ts` | Event group settings (`get_group_settings`) |
 | `event-outline.ts` | Editor event numbers, `locate_event` and the paged `get_eventsheet_outline` |
 | `runtime-traps.ts` | Signal pairing and order, script/function-parameter traps (`find_runtime_traps`) |

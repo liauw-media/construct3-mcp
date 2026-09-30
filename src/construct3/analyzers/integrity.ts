@@ -23,6 +23,8 @@ import { scanLegacyEventShapes, describeLegacyEventShapeHit } from './legacy-eve
 import { collectFunctionSignatures, functionsObjectName } from '../event-shapes.js';
 import { checkBehaviorName } from './behavior-refs.js';
 import { findMissingBehaviorEntries } from '../instance-behaviors.js';
+import { findHierarchyLinkProblems, type HierarchyLinkProblem } from '../hierarchy.js';
+import { namedAfterAnyObject } from '../object-images.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
 import { nameKey } from '../names.js';
@@ -154,6 +156,7 @@ export async function validateProjectIntegrity(
 
   // Warning checks
   checkDuplicateUids(layouts, objects, warnings);
+  checkHierarchyLinks(layouts, warnings);
   await checkBrokenObjectReferences(reader, objects, families, layouts, warnings);
   await checkMissingBehaviorsAndVariables(reader, families, warnings);
   checkDuplicateLayerNames(layouts, warnings);
@@ -170,13 +173,14 @@ export async function validateProjectIntegrity(
 
   // Frame images: warnings for frames without one, info for unused ones
   await checkFrameImages(reader, objects, warnings, info);
+  await checkOrphanedImages(reader, [...new Set([...registeredObjects, ...objects.keys()])], info);
 
   // 13 original checks + legacy-behavior-key + legacy-event-shape +
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
   // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable,
-  // frame-image, duplicate-function-name
-  const checksRun = 27;
+  // frame-image, hierarchy-link, orphaned-image, duplicate-function-name
+  const checksRun = 29;
 
   return {
     valid: errors.length === 0 && unscannedFiles.length === 0,
@@ -1198,6 +1202,41 @@ function checkDuplicateLayerNames(layouts: Map<string, Layout>, warnings: Integr
   }
 }
 
+// ─── Hierarchy Links ─────────────────────────────────────────
+
+const HIERARCHY_PROBLEMS: Record<HierarchyLinkProblem['problem'], (p: HierarchyLinkProblem) => string> = {
+  'missing-parent': p => `names parent UID ${p.target}, which is no instance of this layout`,
+  'missing-child': p => `lists child UID ${p.target}, which is no instance of this layout`,
+  'parent-not-linked': p => `names parent UID ${p.target}, which does not list it as a child`,
+  'child-not-linked': p => `lists child UID ${p.target}, which names another parent or none`,
+};
+
+/**
+ * Hierarchy (scene graph) links that point at no instance of the layout, or
+ * whose other side does not name the instance (see hierarchy.ts). Older
+ * versions of delete_instance_from_layout and delete_layer left such links
+ * behind, and a new instance can get the UID of a deleted one, so a link left
+ * behind can point at an unrelated instance. What the editor does with such a
+ * link when it opens the project is not verified, so a warning.
+ */
+function checkHierarchyLinks(layouts: Map<string, Layout>, warnings: IntegrityIssue[]): void {
+  for (const [layoutName, layout] of layouts) {
+    for (const problem of findHierarchyLinkProblems(layout)) {
+      const where = problem.entry ? `${layerLocation(problem.entry)}/` : 'nonworld:';
+      warnings.push({
+        check: 'hierarchy-link',
+        entity: `layouts/${layoutName}/${where}inst:${problem.type}`,
+        message: `The hierarchy record of "${problem.type}" UID ${problem.uid} in layout "${layoutName}" ` +
+          `${HIERARCHY_PROBLEMS[problem.problem](problem)}. Hierarchy links name UIDs, and a new instance can get the UID ` +
+          'of a deleted one, so a link left behind by a deletion can point at an unrelated instance.',
+        suggestion: 'Fix the link in the Construct 3 editor (remove the instance from its parent, or add it again), or in the layout file: ' +
+          'the child\'s sceneGraphData "parent-uid" and the parent\'s sceneGraphData "children" entry must name each other. ' +
+          'Older versions of delete_instance_from_layout and delete_layer left such links behind.',
+      });
+    }
+  }
+}
+
 // ─── Check 6c: Duplicate Function Names ─────────────────────
 
 /**
@@ -1663,6 +1702,56 @@ async function checkFrameImages(
       suggestion: 'They can be images of deleted frames (older versions of delete_frame_from_animation left the last one behind) '
         + 'or of frames the animation had before. Check them before deleting them; add_frame_to_animation keeps such a file as .bak '
         + 'instead of writing over it.',
+    });
+  }
+}
+
+// ─── Orphaned Images ─────────────────────────────────────────
+
+/**
+ * Files directly in images/ named after no object type of the project: the
+ * editor names an object's frame images "<object>-<animation>-NNN.<ext>" and
+ * a single image "<object>.<ext>" (see object-images.ts), so such a file
+ * belongs to no object, e.g. the images of a deleted object type (older
+ * versions of delete_object left them behind). Info, one entry per name part
+ * before the first "-" or "." (the name of the object they were stored for):
+ * whether the editor or anything else uses such a file is not verified.
+ * Registered object types whose file could not be parsed count as object
+ * types; .bak files are listed as backup-file instead, and files named after
+ * an existing object type (e.g. frames past an animation's last frame, see
+ * frame-image) are not reported here. Skipped without an images/ folder.
+ */
+async function checkOrphanedImages(
+  reader: Construct3ProjectReader,
+  objectNames: string[],
+  info: IntegrityIssue[]
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(join(reader.getProjectDir(), 'images'), { withFileTypes: true });
+  } catch {
+    return; // No images/ folder
+  }
+  const groups = new Map<string, string[]>();
+  const namedAfterObject = namedAfterAnyObject(objectNames);
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.toLowerCase().endsWith('.bak')) continue;
+    if (namedAfterObject(entry.name)) continue;
+    const stem = /^[^.-]*/.exec(entry.name)?.[0] ?? entry.name;
+    const key = nameKey(stem);
+    const list = groups.get(key);
+    if (list) list.push(`images/${entry.name}`); else groups.set(key, [`images/${entry.name}`]);
+  }
+  for (const files of groups.values()) {
+    files.sort();
+    info.push({
+      check: 'orphaned-image',
+      entity: files[0],
+      message: `${files.length} file(s) in images/ are named after no object type of the project: ${listFew(files)}. ` +
+        'Construct 3 names the frame images of an object <object>-<animation>-NNN.<ext> and a single image <object>.<ext>, ' +
+        'so no object uses them; they can be the images of a deleted object type (older versions of delete_object left them behind).',
+      suggestion: 'Check that nothing else uses them (e.g. a project file or script that loads them by path), then delete them. ' +
+        'delete_object keeps the images of the object type it deletes as .bak.',
     });
   }
 }

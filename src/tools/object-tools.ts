@@ -7,7 +7,8 @@ import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Instance, ObjectReference } from '../construct3/types.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
-import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
+import type { Construct3ProjectWriter, UndoReport } from '../construct3/project-writer.js';
+import { filesLeftClause } from '../construct3/project-writer.js';
 import { validateName, validateSubfolder, toolResult, toolError, notFoundError, folderCaseClashError } from './shared.js';
 import { findFolderPathClash } from '../construct3/names.js';
 import {
@@ -67,6 +68,24 @@ import {
   behaviorTypesOf,
 } from '../construct3/instance-behaviors.js';
 import type { InstanceBehavior } from '../construct3/instance-behaviors.js';
+import { planObjectImageParking, type ObjectImageParking } from '../construct3/object-images.js';
+import {
+  dropInstanceEffects,
+  effectNamesOf,
+  isDefaultInstanceVariableValue,
+  expectedInstanceEffects,
+  expectedInstanceVariables,
+  instanceVariablesOf,
+  syncInstanceVariables,
+  type InstanceVariableDef,
+} from '../construct3/instance-variables.js';
+import {
+  effectUseLocation,
+  familyEffectUsesThroughMembers,
+  findEffectUses,
+  type EffectUse,
+} from '../construct3/analyzers/effect-uses.js';
+import { StaleFileError } from '../construct3/disk-state.js';
 import { withProjectSync } from './project-sync.js';
 
 export function registerObjectTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
@@ -235,6 +254,8 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
         const warnings: string[] = [];
         const addedBehaviors: string[] = [];
         const removedBehaviors: string[] = [];
+        const addedVariables: string[] = [];
+        const removedVariables: string[] = [];
 
         // Before any change: events that use an instance variable or behavior being removed
         const variablesToRemove = existingNames(obj.instanceVariables, args.removeVariables);
@@ -281,6 +302,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
             }
             const sid = await idGen.generateSid(reader);
             vars.push(createInstanceVariable(v.name, v.type, sid));
+            addedVariables.push(v.name);
           }
         }
 
@@ -292,6 +314,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
               const idx = vars.findIndex(v => v.name === varName);
               if (idx !== -1) {
                 vars.splice(idx, 1);
+                removedVariables.push(varName);
               } else {
                 warnings.push(`Variable "${varName}" not found, skipping`);
               }
@@ -345,12 +368,20 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
 
         // Sync layout instances: ensure all instances of this object have
         // behaviors/instanceVariables dicts so C3 can resolve them on load,
-        // add an entry for each added behavior (and any other entry an
-        // instance lacks) and drop the removed ones.
+        // add an entry for each added behavior and a default value for each
+        // added instance variable (and any other entry or value an instance
+        // lacks) and drop the removed ones.
         if (args.addBehaviors?.length || args.removeBehaviors?.length || args.addVariables?.length || args.removeVariables?.length) {
-          const expected = expectedInstanceBehaviors(args.name, obj, await readFamiliesForInstances(reader));
+          const families = await readFamiliesForInstances(reader);
           const sync = await syncLayoutInstances(reader, writer, new Map([
-            [args.name, { expected, add: addedBehaviors, drop: removedBehaviors }],
+            [args.name, {
+              expected: expectedInstanceBehaviors(args.name, obj, families),
+              add: addedBehaviors,
+              drop: removedBehaviors,
+              variables: expectedInstanceVariables(args.name, obj, families),
+              addVariables: addedVariables,
+              dropVariables: removedVariables,
+            }],
           ]));
           warnings.push(...sync.warnings);
           unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
@@ -377,7 +408,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
 
   server.tool(
     'delete_object',
-    'Delete an object type from the project (checks references first: events, including object parameters, expressions, runtime.objects in script actions and the literal name of System "Create object (by name)"; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by a name built at runtime are not detected.',
+    'Delete an object type from the project (checks references first: events, including object parameters, expressions, runtime.objects in script actions and the literal name of System "Create object (by name)"; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by a name built at runtime are not detected. The frame image files (or single image) of the object in images/ are kept as <file>.bak.',
     {
       name: z.string().max(200).describe('Object name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -439,9 +470,32 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
         }
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
+        // Its frame images (or single image) lose their user: kept as .bak, like
+        // the image of a deleted frame. Renamed first; when the object file cannot
+        // be deleted or project.c3proj not updated, the writer puts back the files
+        // the call changed (undoToolCall), leaving one changed on disk after the
+        // call changed it (an object file saved again in the editor) as it is,
+        // and the images are renamed back. A write refused because a file changed
+        // on disk during the call (StaleFileError) has had the writer put back the
+        // files already, so only the image renames, which the writer does not
+        // track, are undone here.
+        const images = await planDeletedObjectImages(reader, writer, args.name);
+        const renames = images.parking?.renames ?? [];
+        if (renames.length > 0) await writer.renameImageFiles(renames);
         const subfolder = writer.getSubfolderForEntity('objectTypes', args.name);
-        const backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
-        await writer.removeFromProject('objectTypes', args.name);
+        let backupPath: string | undefined;
+        try {
+          backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
+          await writer.removeFromProject('objectTypes', args.name);
+        } catch (error) {
+          const undo = error instanceof StaleFileError ? undefined : await writer.undoToolCall();
+          const rollback = await rollBackObjectDelete(writer, undo, renames);
+          if (rollback === '') throw error;
+          // A refusal of the writer ends with a full stop already
+          const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+          throw new Error(`${cause}. ${rollback}`);
+        }
+        warnings.push(...images.warnings);
 
         const result: WriteResult = {
           success: true,
@@ -606,6 +660,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
           // all of the family's instance variables and behaviors
           const familyVariables = entryNamesOf(family.instanceVariables);
           const familyBehaviors = entryNamesOf(family.behaviorTypes);
+          const familyEffects = effectNamesOf(family);
           // Event sheets that could not be parsed: a use names what is removed and the
           // family or member it goes through
           unscanned = await checkUnscannedFiles(reader, index.unscannedFiles, [
@@ -615,13 +670,16 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
             },
             {
               categories: ['eventSheets'],
-              allOf: [[...familyVariables, ...familyBehaviors].map(n => nameTerm(n)), leaving.map(n => nameTerm(n))],
+              allOf: [[...familyVariables, ...familyBehaviors, ...familyEffects].map(n => nameTerm(n)), leaving.map(n => nameTerm(n))],
             },
           ]);
-          if ((broken.length > 0 || blocksWithoutForce(unscanned)) && !args.force) {
-            return toolResult(removalBlocked(args.name, 'family', broken, unscanned));
+          // The family's effects, named by conditions and actions on a leaving member
+          const effects = await familyEffectUses(reader, args.name, { ...family, members: currentMembers.filter(m => !leaving.includes(m)) }, leaving);
+          if ((broken.length > 0 || effects.broken.length > 0 || blocksWithoutForce(unscanned)) && !args.force) {
+            return toolResult(removalBlocked(args.name, 'family', broken, unscanned, effects.broken));
           }
           warnings.push(...removalForcedWarnings(args.name, broken));
+          warnings.push(...effectUseWarnings(effects, 'Removed'));
           warnings.push(...unscannedWarnings(unscanned, 'Removed'));
           warnings.push(...await scriptReadWarnings(reader, index, removal, [...new Set(currentMembers)].flatMap(member => [
             ...(leaving.includes(member) ? familyVariables : variablesToRemove)
@@ -686,6 +744,8 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
         if (!Array.isArray(family.instanceVariables)) family.instanceVariables = [];
         const vars = family.instanceVariables as Array<Record<string, unknown>>;
 
+        const addedVariables: string[] = [];
+        const removedVariables: string[] = [];
         if (args.addVariables) {
           for (const v of args.addVariables) {
             if (vars.some(ev => ev.name === v.name)) {
@@ -694,6 +754,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
             }
             const sid = await idGen.generateSid(reader);
             vars.push(createInstanceVariable(v.name, v.type, sid));
+            addedVariables.push(v.name);
           }
         }
 
@@ -702,6 +763,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
             const idx = vars.findIndex(v => v.name === varName);
             if (idx !== -1) {
               vars.splice(idx, 1);
+              removedVariables.push(varName);
             } else {
               warnings.push(`Variable "${varName}" not found, skipping`);
             }
@@ -712,15 +774,23 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
         const backupPath = await writer.writeEntityFile('families', args.name, family, subfolder);
 
         // Instances of members that joined get entries for the family's
-        // behaviors, instances of members that left lose them
+        // behaviors and values for its instance variables, instances of members
+        // that left lose them and the entries for its effects; instances of the
+        // other members get values for added variables and lose removed ones
         const familyBehaviors = behaviorTypesOf(family).map(b => b.name);
-        const memberChanges = [...new Set([...(args.addMembers ?? []), ...(args.removeMembers ?? [])])]
-          .filter(m => members.includes(m) !== membersBefore.includes(m))
-          .map(m => ({ member: m, joined: members.includes(m) }));
-        if (familyBehaviors.length > 0 && memberChanges.length > 0) {
+        const familyVariables = instanceVariablesOf(family).map(v => v.name);
+        const familyEffects = effectNamesOf(family);
+        const memberChanges: FamilyMemberChange[] = [...new Set([...membersBefore, ...members])].map(member => {
+          const joined = members.includes(member) && !membersBefore.includes(member);
+          const left = membersBefore.includes(member) && !members.includes(member);
+          if (joined) return { member, addBehaviors: familyBehaviors, addVariables: familyVariables };
+          if (left) return { member, dropBehaviors: familyBehaviors, dropVariables: [...familyVariables, ...removedVariables], dropEffects: familyEffects };
+          return { member, addVariables: addedVariables, dropVariables: removedVariables };
+        }).filter(hasFamilyMemberChange);
+        if (memberChanges.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.set(args.name, family);
-          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges, familyBehaviors);
+          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges);
           const sync = await syncLayoutInstances(reader, writer, plans);
           warnings.push(...planWarnings, ...sync.warnings);
           unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
@@ -747,7 +817,7 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
 
   server.tool(
     'delete_family',
-    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions, runtime.objects in script actions and the literal name of System "Create object (by name)"; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. References in project script files, families created by a name built at runtime and script access to instance variables and behaviors of member instances are not detected.',
+    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions, runtime.objects in script actions and the literal name of System "Create object (by name)"; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. The family\u2019s effects count too, when a condition or action on a member names one ("effect" parameter, e.g. Set effect parameter) and the member has no effect of that name itself or through another family. References in project script files, families created by a name built at runtime and script access to instance variables and behaviors of member instances are not detected.',
     {
       name: z.string().max(200).describe('Family name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -759,18 +829,33 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
           return toolError(`Family "${args.name}" not found. Use list_families to see available families.`);
         }
 
+        // Read before deleting: its effects are checked, and the members' instances lose
+        // the entries for its behaviors and effects and the values of its variables
+        let family: Record<string, unknown> | undefined;
+        try {
+          family = await reader.readFamily(args.name);
+        } catch {
+          family = undefined;
+        }
+
         // Check references: uses by name (as for delete_object) and uses through members
         const index = await getProjectIndex(reader);
         const { events, instanceProperties } = index.getObjectUsage(args.name);
         const usage: ObjectUsage = { events, placements: [], instanceProperties, families: [], usedFamilies: [] };
         const memberUses = index.getFamilyMemberUses(args.name);
-        const hasRefs = events.length > 0 || instanceProperties.length > 0 || memberUses.length > 0;
-        const description = [describeObjectUsage(usage), describeMemberUses(memberUses)].filter(Boolean).join('; ');
+        // Its effects, named by conditions and actions on a member
+        const effects = family
+          ? await familyEffectUses(reader, args.name, undefined, index.familyMembers.get(args.name) ?? [], family)
+          : { broken: [], unknown: [] };
+        const hasRefs = events.length > 0 || instanceProperties.length > 0 || memberUses.length > 0 || effects.broken.length > 0;
+        const description = [describeObjectUsage(usage), describeMemberUses(memberUses), describeEffectUses(effects.broken)]
+          .filter(Boolean).join('; ');
         // Files the index could not parse: the family's name and SID, and in event sheets its
-        // instance variables and behaviors together with a member's name
+        // instance variables, behaviors and effects together with a member's name
         const familyMemberNames = [
           ...index.memberNamesOf(args.name, 'instance variable'),
           ...index.memberNamesOf(args.name, 'behavior'),
+          ...effectNamesOf(family),
         ];
         // The family's own file: without it, its members, names and SID are unknown
         let unscanned = mergeUnscannedReports(
@@ -802,9 +887,12 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
             action: 'delete_blocked',
             message: `${reasons.join(' ')} Use force=true to delete anyway (references will NOT be cleaned up).`,
             references: {
-              eventSheets: [...new Set([...events, ...memberUses].map(r => r.eventSheet))],
+              eventSheets: [...new Set([...events, ...memberUses, ...effects.broken].map(r => r.eventSheet))],
               layouts: [...new Set(instanceProperties.map(p => p.layout))],
-              ...boundedLists({ events: eventUseList(events), instanceProperties, memberUses }),
+              ...boundedLists({
+                events: eventUseList(events), instanceProperties, memberUses,
+                ...(effects.broken.length > 0 ? { effectUses: effectUseList(effects.broken) } : {}),
+              }),
             },
             ...unscannedFields(unscanned),
           });
@@ -821,30 +909,29 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
           const unreported = unreportedUsesWarning(events, unreportedMemberUses);
           if (unreported) warnings.push(unreported);
         }
+        warnings.push(...effectUseWarnings({ broken: args.force ? effects.broken : [], unknown: effects.unknown }, 'Deleted'));
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
-
-        // Read before deleting: the members' instances lose the entries for the family's behaviors
-        let family: Record<string, unknown> | undefined;
-        try {
-          family = await reader.readFamily(args.name);
-        } catch {
-          family = undefined;
-        }
 
         const subfolder = writer.getSubfolderForEntity('families', args.name);
         const backupPath = await writer.deleteEntityFile('families', args.name, subfolder);
         await writer.removeFromProject('families', args.name);
 
+        // Instances of the former members lose the entries for the family's
+        // behaviors and effects and the values of its instance variables
         const familyBehaviors = behaviorTypesOf(family).map(b => b.name);
         const formerMembers = Array.isArray(family?.members)
-          ? family.members.filter((m): m is string => typeof m === 'string')
+          ? [...new Set(family.members.filter((m): m is string => typeof m === 'string'))]
           : [];
-        if (familyBehaviors.length > 0 && formerMembers.length > 0) {
+        const memberChanges: FamilyMemberChange[] = formerMembers.map(member => ({
+          member,
+          dropBehaviors: familyBehaviors,
+          dropVariables: instanceVariablesOf(family).map(v => v.name),
+          dropEffects: effectNamesOf(family),
+        })).filter(hasFamilyMemberChange);
+        if (memberChanges.length > 0) {
           const families = new Map(await readFamiliesForInstances(reader));
           families.delete(args.name);
-          const { plans, warnings: planWarnings } = await familyMemberPlans(
-            reader, families, formerMembers.map(m => ({ member: m, joined: false })), familyBehaviors,
-          );
+          const { plans, warnings: planWarnings } = await familyMemberPlans(reader, families, memberChanges);
           const sync = await syncLayoutInstances(reader, writer, plans);
           warnings.push(...planWarnings, ...sync.warnings);
           unscanned = mergeUnscannedReports(unscanned, sync.unscanned);
@@ -866,6 +953,162 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
       }
     }
   );
+}
+
+/**
+ * Undo what delete_object did before a step failed: say what the writer put
+ * back of the files the call changed and what it left as it is (`undo`, from
+ * Construct3ProjectWriter.undoToolCall; none after a write refused as stale,
+ * whose error says so), and rename the image files back from .bak
+ * (`renames`, as made). Returns sentences on what was undone and what could
+ * not be, naming the files to recover by hand; empty when there was nothing
+ * to undo.
+ */
+async function rollBackObjectDelete(
+  writer: Construct3ProjectWriter,
+  undo: UndoReport | undefined,
+  renames: ReadonlyArray<{ from: string; to: string }>,
+): Promise<string> {
+  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const sentences: string[] = [];
+  if (undo !== undefined) {
+    const isObjectFile = (label: string) => label.startsWith('objectTypes/');
+    if (undo.restored.some(isObjectFile)) sentences.push('The object file was restored from its backup.');
+    const others = undo.restored.filter(label => !isObjectFile(label));
+    if (others.length > 0) sentences.push(`Put back as it was before the call: ${others.join(', ')}.`);
+    if (undo.left.length > 0) {
+      const left = filesLeftClause(undo.left);
+      sentences.push(`${left[0].toUpperCase()}${left.slice(1)}. Check the project (validate_project, git diff) before you run the tool again.`);
+    }
+  }
+  if (renames.length > 0) {
+    try {
+      await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })).reverse());
+      sentences.push('Its image files were renamed back from .bak.');
+    } catch (e) {
+      sentences.push(`Renaming its image files back from .bak failed too (${message(e)}); rename them back by hand: ` +
+        `${renames.map(r => `"images/${r.to}" → "images/${r.from}"`).join(', ')}.`);
+    }
+  }
+  return sentences.join(' ');
+}
+
+/**
+ * How delete_object keeps the image files of the object type it deletes (see
+ * planObjectImageParking), with the warnings to return; no plan when the
+ * object type's file cannot be parsed (its images are unknown).
+ */
+async function planDeletedObjectImages(
+  reader: Construct3ProjectReader,
+  writer: Construct3ProjectWriter,
+  name: string,
+): Promise<{ parking?: ObjectImageParking; warnings: string[] }> {
+  let obj: ObjectType;
+  try {
+    obj = await reader.readObjectType(name);
+  } catch (error) {
+    if (classifyReadError(error) === 'E_FILE_NOT_FOUND') return { warnings: [] };
+    return {
+      warnings: [`The object type's file could not be parsed, so its image files in images/ are unknown and were left as they are. ` +
+        'validate_project lists files in images/ named after no object type (orphaned-image).'],
+    };
+  }
+  const stored = typeof obj.name === 'string' && obj.name !== '' ? obj.name : name;
+  const objects = await reader.readAllObjectTypes();
+  const failures = reader.getReadFailures('objectTypes');
+  const others = new Map([...objects].filter(([other]) => other !== name));
+  const unparsed = (await reader.listObjectTypes())
+    .filter(other => other !== name && !objects.has(other) && failures.get(other)?.code !== 'E_FILE_NOT_FOUND');
+  const parking = planObjectImageParking(stored, obj, await writer.listImageFiles(), others, unparsed);
+
+  const warnings: string[] = [];
+  if (parking.renames.length > 0) {
+    warnings.push(`Kept the object's ${parking.renames.length} image file(s) in images/ as .bak: ${listSome(parking.renames.map(r => `"images/${r.from}" → "images/${r.to}"`), 3)}. ` +
+      'No object uses them; delete them when they are no longer needed.');
+  }
+  if (parking.shared.length > 0) {
+    warnings.push(`Left ${listSome(parking.shared.map(f => `"images/${f}"`), 3)} in place: another object type's frames use a file of the same name.`);
+  }
+  if (parking.unknownUse.length > 0) {
+    warnings.push(`Left ${listSome(parking.unknownUse.map(f => `"images/${f}"`), 3)} in place: named after an object type whose file could not be parsed, ` +
+      'which may use them.');
+  }
+  return { parking, warnings };
+}
+
+/**
+ * Conditions and actions on `members` that name an effect of the family
+ * `familyName` that the member no longer has once the change is made
+ * (`broken`), and those on such a member whose effect parameter is another
+ * expression than a quoted name (`unknown`, which cannot be checked). The
+ * family's effects come from `familyBefore` (default: `familyAfter`);
+ * `familyAfter` is the family after the change (undefined: deleted). A member
+ * whose object type file cannot be read counts as having none of the effects
+ * itself.
+ */
+async function familyEffectUses(
+  reader: Construct3ProjectReader,
+  familyName: string,
+  familyAfter: Record<string, unknown> | undefined,
+  members: readonly string[],
+  familyBefore: Record<string, unknown> | undefined = familyAfter,
+): Promise<{ broken: EffectUse[]; unknown: EffectUse[] }> {
+  const familyEffects = effectNamesOf(familyBefore);
+  if (familyEffects.length === 0 || members.length === 0) return { broken: [], unknown: [] };
+  const families = new Map(await readFamiliesForInstances(reader));
+  if (familyAfter) families.set(familyName, familyAfter); else families.delete(familyName);
+  const kept = new Map<string, string[]>();
+  for (const member of members) {
+    let obj: unknown;
+    try {
+      obj = await reader.readObjectType(member);
+    } catch {
+      obj = undefined;
+    }
+    kept.set(member, expectedInstanceEffects(member, obj, families));
+  }
+  let sheets;
+  try {
+    sheets = await reader.readAllEventSheets();
+  } catch {
+    return { broken: [], unknown: [] };
+  }
+  return familyEffectUsesThroughMembers(findEffectUses(sheets), familyEffects, members, kept);
+}
+
+/** One sentence on uses of a family's effects through members, e.g. 'effect "Glow" of "Sprite1" used 2 time(s) in events of "Sheet1"'. */
+function describeEffectUses(uses: EffectUse[]): string {
+  if (uses.length === 0) return '';
+  const what = [...new Set(uses.map(u => `effect "${u.name ?? u.expression}" of "${u.objectClass}"`))];
+  const sheets = [...new Set(uses.map(u => `"${u.eventSheet}"`))];
+  return `its effects used ${uses.length} time(s) through members in events of ${listSome(sheets)} (${listSome(what)})`;
+}
+
+/** Effect uses as listed in a refusal. */
+function effectUseList(uses: EffectUse[]): Array<Record<string, unknown>> {
+  return uses.map(u => ({
+    eventSheet: u.eventSheet, eventPath: u.eventPath, ace: u.ace, ...(u.sid !== undefined ? { sid: u.sid } : {}),
+    member: u.objectClass, effect: u.name,
+  }));
+}
+
+/**
+ * Warnings about a family's effects used through members: uses a forced
+ * change leaves behind (validate_project does not check effect names), and
+ * uses whose effect cannot be told.
+ */
+function effectUseWarnings(uses: { broken: EffectUse[]; unknown: EffectUse[] }, verb: 'Removed' | 'Deleted'): string[] {
+  const warnings: string[] = [];
+  if (uses.broken.length > 0) {
+    warnings.push(`${verb} although events still use the family's effects through members: ${describeEffectUses(uses.broken)} ` +
+      `(${listSome([...new Set(uses.broken.map(effectUseLocation))])}). The uses were NOT changed, and validate_project does not check ` +
+      'effect names: fix them now.');
+  }
+  if (uses.unknown.length > 0) {
+    warnings.push(`Conditions or actions on a member name an effect with an expression that is not a quoted name, so whether they use ` +
+      `the family's effects could not be checked: ${listSome([...new Set(uses.unknown.map(u => `${effectUseLocation(u)} (${u.expression})`))])}. Review them.`);
+  }
+  return warnings;
 }
 
 /** At most this many uses of each kind are listed in a delete_object or delete_family response. */
@@ -1038,9 +1281,11 @@ async function scriptReadWarnings(
  */
 function removalBlocked(
   entity: string, category: 'object' | 'family', uses: MemberReference[], unscanned: UnscannedFileReport[],
+  effectUses: EffectUse[] = [],
 ): Record<string, unknown> {
   const reasons = [
     ...(uses.length > 0 ? [`Events still use what this update removes: ${describeMemberReferences(entity, uses)}.`] : []),
+    ...(effectUses.length > 0 ? [`Events still use the family's effects through a leaving member: ${describeEffectUses(effectUses)}.`] : []),
     ...(blocksWithoutForce(unscanned) ? [unscannedRefusal(unscanned)] : []),
   ];
   return {
@@ -1050,8 +1295,8 @@ function removalBlocked(
     action: 'update_blocked',
     message: `${reasons.join(' ')} Nothing was changed. Use force=true to remove anyway (the uses will NOT be changed).`,
     references: {
-      eventSheets: [...new Set(uses.map(u => u.eventSheet))],
-      ...boundedLists({ uses: memberUseList(uses) }),
+      eventSheets: [...new Set([...uses, ...effectUses].map(u => u.eventSheet))],
+      ...boundedLists({ uses: memberUseList(uses), ...(effectUses.length > 0 ? { effectUses: effectUseList(effectUses) } : {}) }),
     },
     ...unscannedFields(unscanned),
   };
@@ -1172,6 +1417,20 @@ interface InstanceSyncPlan {
   add?: string[];
   /** Behavior names whose entries are removed unless still expected */
   drop?: string[];
+  /**
+   * Instance variables the object's instances hold values for, after the
+   * change; when given, every instance gets the default value of each one it
+   * lacks (see syncInstanceVariables)
+   */
+  variables?: InstanceVariableDef[];
+  /** Instance variable names the change added; values the instance lacked for other names are reported as missing before */
+  addVariables?: string[];
+  /** Instance variable names whose values are removed unless still expected */
+  dropVariables?: string[];
+  /** Effect names whose instance entries are removed unless the object type or its families still have the effect */
+  dropEffects?: string[];
+  /** The effects the object's instances carry entries for, after the change (with dropEffects) */
+  effects?: string[];
 }
 
 /**
@@ -1205,6 +1464,22 @@ async function syncLayoutInstances(
   const unknownDefaults: InstanceBehavior[] = [];
   /** Per object type: instances that lacked entries the change did not add, and those behavior names */
   const backfilled = new Map<string, { instances: number; names: Set<string> }>();
+  /** The same for instance variable values */
+  const backfilledValues = new Map<string, { instances: number; names: Set<string> }>();
+  const noteBackfill = (map: typeof backfilled, type: string, names: string[]) => {
+    if (names.length === 0) return;
+    const entry = map.get(type) ?? { instances: 0, names: new Set<string>() };
+    entry.instances++;
+    for (const name of names) entry.names.add(name);
+    map.set(type, entry);
+  };
+  /**
+   * Instance variable values other than the default and effect entries removed
+   * from instances: only the layout's .bak holds them, until the layout is written again
+   */
+  const removedData: string[] = [];
+  let removedValues = 0;
+  let removedEffects = 0;
 
   for (const [layoutName, layout] of layouts) {
     let modified = false;
@@ -1218,12 +1493,23 @@ async function syncLayoutInstances(
       });
       modified = synced.modified || modified;
       unknownDefaults.push(...synced.unknownDefaults);
-      const missingBefore = synced.added.filter(name => !(plan.add ?? []).includes(name));
-      if (missingBefore.length > 0) {
-        const entry = backfilled.get(instance.type) ?? { instances: 0, names: new Set<string>() };
-        entry.instances++;
-        for (const name of missingBefore) entry.names.add(name);
-        backfilled.set(instance.type, entry);
+      noteBackfill(backfilled, instance.type, synced.added.filter(name => !(plan.add ?? []).includes(name)));
+      const where = `"${layoutName}" UID ${String(instance.uid)}`;
+      if (plan.variables) {
+        const values = syncInstanceVariables(instance, plan.variables, { drop: plan.dropVariables });
+        modified = values.modified || modified;
+        noteBackfill(backfilledValues, instance.type, values.added.filter(name => !(plan.addVariables ?? []).includes(name)));
+        for (const { name, value } of values.dropped) {
+          if (isDefaultInstanceVariableValue(value)) continue;
+          removedData.push(`${where} instance variable "${name}" = ${shortJson(value)}`);
+          removedValues++;
+        }
+      }
+      if (plan.dropEffects?.length) {
+        const effects = dropInstanceEffects(instance, plan.dropEffects, plan.effects ?? []);
+        modified = effects.length > 0 || modified;
+        for (const { name, entry } of effects) removedData.push(`${where} effect "${name}" ${shortJson(entry)}`);
+        removedEffects += effects.length;
       }
     };
 
@@ -1246,15 +1532,36 @@ async function syncLayoutInstances(
     warnings.push(`Also added default entries for behavior(s) ${names.map(n => `"${n}"`).join(', ')} to ${entry.instances} instance(s) of "${objectType}" `
       + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores an entry for every behavior of the object and its families on each instance.');
   }
+  for (const [objectType, entry] of backfilledValues) {
+    const expected = plans.get(objectType)?.variables ?? [];
+    const names = expected.map(v => v.name).filter(name => entry.names.has(name));
+    warnings.push(`Also added default values for instance variable(s) ${names.map(n => `"${n}"`).join(', ')} to ${entry.instances} instance(s) of "${objectType}" `
+      + 'that had none (written by an older version of construct3-mcp or edited by hand). Construct 3 stores a value for every instance variable of the object and its families on each instance.');
+  }
   if (unknownDefaults.length > 0) warnings.push(unknownDefaultsWarning(unknownDefaults));
+  if (removedData.length > 0) {
+    const what = [
+      ...(removedValues > 0 ? [`${removedValues} instance variable value(s) other than the default`] : []),
+      ...(removedEffects > 0 ? [`${removedEffects} effect entr${removedEffects === 1 ? 'y' : 'ies'}`] : []),
+    ];
+    warnings.push(`Removed ${what.join(' and ')} from instances: ` +
+      `${listSome(removedData, 10)}. Only the layouts' .bak files hold them now, until those layouts are written again; note them if they are still needed.`);
+  }
 
-  const changing = [...plans].filter(([, plan]) => (plan.add?.length ?? 0) > 0 || (plan.drop?.length ?? 0) > 0);
+  const changing = [...plans].filter(([, plan]) => [plan.add, plan.drop, plan.addVariables, plan.dropVariables, plan.dropEffects]
+    .some(list => (list?.length ?? 0) > 0));
   const skipped = unscannedFilesOf('layouts', await reader.listLayouts(), layouts, layoutFailures);
   const unscanned = changing.length > 0 && skipped.length > 0
     ? await checkUnscannedFiles(reader, skipped, [{ categories: ['layouts'], allOf: [changing.map(([name]) => nameTerm(name))] }])
     : [];
   warnings.push(...unsyncedLayoutWarnings(unscanned));
   return { warnings, unscanned };
+}
+
+/** A value as JSON for a message, cut to 120 characters. */
+function shortJson(value: unknown): string {
+  const json = JSON.stringify(value) ?? String(value);
+  return json.length > 120 ? `${json.slice(0, 117)}...` : json;
 }
 
 /**
@@ -1269,7 +1576,7 @@ function unsyncedLayoutWarnings(reports: readonly UnscannedFileReport[]): string
   if (possible.length > 0) {
     warnings.push('Instances in layouts that could not be parsed were NOT updated: ' +
       possible.map(r => `${describeUnscannedFile(r)}, whose text names ${(r.names ?? []).map(n => `"${n}"`).join(', ')}`).join('; ') +
-      '. Instances there possibly still have the old behavior entries (a text search cannot tell an instance from the same name ' +
+      '. Instances there possibly still have the old behavior entries, instance variable values or effect entries (a text search cannot tell an instance from the same name ' +
       'in another string); check them in the Construct 3 editor.');
   }
   if (unreadable.length > 0) {
@@ -1280,20 +1587,39 @@ function unsyncedLayoutWarnings(reports: readonly UnscannedFileReport[]): string
 }
 
 /**
- * Sync plans for family members whose family behaviors changed: members that
- * joined get entries for `familyBehaviors`, members that left (or whose
- * family was deleted) lose them. `families` is the project's families after
- * the change.
+ * What a family change adds to or removes from the instances of one member:
+ * behavior entries, instance variable values, effect entries (names of the
+ * family's behaviors, variables and effects). A name is only removed while
+ * the member does not keep it through itself or another family.
+ */
+interface FamilyMemberChange {
+  member: string;
+  addBehaviors?: string[];
+  dropBehaviors?: string[];
+  addVariables?: string[];
+  dropVariables?: string[];
+  dropEffects?: string[];
+}
+
+function hasFamilyMemberChange(change: FamilyMemberChange): boolean {
+  return [change.addBehaviors, change.dropBehaviors, change.addVariables, change.dropVariables, change.dropEffects]
+    .some(list => (list?.length ?? 0) > 0);
+}
+
+/**
+ * Sync plans for family members whose instances a family change affects
+ * (see FamilyMemberChange). `families` is the project's families after the
+ * change.
  */
 async function familyMemberPlans(
   reader: Construct3ProjectReader,
   families: ReadonlyMap<string, unknown>,
-  changes: Array<{ member: string; joined: boolean }>,
-  familyBehaviors: string[],
+  changes: FamilyMemberChange[],
 ): Promise<{ plans: Map<string, InstanceSyncPlan>; warnings: string[] }> {
   const plans = new Map<string, InstanceSyncPlan>();
   const warnings: string[] = [];
-  for (const { member, joined } of changes) {
+  for (const change of changes) {
+    const { member } = change;
     let obj: unknown;
     try {
       obj = await reader.readObjectType(member);
@@ -1302,15 +1628,25 @@ async function familyMemberPlans(
       // parsed does (issue #55), but the entries its instances should have are unknown
       const code = classifyReadError(error);
       if (code !== 'E_FILE_NOT_FOUND') {
+        const names = [
+          ...(change.addBehaviors ?? []), ...(change.dropBehaviors ?? []),
+          ...(change.addVariables ?? []), ...(change.dropVariables ?? []), ...(change.dropEffects ?? []),
+        ];
         warnings.push(`Instances of "${member}" were NOT updated: objectTypes/${member} (${describeReadFailure(code)}) could not ` +
-          `be parsed, so the behaviors its instances need entries for are unknown. Their entries for the family's behaviors ` +
-          `(${familyBehaviors.map(b => `"${b}"`).join(', ')}) were left as they were; check them in the Construct 3 editor.`);
+          `be parsed, so the behaviors, instance variables and effects its instances need entries for are unknown. Their entries and values ` +
+          `for the family's ${[...new Set(names)].map(b => `"${b}"`).join(', ')} were left as they were; check them in the Construct 3 editor.`);
       }
       continue;
     }
     plans.set(member, {
       expected: expectedInstanceBehaviors(member, obj, families),
-      ...(joined ? { add: familyBehaviors } : { drop: familyBehaviors }),
+      add: change.addBehaviors ?? [],
+      drop: change.dropBehaviors ?? [],
+      variables: expectedInstanceVariables(member, obj, families),
+      addVariables: change.addVariables ?? [],
+      dropVariables: change.dropVariables ?? [],
+      dropEffects: change.dropEffects ?? [],
+      effects: expectedInstanceEffects(member, obj, families),
     });
   }
   return { plans, warnings };

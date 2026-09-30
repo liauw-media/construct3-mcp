@@ -126,6 +126,12 @@ export class MockWriter {
     this.calls.push({ method: 'restoreEntityFile', args: [backupPath] });
   }
 
+  /** The mock changes no files, so undoing a tool call puts nothing back */
+  async undoToolCall(): Promise<{ restored: string[]; left: Array<{ label: string; backup: string | null }> }> {
+    this.calls.push({ method: 'undoToolCall', args: [] });
+    return { restored: [], left: [] };
+  }
+
   async deleteImageFile(name: string): Promise<boolean> {
     this.calls.push({ method: 'deleteImageFile', args: [name] });
     return false;
