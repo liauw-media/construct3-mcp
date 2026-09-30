@@ -117,6 +117,14 @@ export class ConcurrentWriteError extends Error {
  */
 const MAX_PROJECT_UPDATE_ROUNDS = 3;
 
+/** A file a tool wrote or deleted itself, outside the writer (see Construct3ProjectWriter.afterDirectWrites). */
+export interface DirectWrite {
+  /** The file's path. */
+  readonly path: string;
+  /** The text written; null when the file was deleted. */
+  readonly text: string | null;
+}
+
 /** What undoing a tool call's earlier changes did (see Construct3ProjectWriter.undoCallChanges). */
 export interface UndoReport {
   /** Files put back as they were before the call. */
@@ -407,6 +415,45 @@ export class Construct3ProjectWriter {
       const label = this.projectRelative(this.reader.getProjectPath());
       throw await this.refusalAfterUndo(new StaleFileError(staleFileMessage(label), label));
     }
+  }
+
+  /**
+   * A new SID that no SID of the project has (IdGenerator.generateSid), for
+   * an entry a tool writes into project.c3proj itself (the runtime bridge's
+   * script entry). The ID generator keeps it, so it is not handed out again.
+   */
+  async generateSid(): Promise<number> {
+    return this.idGen.generateSid(this.reader);
+  }
+
+  /**
+   * After a tool wrote or deleted project files itself rather than through
+   * the writer (the runtime bridge tools write project.c3proj and script
+   * files): bring the reader, the project index and the ID generator in line
+   * with them, as after the writer's own writes. project.c3proj is loaded
+   * again and the IDs in its new text are added to the ID generator; the new
+   * state of every other file (none: deleted) is recorded as the server's
+   * own, so the next call does not take it for a change made outside the
+   * server; the caches and the project index are dropped, so the next call
+   * sees the new script list. Loading project.c3proj alone
+   * (reader.loadProject) would not do: it records the file's new state, so
+   * no change on disk is found, the disk epoch does not move, and the index
+   * and the ID generator keep what they built from the old file.
+   */
+  async afterDirectWrites(writes: ReadonlyArray<DirectWrite>): Promise<void> {
+    const projectPath = this.reader.getProjectPath();
+    const projectKey = fileKey(projectPath);
+    let projectText: string | null | undefined;
+    for (const { path, text } of writes) {
+      if (fileKey(path) === projectKey) projectText = text;
+      else this.afterOwnWrite(path, await statFileState(path));
+    }
+    if (projectText !== undefined) {
+      noteFileWritten(projectKey, await statFileState(projectPath));
+      await this.reader.reloadProject();
+      if (projectText !== null) this.idGen.noteWrittenText(projectText);
+    }
+    resetProjectIndex(this.reader);
   }
 
   /**

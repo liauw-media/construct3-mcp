@@ -157,6 +157,11 @@ class Construct3ProjectWriter {
   // update project.c3proj themselves, before their first write)
   assertProjectFileCurrent(): Promise<void>
 
+  // For the tools that write project files themselves (runtime bridge): a SID from the ID
+  // generator, and afterwards the reader, index and ID generator brought in line with the files
+  generateSid(): Promise<number>
+  afterDirectWrites(writes: DirectWrite[]): Promise<void>   // { path, text } (text null: deleted)
+
   // Placeholder images and frame image files in images/
   writeImageFile(objectName, animationName, frameIndex, pluginId?, width?, height?): Promise<string>
   writeImageFiles(files): Promise<string[]>
