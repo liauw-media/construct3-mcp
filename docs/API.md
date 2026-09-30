@@ -1177,7 +1177,7 @@ It is refused, and nothing is changed, when:
 - the new name has a character that cannot be part of a file name (see [`add_animation_to_sprite`](#add_animation_to_sprite));
 - another animation of the object (in any animation folder) has frames and a name that differs from the old name only in case: both use the same image files, and renaming them would leave the other animation without images. Delete the duplicate first (`delete_animation` leaves the image files in place).
 
-The image files are renamed first, then the object and the layouts are written; if a write fails, the files already written are put back as they were before the call, the file whose write failed is restored from its backup if it was already replaced (e.g. its post-write check failed), and the image files are renamed back. A file saved again in the editor after the call wrote it, or during its write, is left as it is and named in the error, with its `.bak`.
+The image files are renamed first, then the object and the layouts are written; if a write fails, the files already written are put back as they were before the call, the file whose write failed is restored from its backup if it was already replaced (e.g. its post-write check failed), and the image files are renamed back. A file saved again in the editor after the call wrote it, or during its write, is left as it is and named in the error.
 
 Strings in event sheets that name the old animation (e.g. `"Walk"` in *Set animation*) are not changed; a warning lists the event sheets with such parameters on the conditions and actions of the object and of the families it belongs to. Parameters that compute a name (e.g. `"Walk" & n`) are not counted.
 
