@@ -372,9 +372,11 @@ export class Construct3ProjectWriter {
    * (undoCallChanges), each file is put back from its backup, last change
    * first, and a file the call created is removed; a file that changed on
    * disk after the call wrote it (saved again in the editor), or whose backup
-   * was replaced meanwhile, is left as it is. A file whose own write failed
-   * is not among them (restoreEntityFile). Returns what was put back and what
-   * was left; nothing outside a tool call. Called outside the writer's locks.
+   * was replaced meanwhile, is left as it is. An entity file whose own write
+   * failed is not among them (restoreEntityFile); project.c3proj is, from the
+   * moment an update replaced it, also when the check after that write
+   * failed. Returns what was put back and what was left; nothing outside a
+   * tool call. Called outside the writer's locks.
    */
   async undoToolCall(): Promise<UndoReport> {
     const scope = currentToolCall();
@@ -520,6 +522,23 @@ export class Construct3ProjectWriter {
   }
 
   /**
+   * The state of a file this call just replaced with `text`, when it still
+   * holds exactly that text (read again here); undefined when it holds
+   * anything else, such as another write that landed after this one, or
+   * cannot be read. Only a state known to be this call's lets undoing the
+   * call put the file back (putBack compares it with the file on disk).
+   */
+  private async stateIfHolding(filePath: string, text: string): Promise<FileState | undefined> {
+    try {
+      // Taken before the read: when the text is ours, so is this state
+      const state = await statFileState(filePath);
+      return (await readFile(filePath, 'utf-8')) === text ? state : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Update project.c3proj under the project lock: `change` edits the parsed
    * file and returns false when there is nothing to write. The file is
    * backed up (once per tool call), written with its text style, read back
@@ -553,7 +572,18 @@ export class Construct3ProjectWriter {
           // Changed since the read: read it again, so that change is kept
           if (!sameFileState(await statFileState(projectPath), asRead)) continue;
           await this.atomicWrite(projectPath, text);
-          const state = await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+          // Replaced: from here on the file counts as changed by the call, also
+          // when the check below fails, so undoing the call puts it back or,
+          // when it no longer holds this write, names it as left
+          let state: FileState;
+          try {
+            state = await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+          } catch (error) {
+            const ours = await this.stateIfHolding(projectPath, text);
+            if (ours !== undefined) noteFileWritten(fileKey(projectPath), ours);
+            this.noteCallChange(projectPath, true);
+            throw error;
+          }
           noteFileWritten(fileKey(projectPath), state);
           this.noteCallChange(projectPath, true);
           await this.reader.reloadProject();

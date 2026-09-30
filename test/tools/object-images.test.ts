@@ -273,6 +273,68 @@ describe('delete_object whose project.c3proj update fails otherwise', () => {
   });
 });
 
+/**
+ * project.c3proj replaced, but the check after the write failed: the file
+ * counts as changed by the call from the moment it was replaced, so undoing
+ * the call puts it back with the object file, and a file another write
+ * replaced meanwhile is left as it is and named, never left out.
+ */
+describe('delete_object whose project.c3proj update was written but not confirmed', () => {
+  const IMAGES = ['coin-animation 1-000.png', 'coin-spin-000.png', 'coin-spin-001.jpg'];
+  const projectPath = () => join(tmpDir, 'project.c3proj');
+
+  it('puts project.c3proj back with the object file when the check after its write fails', async () => {
+    await createCoin();
+    const objectBefore = await readFile(objectPath('Coin'), 'utf8');
+    const projectBefore = await readFile(projectPath(), 'utf8');
+    // The read-back of the new project.c3proj fails once (a virus scanner holding the file)
+    const internals = writer as unknown as { verifyWrittenFile: (path: string, name: string, text: string) => Promise<unknown> };
+    const verify = internals.verifyWrittenFile.bind(writer);
+    let failures = 0;
+    internals.verifyWrittenFile = async (path, name, text) => {
+      if (path.endsWith('project.c3proj') && failures++ === 0) {
+        throw new Error('Post-write verification failed for "project.c3proj": file may be corrupted. A .bak backup exists. Error: EBUSY');
+      }
+      return verify(path, name, text);
+    };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('The object file was restored from its backup. Put back as it was before the call: project.c3proj. ' +
+      'Its image files were renamed back from .bak.');
+    expect(await readFile(objectPath('Coin'), 'utf8')).toBe(objectBefore);
+    expect(await readFile(projectPath(), 'utf8')).toBe(projectBefore);
+    expect(reader.getProject().objectTypes.items).toContain('Coin');
+    expect(await images()).toEqual(IMAGES);
+  });
+
+  it('names project.c3proj when another write replaced it right after this one', async () => {
+    await createCoin();
+    const objectBefore = await readFile(objectPath('Coin'), 'utf8');
+    const project = JSON.parse(await readFile(projectPath(), 'utf8'));
+    project.properties.author = 'Editor';
+    const saved = JSON.stringify(project, null, '\t');
+    // The editor saves project.c3proj right after the writer replaced it, before the write is checked
+    const internals = writer as unknown as { atomicWrite: (path: string, content: string | Buffer) => Promise<void> };
+    const atomicWrite = internals.atomicWrite.bind(writer);
+    let saves = 0;
+    internals.atomicWrite = async (path, content) => {
+      await atomicWrite(path, content);
+      if (path.endsWith('project.c3proj') && saves++ === 0) await writeFile(projectPath(), saved);
+    };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('the file was changed by another write during this one');
+    expect(text).toContain('The object file was restored from its backup. Left as they are (changed on disk again after this call wrote them, ' +
+      'or their backup was replaced): project.c3proj (its state from before the call is in project.c3proj.bak). Check the project');
+    expect(await readFile(projectPath(), 'utf8')).toBe(saved);
+    expect(await readFile(objectPath('Coin'), 'utf8')).toBe(objectBefore);
+    expect(await images()).toEqual(IMAGES);
+  });
+});
+
 describe('validate_project orphaned-image', () => {
   it('reports files in images/ named after no object type, grouped by the name they were stored for', async () => {
     await mkdir(imagesDir(), { recursive: true });
