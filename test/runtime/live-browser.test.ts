@@ -40,12 +40,15 @@ const LIVE_TIMEOUT_MS = 120_000;
 /** The cleanup after a test: its browsers and preview servers, then its files. */
 const CLEANUP_TIMEOUT_MS = 60_000;
 /**
- * Shutdown (controller.close()) gives a browser up to 3 s to exit (kill, then
- * SIGKILL) and then removes its profile, which a loaded machine stretches to
- * seconds: up to 3.7 s measured with the full suite running next to eight
- * busy cores, and about 10 s only under a load at which other tests missed
- * vitest's 5 s default as well. 6 s leaves room for the first and still fails
- * a shutdown that waits seconds for more, such as a graceful browser close.
+ * Shutdown (controller.close()) of a browser that ends on the kill takes a
+ * fraction of a second on an idle machine, most of it removing the profile,
+ * which a loaded machine stretches to seconds: up to 3.7 s measured with the
+ * full suite running next to eight busy cores, and about 10 s only under a
+ * load at which other tests missed vitest's 5 s default as well. 6 s leaves
+ * room for the first and fails a shutdown that hangs, or that waits six
+ * seconds or more on top. It does not catch a close() that sits through its
+ * own exit waits (2 s, then SIGKILL and 1 s): launch-browser-close.test.ts
+ * checks those with a fake browser and fake timers.
  */
 const SHUTDOWN_BOUND_MS = 6_000;
 
