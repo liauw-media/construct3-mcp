@@ -1050,3 +1050,114 @@ describe('get_object_dependencies, find_orphaned_objects and get_asset_usage wit
     expect(enemy.status).toBe('not-analysed');
   });
 });
+
+// ─── Objects whose own file could not be parsed (#60) ───────
+
+describe('analysis of objects whose own object type file could not be parsed', () => {
+  const unchecked = 'its SID is unknown, so object properties of instances that hold it could not be checked';
+
+  it('find_orphaned_objects lists such an object without a use found as unanalysed, not as an orphan', async () => {
+    await addEnemy();
+    // A parsed layout holds Enemy's SID in an object property: a use the index cannot see without Enemy's file
+    await addParsedLayout('L2', [instance('Sprite', { properties: { object: ENEMY_SID } })]);
+    await breakFile('objectTypes', 'Enemy');
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects', {});
+    expect(orphans.orphanedObjects).toEqual([]);
+    expect(orphans.count).toBe(0);
+    expect(orphans.possiblyUsed).toBeUndefined();
+    expect(orphans.unanalysedObjects).toEqual([
+      { name: 'Enemy', file: 'objectTypes/Enemy', reason: 'not valid JSON', unchecked },
+    ]);
+
+    const validation = await call('validate_project', {});
+    expect(validation.info.filter((i: { check: string }) => i.check === 'orphaned-object')).toEqual([]);
+  });
+
+  it('get_object_dependencies marks such objects and keeps them out of orphanedObjects', async () => {
+    await addEnemy();
+    await addEntity('objectTypes', 'Boss', {
+      name: 'Boss', 'plugin-id': 'Sprite', sid: 710000000000300, isGlobal: false,
+      instanceVariables: [], behaviorTypes: [], effectTypes: [], animations: { items: [animation('A', 710000000000301)], subfolders: [] },
+    });
+    await addParsedSheet('Uses', [block(760000000000020, [setX('Boss.X')])]);
+    await breakFile('objectTypes', 'Enemy');
+    await breakFile('objectTypes', 'Boss');
+    await startServer();
+
+    const deps = await call('get_object_dependencies', { detail: 'full' });
+    const wide = deps.projectWide;
+    expect(wide.orphanedObjects).toEqual([]);
+    expect(wide.unanalysedObjects).toEqual([{ name: 'Enemy', file: 'objectTypes/Enemy', reason: 'not valid JSON', unchecked }]);
+    expect(wide.totalReferenced + wide.orphanedObjects.length + wide.unanalysedObjects.length).toBe(wide.totalObjects);
+    // Boss is used (a use by name was found), but its uses by SID could not be looked up
+    const boss = wide.topConnected.find((n: { objectName: string }) => n.objectName === 'Boss');
+    expect(boss.referenceCount).toBe(1);
+    expect(boss.unanalysed).toEqual({ file: 'objectTypes/Boss', reason: 'not valid JSON', unchecked });
+
+    const enemy = await call('get_object_dependencies', { object: 'Enemy' });
+    expect(enemy.object.unanalysed).toEqual({ file: 'objectTypes/Enemy', reason: 'not valid JSON', unchecked });
+    const sprite = await call('get_object_dependencies', { object: 'Sprite' });
+    expect(sprite.object.unanalysed).toBeUndefined();
+  });
+
+  it('an unanalysed object that files the index could not parse possibly use lists those files too', async () => {
+    await addEnemy();
+    await addBigLayout('Big', [instance('Enemy')]);
+    await breakFile('objectTypes', 'Enemy');
+    await startServer();
+
+    const orphans = await call('find_orphaned_objects', {});
+    expect(orphans.possiblyUsed).toBeUndefined();
+    expect(orphans.unanalysedObjects).toEqual([
+      { name: 'Enemy', file: 'objectTypes/Enemy', reason: 'not valid JSON', unchecked, files: ['layouts/Big'] },
+    ]);
+  });
+
+  it('analyze_performance names them apart, and does not call an addon unused that such a file possibly uses', async () => {
+    await addEnemy();
+    await breakFile('objectTypes', 'Enemy');
+    // Keyboard: used only by an object type whose file is not valid JSON
+    await addEntity('objectTypes', 'Kb', { name: 'Kb', 'plugin-id': 'Keyboard', sid: 710000000000400, isGlobal: true });
+    await breakFile('objectTypes', 'Kb');
+    // Mouse: used by no object type at all
+    const c3projPath = join(tmpDir, 'project.c3proj');
+    const project = JSON.parse(await readFile(c3projPath, 'utf-8'));
+    project.usedAddons.push(
+      { type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false },
+      { type: 'plugin', id: 'Mouse', name: 'Mouse', author: 'Scirra', bundled: false },
+    );
+    await writeFile(c3projPath, JSON.stringify(project, null, '\t'));
+    await startServer();
+
+    const result = await call('analyze_performance', {});
+    const messages = result.issues.map((i: { message: string }) => i.message);
+    expect(messages.find((m: string) => /object type file could not be parsed/.test(m)))
+      .toMatch(/^2 object\(s\) without a use found whose own object type file could not be parsed/);
+    const unused = result.issues.find((i: { message: string }) => /declared but not used/.test(i.message));
+    expect(unused.message).toBe('1 addon(s) declared but not used by any object: Mouse');
+    expect(unused.suggestion).toBe('Remove unused addons to reduce project size');
+    const possibly = result.issues.find((i: { message: string }) => /possibly used by object types/.test(i.message));
+    expect(possibly.message).toBe(
+      '1 addon(s) used by no object the index could read, but possibly used by object types whose files could not be parsed: Keyboard');
+    expect(possibly.suggestion).toMatch(/^Repair those object type files first/);
+  });
+
+  it('analyze_performance does not advise removing an addon that only such a file possibly uses', async () => {
+    await addEntity('objectTypes', 'Kb', { name: 'Kb', 'plugin-id': 'Keyboard', sid: 710000000000400, isGlobal: true });
+    await breakFile('objectTypes', 'Kb');
+    const c3projPath = join(tmpDir, 'project.c3proj');
+    const project = JSON.parse(await readFile(c3projPath, 'utf-8'));
+    project.usedAddons.push({ type: 'plugin', id: 'Keyboard', name: 'Keyboard', author: 'Scirra', bundled: false });
+    await writeFile(c3projPath, JSON.stringify(project, null, '\t'));
+    await startServer();
+
+    const result = await call('analyze_performance', {});
+    const addonIssues = result.issues.filter((i: { message: string }) => /addon\(s\)/.test(i.message));
+    expect(addonIssues).toHaveLength(1);
+    expect(addonIssues[0].message).not.toMatch(/^0 addon/);
+    expect(addonIssues[0].message).toMatch(/possibly used by object types whose files could not be parsed: Keyboard$/);
+    expect(addonIssues[0].suggestion).not.toMatch(/Remove unused addons/);
+  });
+});

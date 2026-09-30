@@ -7,6 +7,14 @@ import type { PerformanceIssue, C3Event, BlockEvent, GroupEvent, FunctionBlockEv
 import { findOrphanedObjects } from './object-deps.js';
 import { forEachLayerInstance } from '../layers.js';
 import { countAnimationFrames } from './animations.js';
+import { isTriggerId } from './load-rules.js';
+import { getProjectIndex } from './index-builder.js';
+import { searchUnscannedFiles } from './unscanned-uses.js';
+import { patternTerm } from '../raw-text-search.js';
+import { isElseBlock } from '../event-shapes.js';
+
+/** Events visited per sheet at most */
+const MAX_NODES = 100_000;
 
 export interface PerformanceResult {
   summary: { critical: number; warning: number; info: number };
@@ -66,7 +74,7 @@ export async function analyzePerformance(
         severity: 'info',
         category: 'performance',
         location: sheetName,
-        message: `${everyTickCount} event block(s) with no trigger condition (runs every tick)`,
+        message: `${everyTickCount} event block(s) with no trigger condition (runs every tick; top-level blocks and blocks in groups active on start, sub-events not counted)`,
         suggestion: 'Review if every-tick evaluation is necessary; consider using triggers instead',
       });
     }
@@ -127,6 +135,7 @@ export async function analyzePerformance(
   const orphans = await findOrphanedObjects(reader);
   const orphanedCount = orphans.count;
   const possiblyUsed = orphans.possiblyUsed?.length ?? 0;
+  const unanalysed = orphans.unanalysedObjects ?? [];
 
   if (orphanedCount > 0) {
     issues.push({
@@ -136,7 +145,18 @@ export async function analyzePerformance(
       message: `${orphanedCount} object(s) not used by any event (directly or through a family) and without an instance in any layout (on any layer or sub-layer, including non-world instances)` +
         (possiblyUsed > 0 ? `; ${possiblyUsed} more possibly used in files that could not be parsed (find_orphaned_objects lists them as possiblyUsed)` : ''),
       suggestion: 'Use find_orphaned_objects to list them. Before removing one, check what this analysis cannot see: ' +
-        'project script files, objects created by name at runtime, and script references it does not recognise.',
+        'project script files, objects created by a name built at runtime, and script references it does not recognise.',
+    });
+  }
+  if (unanalysed.length > 0) {
+    issues.push({
+      severity: 'info',
+      category: 'cleanup',
+      location: 'project',
+      message: `${unanalysed.length} object(s) without a use found whose own object type file could not be parsed ` +
+        `(${unanalysed.slice(0, 5).map(o => `${o.file}: ${o.reason}`).join(', ')}${unanalysed.length > 5 ? ', ...' : ''}): ` +
+        'their SID is unknown, so whether they are used could not be told; they are not counted as unused',
+      suggestion: 'find_orphaned_objects lists them as unanalysedObjects. Repair or split the object type file (validate_project lists it) to analyse them.',
     });
   }
 
@@ -146,9 +166,13 @@ export async function analyzePerformance(
   for (const [, objData] of objectTypes) {
     usedPluginIds.add(objData['plugin-id']);
   }
-  const unusedAddons = project.usedAddons.filter(
+  const candidates = project.usedAddons.filter(
     a => a.type === 'plugin' && !a.bundled && !usedPluginIds.has(a.id)
   );
+  // The plugins of object types whose file could not be parsed are unknown: search their text
+  const possiblyUsedAddons = await addonsPossiblyUsedByUnparsedObjects(reader, candidates.map(a => a.id));
+  const unusedAddons = candidates.filter(a => !possiblyUsedAddons.has(a.id));
+  const possiblyUsedNames = candidates.filter(a => possiblyUsedAddons.has(a.id)).map(a => a.name);
   if (unusedAddons.length > 0) {
     issues.push({
       severity: 'info',
@@ -156,6 +180,16 @@ export async function analyzePerformance(
       location: 'project',
       message: `${unusedAddons.length} addon(s) declared but not used by any object: ${unusedAddons.map(a => a.name).join(', ')}`,
       suggestion: 'Remove unused addons to reduce project size',
+    });
+  }
+  // Apart, and with their own advice: removing an addon a broken object type uses breaks the project further
+  if (possiblyUsedNames.length > 0) {
+    issues.push({
+      severity: 'info',
+      category: 'cleanup',
+      location: 'project',
+      message: `${possiblyUsedNames.length} addon(s) used by no object the index could read, but possibly used by object types whose files could not be parsed: ${possiblyUsedNames.join(', ')}`,
+      suggestion: 'Repair those object type files first (validate_project lists them in unscannedFiles); do not remove these addons while an object type may use them',
     });
   }
 
@@ -173,6 +207,27 @@ export async function analyzePerformance(
   const outputIssues = detail === 'summary' ? issues.slice(0, 10) : issues;
 
   return { summary, issues: outputIssues };
+}
+
+/**
+ * Of the plugin ids `ids`, those that object types whose own file could not
+ * be parsed (over the read limit, not valid JSON) possibly use: their text
+ * holds `"plugin-id": "<id>"`. All of them while such a file cannot be read
+ * even as text. Nothing is read while every object type file was parsed.
+ */
+async function addonsPossiblyUsedByUnparsedObjects(reader: Construct3ProjectReader, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const files = (await getProjectIndex(reader)).unscannedFiles.filter(f => f.category === 'objectTypes');
+  if (files.length === 0) return new Set();
+  const terms = ids.map(id => {
+    const value = JSON.stringify(id).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+    return patternTerm(id, `"plugin-id"\\s{0,16}:\\s{0,16}${value}`, value.length + 48);
+  });
+  const found = new Set<string>();
+  for (const result of await searchUnscannedFiles(reader, files, () => terms)) {
+    for (const id of result.found ?? ids) found.add(id);
+  }
+  return found;
 }
 
 function countTotalEvents(events: C3Event[]): number {
@@ -205,21 +260,37 @@ function getMaxNestingDepth(events: C3Event[]): number {
   return maxDepth;
 }
 
+/**
+ * Event blocks that run every tick: blocks at the top level of the sheet or
+ * in groups (nested to any depth) without a trigger among their conditions
+ * (isTriggerId, the rule validate_project's trigger placement check uses;
+ * conditions such as System "Every tick" or a comparison are tested every
+ * tick). Not counted:
+ * - sub-events: they run as part of their parent, only when its trigger
+ *   fires or its function or custom action runs, and otherwise together
+ *   with the parent, which is counted;
+ * - else blocks: they belong to the block before them;
+ * - function and custom action blocks, which run when called;
+ * - disabled blocks, and blocks in a disabled group or a group that is not
+ *   active on start (until an action activates it).
+ */
 function countEveryTickBlocks(events: C3Event[]): number {
   let count = 0;
-  const stack = [...events];
+  let nodes = 0;
+  const stack: unknown[] = [...events];
 
-  while (stack.length > 0) {
-    const event = stack.pop()!;
-    if (event.eventType === 'block') {
-      const block = event as BlockEvent;
-      // A block with no conditions or only non-trigger conditions runs every tick
-      if (!block.conditions || block.conditions.length === 0) {
-        count++;
-      }
-    }
-    if ('children' in event && Array.isArray(event.children)) {
-      stack.push(...event.children);
+  while (stack.length > 0 && nodes++ < MAX_NODES) {
+    const event = stack.pop();
+    if (!event || typeof event !== 'object') continue;
+    const record = event as Record<string, unknown>;
+    if (record.disabled === true) continue;
+    if (record.eventType === 'group') {
+      if ((record as unknown as GroupEvent).isActiveOnStart === false) continue;
+      if (Array.isArray(record.children)) stack.push(...record.children);
+    } else if (record.eventType === 'block' && !isElseBlock(record)) {
+      const conditions = Array.isArray(record.conditions) ? record.conditions as unknown[] : [];
+      const triggered = conditions.some(c => c !== null && typeof c === 'object' && isTriggerId((c as { id?: unknown }).id));
+      if (!triggered) count++;
     }
   }
   return count;

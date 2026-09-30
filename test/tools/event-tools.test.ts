@@ -80,6 +80,26 @@ describe('add_event_to_sheet', () => {
     expect(server.hasTool('add_event_to_sheet')).toBe(true);
   });
 
+  it('reads each other sheet once for the name checks of a function with parameters', async () => {
+    const { server, reader } = setup({
+      eventSheets: new Map([
+        ['MainSheet', { name: 'MainSheet', events: [], sid: 1 }],
+        ['Other', { name: 'Other', events: [], sid: 2 }],
+      ]),
+    });
+    const reads: string[] = [];
+    const readEventSheet = reader.readEventSheet.bind(reader);
+    reader.readEventSheet = async (name: string) => {
+      reads.push(name);
+      return readEventSheet(name);
+    };
+    const result = await server.callTool('add_event_to_sheet', {
+      sheetName: 'MainSheet', eventType: 'function', functionName: 'Heal', functionParams: [{ name: 'amount', type: 'number' }],
+    });
+    expect(parseResult(result).success).toBe(true);
+    expect(reads.filter(name => name === 'Other')).toHaveLength(1);
+  });
+
   it('adds a group event', async () => {
     const { server, writer } = setup({
       eventSheets: new Map([['MainSheet', { name: 'MainSheet', events: [], sid: 1 }]]),
@@ -3951,7 +3971,7 @@ describe('delete_event_from_sheet and names left dangling', () => {
     expect(JSON.stringify(await reader.readEventSheet('Sheet1'))).toBe(before);
   });
 
-  it('reports on a dry run that the reference check stopped at its traversal limit', async () => {
+  it('refuses without force, also on a dry run, when the reference check stopped at its traversal limit', async () => {
     // More events than the reference scan visits (100,000 nodes), in another sheet: the
     // SID lookup walks the whole sheet it deletes from (to find shared SIDs), with the same limit
     const filler = Array.from({ length: 100_001 }, () => ({ eventType: 'comment', text: '' }));
@@ -3961,10 +3981,16 @@ describe('delete_event_from_sheet and names left dangling', () => {
         ['Sheet2', { name: 'Sheet2', sid: 3, events: filler }],
       ]),
     });
-    const data = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true }));
-    expect(data.action).toBe('would_delete');
-    expect(data.references).toBeUndefined();
-    expect(data.warnings).toEqual([expect.stringContaining('stopped at its traversal limit')]);
+    const limit = 'The check for references to the deleted functions and variables stopped at its traversal limit ' +
+      '(100,000 events across all event sheets), so uses further on are unknown.';
+    const blocked = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true }));
+    expect(blocked).toMatchObject({ success: false, action: 'delete_blocked' });
+    expect(blocked.message).toContain(limit);
+
+    const forced = parseResult(await server.callTool('delete_event_from_sheet', { sheetName: 'Sheet1', sid: 10, dryRun: true, force: true }));
+    expect(forced.action).toBe('would_delete');
+    expect(forced.references).toBeUndefined();
+    expect(forced.warnings).toEqual([`Would delete with force=true: ${limit}`]);
     expect(writer.callsFor('writeEntityFile')).toHaveLength(0);
   });
 

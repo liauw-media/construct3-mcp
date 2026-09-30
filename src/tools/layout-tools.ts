@@ -58,6 +58,7 @@ import {
   type LayerNameUse,
 } from '../construct3/layer-references.js';
 import { EntityWriteError } from '../construct3/project-writer.js';
+import { withProjectSync } from './project-sync.js';
 
 /**
  * What delete_layout looks for in the text of a layout file it could not
@@ -131,7 +132,8 @@ function describeInstancePlace(entry: LayerEntry | undefined): string {
   return `${entry.depth > 0 ? 'sub-layer' : 'layer'} "${layerPathLabel(entry)}"`;
 }
 
-export function registerLayoutTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   /**
    * The instance variables the instances of `objectType` hold values for (its
    * own and its families'); a warning instead when its file could not be

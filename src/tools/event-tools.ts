@@ -22,8 +22,11 @@ import {
   findEnclosingEvents,
   findEventVariableNameProblem,
   findNewEventVariableNameClashes,
+  findFunctionNameProblem,
+  functionBlockNames,
+  newDuplicateFunctionNames,
 } from '../construct3/event-variable-names.js';
-import type { EventVariableNameProblem, NewEventVariableNameClash } from '../construct3/event-variable-names.js';
+import type { EventVariableNameProblem, FunctionBlockName, FunctionNameProblem, NewEventVariableNameClash } from '../construct3/event-variable-names.js';
 import {
   conditionSchema,
   actionSchema,
@@ -55,6 +58,8 @@ import {
   functionCallArgumentSchema,
   unknownKeysErrorMap,
   EVENT_INPUT_DESCRIPTIONS,
+  commentColorSchema,
+  buildCommentEvent,
 } from './event-helpers.js';
 import {
   isElseCondition,
@@ -74,8 +79,14 @@ import {
 } from '../construct3/event-shapes.js';
 import {
   findReferencesLeftByDelete,
+  findVariableReferencesLostByChange,
+  recordVariableScopes,
+  variablesDeclaredIn,
+  mapCopiedAces,
   definesFunctionsOrVariables,
   countDeleteReferences,
+  globalVariableNames,
+  REFERENCE_CHECK_MAX_EVENTS,
   namesVisibleToOtherSheets,
   type DeleteReference,
   type DeleteReferenceKind,
@@ -87,6 +98,7 @@ import { getProjectIndex, resetProjectIndex } from '../construct3/analyzers/inde
 import {
   blocksWithoutForce,
   checkUnscannedFiles,
+  ownFileReports,
   unscannedFields,
   unscannedFilesOf,
   unscannedRefusal,
@@ -103,8 +115,8 @@ import {
   createGroupEvent,
   createFunctionEvent,
   createIncludeEvent,
-  createCommentEvent,
 } from '../construct3/templates.js';
+import { withProjectSync } from './project-sync.js';
 
 /** Per-sheet cap on change details returned by fix_legacy_behavior_keys. */
 const MAX_REPORTED_CHANGES = 100;
@@ -125,16 +137,35 @@ const DANGLING_KIND_LABELS: Record<DeleteReferenceKind, string> = {
   'variable-expression': 'expression(s) using it by name',
 };
 
-/** One sentence per deleted function or variable that is still referenced. */
-function describeDanglingReferences(report: DeleteReferenceReport): string {
+/**
+ * Why a reference check that stopped at its traversal limit refuses without
+ * force: what it did not reach is unknown, as for a file it could not parse.
+ */
+function traversalLimitReason(checked: string): string {
+  return `The check for ${checked} stopped at its traversal limit (${REFERENCE_CHECK_MAX_EVENTS.toLocaleString('en-US')} events ` +
+    'across all event sheets), so uses further on are unknown.';
+}
+
+/** What happens to the uses a move takes out of their variable's scope (see findVariableReferencesLostByChange). */
+const SCOPE_LOSS_CONSEQUENCE =
+  'A variable that is not at the top level of a sheet is local: only the events beside it and below them see it. ' +
+  'After loading a project, Construct 3 resolves these names and throws "cannot find event variable" when one is ' +
+  'not in scope (loader code; whether the project then fails to open has not been confirmed in the editor), and an ' +
+  'expression that uses it by name would name a variable that is not there.';
+
+/**
+ * One sentence per deleted function or variable that is still referenced
+ * `outside` what is deleted ("outside the deleted events").
+ */
+function describeDanglingReferences(report: DeleteReferenceReport, outside = 'outside the deleted events'): string {
   const kinds = (refs: DeleteReference[]) => {
     const counts = new Map<DeleteReferenceKind, number>();
     for (const r of refs) counts.set(r.kind, (counts.get(r.kind) ?? 0) + 1);
     return [...counts].map(([kind, n]) => `${n} ${DANGLING_KIND_LABELS[kind]}`).join(', ');
   };
   return [
-    ...report.functions.map(f => `Function "${f.name}" is still referenced ${f.references.length} time(s) outside the deleted events (${kinds(f.references)}).`),
-    ...report.variables.map(v => `Event variable "${v.name}" is still used ${v.references.length} time(s) outside the deleted events (${kinds(v.references)}).`),
+    ...report.functions.map(f => `Function "${f.name}" is still referenced ${f.references.length} time(s) ${outside} (${kinds(f.references)}).`),
+    ...report.variables.map(v => `Event variable "${v.name}" is still used ${v.references.length} time(s) ${outside} (${kinds(v.references)}).`),
   ].join(' ');
 }
 
@@ -164,7 +195,7 @@ function danglingReferenceList(report: DeleteReferenceReport): Record<string, un
  */
 function parameterlessRowError(action: Record<string, unknown>, index: number): string | null {
   if (action.type === 'comment') {
-    return `Action ${index} is a comment row, which has no parameters. To change its text, remove it and add a new { type: "comment", text } with update_event_block.`;
+    return `Action ${index} is a comment row, which has no parameters. To change its text or colours, use update_event_block with updateActions [{ index: ${index}, text, "text-color", "background-color" }]: the row keeps its place and the keys it has.`;
   }
   if (action.type === 'script') {
     return `Action ${index} is a script action, which has no parameters. To change its code, remove it and add a new { type: "script", script } with update_event_block.`;
@@ -172,7 +203,8 @@ function parameterlessRowError(action: Record<string, unknown>, index: number): 
   return null;
 }
 
-export function registerEventTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerEventTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // ─── create_event_sheet ───────────────────────────────────
 
   server.tool(
@@ -247,12 +279,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'add_event_to_sheet',
-    'Add an event (group, function, variable, include, or comment) to an event sheet',
+    'Add an event (group, function, variable, include, or comment) to the top level of an event sheet. Returns the SID of a new group, function or variable (generatedSid), the SIDs of the function\'s parameters (functionParameterSids), the new event\'s eventPath and the backupFile.',
     {
-      sheetName: z.string().max(200).describe('Target event sheet'),
+      sheetName: z.string().max(200).describe('Target event sheet, as registered (letter case included)'),
       eventType: z.enum(['group', 'function', 'variable', 'include', 'comment']).describe('Type of event to add'),
       title: z.string().max(500).optional().describe('For groups: the group title'),
-      functionName: z.string().max(200).optional().describe('For functions: function name'),
+      functionName: z.string().max(200).optional().describe('For functions: function name. Refused like in the editor: a name that matches, ignoring case, another function in the project or a System expression; with a return type also whitespace, punctuation such as - . : or a leading underscore (the name is used in expressions). Without a return type the editor accepts any name that is not empty'),
       functionParams: z.array(z.object({
         name: z.string().describe('Parameter name'),
         type: z.enum(['number', 'string', 'boolean']).describe('Parameter type'),
@@ -266,10 +298,16 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       initialValue: z.string().max(500).optional().default('').describe('For variables: initial value'),
       includeSheet: z.string().max(200).optional().describe('For includes: sheet name to include'),
       commentText: z.string().max(2000).optional().describe('For comments: comment text'),
+      commentTextColor: commentColorSchema.optional().describe('For comments: the text colour, written as "text-color": [red, green, blue, alpha], each 0-1, as the editor saves it'),
+      commentBackgroundColor: commentColorSchema.optional().describe('For comments: the background colour, written as "background-color": [red, green, blue, alpha], each 0-1'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert the event'),
     },
     async (args) => {
       try {
+        // Its checks compare the sheet with the other sheets by registered name
+        const unregistered = await unregisteredSheetError(reader, args.sheetName);
+        if (unregistered) return unregistered;
+
         // Read existing sheet — preserves ALL original events and fields
         let sheet: EventSheet;
         try {
@@ -280,20 +318,27 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         const beforeEvents = snapshotEvents(sheet.events);
 
         let event: C3Event;
+        // SIDs of what is created, for the result (includes and comments have none)
+        let generatedSid: number | undefined;
+        let functionParameterSids: Array<{ name: string; sid: number }> | undefined;
 
         switch (args.eventType) {
           case 'group': {
             if (!args.title) return toolError('title is required for group events');
             const sid = await idGen.generateSid(reader);
             event = createGroupEvent(args.title, sid);
+            generatedSid = sid;
             break;
           }
           case 'function': {
             if (!args.functionName) return toolError('functionName is required for function events');
+            // The name is checked like in the editor's Function dialog, against every function in the project
+            const allSheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
+            const nameProblem = findFunctionNameProblem(args.functionName, args.functionReturnType ?? 'none', functionBlockNames(allSheets));
+            if (nameProblem) return toolError(functionNameMessage(nameProblem, args.functionName, args.functionReturnType ?? 'none'));
             // Parameter names are checked like in the editor's Function parameter dialog
             if (args.functionParams && args.functionParams.length > 0) {
-              const sheets = await readEventSheetsFresh(reader, [[args.sheetName, sheet.events]]);
-              const paramError = functionParameterNamesError(sheets, args.sheetName, args.functionParams.map(p => p.name));
+              const paramError = functionParameterNamesError(allSheets, args.sheetName, args.functionParams.map(p => p.name));
               if (paramError) return toolError(paramError);
             }
             const sid = await idGen.generateSid(reader);
@@ -311,6 +356,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               isAsync: args.functionIsAsync,
               copyPicked: args.functionCopyPicked,
             });
+            generatedSid = sid;
+            functionParameterSids = paramsWithSids?.map(p => ({ name: p.name, sid: p.sid }));
             break;
           }
           case 'variable': {
@@ -323,6 +370,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             const defaultValue = args.initialValue || (varType === 'number' ? '0' : varType === 'boolean' ? 'false' : '');
             const sid = await idGen.generateSid(reader);
             event = createVariableEvent(args.variableName, varType, defaultValue, sid);
+            generatedSid = sid;
             break;
           }
           case 'include': {
@@ -336,7 +384,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           }
           case 'comment': {
             if (!args.commentText) return toolError('commentText is required for comment events');
-            event = createCommentEvent(args.commentText);
+            event = buildCommentEvent({
+              eventType: 'comment',
+              text: args.commentText,
+              'text-color': args.commentTextColor,
+              'background-color': args.commentBackgroundColor,
+            });
             break;
           }
         }
@@ -355,7 +408,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
 
         const subfolder = writer.getSubfolderForEntity('eventSheets', args.sheetName);
-        await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
+        const backupPath = await writer.writeEntityFile('eventSheets', args.sheetName, sheet, subfolder);
         resetProjectIndex(reader);
 
         const result: WriteResult = {
@@ -363,9 +416,15 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           entity: args.sheetName,
           category: 'eventsheet',
           action: 'updated',
+          ...(generatedSid !== undefined ? { generatedSid } : {}),
           warnings: loadCheck.warnings.length > 0 ? loadCheck.warnings : undefined,
+          backupFile: backupPath,
         };
-        return toolResult(result);
+        return toolResult({
+          ...result,
+          ...(functionParameterSids && functionParameterSids.length > 0 ? { functionParameterSids } : {}),
+          eventPath: `events[${sheet.events.indexOf(event)}]`,
+        });
       } catch (error) {
         console.error('[add_event_to_sheet] failed:', error);
         return toolError(`Error adding event: ${error instanceof Error ? error.message : String(error)}`);
@@ -503,10 +562,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_sheet',
-    'Delete an event sheet from the project (checks references first: sheets that include it and layouts bound to it; refused without force while there are any). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles).',
+    'Delete an event sheet from the project (checks references first; refused without force while there are any): sheets that include it, layouts bound to it, and uses in other event sheets of the functions and global variables it defines (Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name; scripts are not checked). Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the sheet name, and event sheets also for those functions and global variables: a match (a possible use), or such a file that cannot be read at all, refuses without force (listed in unscannedFiles), as does a sheet to delete that could not be parsed itself or a check that stopped at its traversal limit (100,000 events).',
     {
       name: z.string().max(200).describe('Event sheet name to delete'),
-      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
+      force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references; the uses of its functions and global variables left behind are listed in "references" and a warning)'),
     },
     async (args) => {
       try {
@@ -532,18 +591,48 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
         const hasRefs = includedBy.length > 0 || boundLayouts.length > 0;
 
-        // 3. Event sheets (includes) and layouts (bindings) that could not be parsed
-        const unscanned = await checkUnscannedFiles(
-          reader,
-          index.unscannedFiles.filter(f => !(f.category === 'eventSheets' && f.name === args.name)),
-          [{ categories: ['eventSheets', 'layouts'], allOf: [[nameTerm(args.name)]] }],
-        );
-        const unscannedBlock = blocksWithoutForce(unscanned);
+        // 3. Functions and global variables the sheet defines that other
+        // sheets still use (issue #58): the same check as
+        // delete_event_from_sheet, with every event of the sheet deleted
+        const sheets = await reader.readAllEventSheets();
+        const ownEvents = sheets.get(args.name)?.events;
+        let dangling: DeleteReferenceReport = { functions: [], variables: [], complete: true };
+        const visibleNames = new Set<string>();
+        if (Array.isArray(ownEvents)) {
+          const sheetEvents = new Map<string, unknown>();
+          for (const [name, other] of sheets) sheetEvents.set(name, other.events);
+          dangling = findReferencesLeftByDelete(sheetEvents, ownEvents as object[], functionsObjectName(reader));
+          for (const event of ownEvents) {
+            for (const name of namesVisibleToOtherSheets(event, true)) visibleNames.add(name);
+          }
+        }
+        const danglingCount = countDeleteReferences(dangling);
 
-        if ((hasRefs || unscannedBlock) && !args.force) {
+        // 4. Event sheets (includes; the functions and globals it defines) and
+        // layouts (bindings) that could not be parsed. When the sheet itself
+        // could not be parsed, what it defines is unknown.
+        const otherFiles = index.unscannedFiles.filter(f => !(f.category === 'eventSheets' && f.name === args.name));
+        const unscanned = [
+          ...ownFileReports(index.unscannedFiles, [{
+            category: 'eventSheets',
+            name: args.name,
+            unchecked: 'the functions and global variables it defines are unknown, so their uses in other event sheets could not be checked',
+          }]),
+          ...await checkUnscannedFiles(reader, otherFiles, [
+            { categories: ['eventSheets', 'layouts'], allOf: [[nameTerm(args.name)]] },
+            { categories: ['eventSheets'], allOf: [[...visibleNames].map(n => nameTerm(n))] },
+          ]),
+        ];
+        const unscannedBlock = blocksWithoutForce(unscanned);
+        const outsideSheet = `in other event sheets than "${args.name}"`;
+        const checked = 'uses of the functions and global variables the sheet defines';
+
+        if ((hasRefs || danglingCount > 0 || unscannedBlock || !dangling.complete) && !args.force) {
           const reasons = [
             ...(hasRefs ? ['Event sheet is still referenced.'] : []),
+            ...(danglingCount > 0 ? [`${describeDanglingReferences(dangling, outsideSheet)} ${DANGLING_REFERENCE_CONSEQUENCE}`] : []),
             ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+            ...(!dangling.complete ? [traversalLimitReason(checked)] : []),
           ];
           return toolResult({
             success: false,
@@ -554,6 +643,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
             references: {
               includedBy,
               boundLayouts,
+              ...danglingReferenceList(dangling),
             },
             ...unscannedFields(unscanned),
           });
@@ -563,6 +653,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (hasRefs && args.force) {
           const refList = [...includedBy.map(s => `included by "${s}"`), ...boundLayouts.map(l => `bound to layout "${l}"`)];
           warnings.push(`Event sheet deleted but still referenced: ${refList.join(', ')}. References were NOT cleaned up.`);
+        }
+        if (danglingCount > 0) {
+          warnings.push(`Deleted with force=true: ${describeDanglingReferences(dangling, outsideSheet)} ` +
+            `${DANGLING_REFERENCE_CONSEQUENCE} Fix them before opening the project in Construct 3.`);
+        }
+        if (!dangling.complete) {
+          warnings.push(`Deleted with force=true: ${traversalLimitReason(checked)}`);
         }
         warnings.push(...unscannedWarnings(unscanned, 'Deleted'));
 
@@ -580,7 +677,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           backupFile: backupPath,
           ...unscannedFields(unscanned),
         };
-        return toolResult(result);
+        // With force=true, the uses of its functions and global variables left dangling
+        return toolResult(danglingCount > 0 ? { ...result, references: danglingReferenceList(dangling) } : result);
       } catch (error) {
         console.error('[delete_event_sheet] failed:', error);
         return toolError(`Error deleting event sheet: ${error instanceof Error ? error.message : String(error)}`);
@@ -592,9 +690,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'delete_event_from_sheet',
-    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Other event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the deleted functions and global variables: a match (a possible use), or such a sheet that cannot be read at all, also refuses without force (listed in unscannedFiles). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
+    'Delete an event from an event sheet by SID (for blocks, groups, variables, functions) or by includeSheet name (for includes). Sub-events are deleted with their event. Use get_eventsheet_details to find SIDs. A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one. Refuses (unless force=true) when a function or event variable it removes is still named outside the deleted events: Call function actions, function map registrations, Functions.Name(...) expression calls, System conditions/actions on the variable, expressions that use the variable by name (scripts are not checked). Other event sheets that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the deleted functions and global variables: a match (a possible use), or such a sheet that cannot be read at all, also refuses without force (listed in unscannedFiles), as does a check that stopped at its traversal limit (100,000 events). Reports an else block the delete leaves without the block it belonged to (else-placement warning).',
     {
-      sheetName: z.string().max(200).describe('Target event sheet'),
+      sheetName: z.string().max(200).describe('Target event sheet, as registered (letter case included)'),
       sid: z.number().int().positive().optional().describe('SID of the event to delete (for block, group, variable, function events)'),
       eventPath: eventPathSchema,
       includeSheet: z.string().max(200).optional().describe('For removing includes: the included sheet name'),
@@ -610,6 +708,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (args.eventPath !== undefined && args.sid === undefined) {
           return toolError('eventPath picks one of several events that share a SID; pass it together with sid.');
         }
+        // Its reference check compares the sheet with the other sheets by registered name
+        const unregistered = await unregisteredSheetError(reader, args.sheetName);
+        if (unregistered) return unregistered;
 
         // Read the event sheet
         let sheet: EventSheet;
@@ -709,10 +810,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
         const danglingCount = countDeleteReferences(dangling);
         const unscannedBlock = blocksWithoutForce(unscanned);
-        if ((danglingCount > 0 || unscannedBlock) && !args.force) {
+        const checked = 'references to the deleted functions and variables';
+        if ((danglingCount > 0 || unscannedBlock || !dangling.complete) && !args.force) {
           const reasons = [
             ...(danglingCount > 0 ? [`${describeDanglingReferences(dangling)} ${DANGLING_REFERENCE_CONSEQUENCE}`] : []),
             ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+            ...(!dangling.complete ? [traversalLimitReason(checked)] : []),
           ];
           return toolResult({
             success: false,
@@ -731,7 +834,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         }
         warnings.push(...unscannedWarnings(unscanned, args.dryRun ? 'Would delete' : 'Deleted'));
         if (!dangling.complete) {
-          warnings.push('The check for references to the deleted functions and variables stopped at its traversal limit; references further on were not checked.');
+          warnings.push(`${args.dryRun ? 'Would delete' : 'Deleted'} with force=true: ${traversalLimitReason(checked)}`);
         }
 
         // Report children for groups
@@ -991,10 +1094,10 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
 
   server.tool(
     'move_events_between_sheets',
-    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet.',
+    'Copy (or move) top-level event blocks from one event sheet to another by SID. Set deleteSource=true to remove the events from the source sheet after copying (move semantics). SIDs and all nested children are preserved; the result warns when a copied SID then matches more than one event in the target sheet. A SID shared by several top-level events of the source is refused with a list of candidates; pass eventPaths to pick one. Runs the editor load-time gate over both sheets: moving an event that already breaks a load-time rule is allowed, copying it (deleteSource=false) is refused because it adds the problem to a second sheet. Refuses (unless force=true) a move that takes an event variable out of the scope of events that use it, e.g. a used global variable moved into a group (targetGroupPath), where it is a local variable; the uses are listed. Other event sheets that could not be parsed are searched as text for such a global variable; a check that stopped at its traversal limit (100,000 events) also refuses without force.',
     {
-      sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from'),
-      targetSheet: z.string().max(200).describe('Event sheet to copy/move events into'),
+      sourceSheet: z.string().max(200).describe('Event sheet to copy/move events from, as registered (letter case included)'),
+      targetSheet: z.string().max(200).describe('Event sheet to copy/move events into, as registered (letter case included)'),
       sids: z.array(z.number().int().positive()).min(1).describe('SIDs of the top-level events to copy/move (each SID once)'),
       eventPaths: z.array(z.string().max(500)).max(100).optional().describe(
         'Only needed when a SID in sids matches more than one top-level event of the source sheet (the call is then refused with a list of candidates): ' +
@@ -1003,11 +1106,19 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
       deleteSource: z.boolean().optional().default(false).describe('If true, remove the events from the source sheet after copying (move semantics). A copy or move that would leave two event variables or function parameters whose names match ignoring case in one scope is refused, e.g. a copy of a global variable (its original keeps the name)'),
       targetGroupPath: z.string().max(500).optional().describe('Insert into a group in the target sheet by title path (e.g. "Movement > Collision"), matched like groupPath of add_event_block'),
       position: z.enum(['start', 'end']).optional().default('end').describe('Where to insert events in the target sheet or group'),
+      force: z.boolean().optional().default(false).describe('If true, move even when events still use an event variable the move takes out of their scope (the uses are listed in "references" and a warning, and left dangling)'),
     },
     async (args) => {
       try {
         if (args.sourceSheet === args.targetSheet) {
           return toolError('sourceSheet and targetSheet must be different sheets.');
+        }
+        // Its checks compare both sheets with the other sheets by registered
+        // name, and a target that is the source in another case would be
+        // written twice, the second time without the moved events
+        for (const name of [args.sourceSheet, args.targetSheet]) {
+          const unregistered = await unregisteredSheetError(reader, name);
+          if (unregistered) return unregistered;
         }
 
         // Read source sheet
@@ -1103,6 +1214,16 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Source events are only replaced (never mutated), the target is edited in place
         const targetBefore = snapshotEvents(targetSheetData.events);
 
+        // Where the uses of the variables the events declare resolve now, per
+        // condition/action (compared by identity), for the scope check below
+        const otherSheets = await readEventSheetsFresh(reader, [
+          [args.sourceSheet, sourceEvents as unknown as C3Event[]],
+          [args.targetSheet, targetEvents as unknown as C3Event[]],
+        ]);
+        const movedVariables = variablesDeclaredIn(eventsToMove);
+        const scopesBefore = recordVariableScopes(otherSheets, movedVariables);
+        const globalsBefore = globalVariableNames(otherSheets);
+
         // Determine target insertion array
         let insertTarget: Record<string, unknown>[];
         if (args.targetGroupPath) {
@@ -1134,11 +1255,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         // Event variable names: copies keep their names (the editor renames a
         // pasted variable whose name is taken), so refuse a copy or move that
         // would leave two names in one scope that the editor treats as the same
-        const sheetsBefore = await readEventSheetsFresh(reader, [
-          [args.sourceSheet, sourceEvents as unknown as C3Event[]],
-          [args.targetSheet, targetBefore],
-        ]);
-        const sheetsAfter = new Map(sheetsBefore);
+        const sheetsBefore = new Map(otherSheets);
+        sheetsBefore.set(args.targetSheet, targetBefore);
+        const sheetsAfter = new Map(otherSheets);
         sheetsAfter.set(args.sourceSheet, sourceSheetData.events);
         sheetsAfter.set(args.targetSheet, targetSheetData.events);
         const nameClashes = findNewEventVariableNameClashes(
@@ -1149,6 +1268,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           sourceSheetData.events = sourceEvents as unknown as C3Event[];
           targetSheetData.events = targetBefore;
           return toolError(movedEventVariableNameClashMessage(args.targetSheet, args.deleteSource, nameClashes));
+        }
+        // Function names: a copied function block keeps its name, which its original still has
+        const functionClashes = newDuplicateFunctionNames(functionBlockNames(sheetsBefore), functionBlockNames(sheetsAfter));
+        if (functionClashes.length > 0) {
+          sourceSheetData.events = sourceEvents as unknown as C3Event[];
+          targetSheetData.events = targetBefore;
+          return toolError(copiedFunctionNameClashMessage(args.targetSheet, functionClashes));
         }
 
         // Editor load-time rules over both sheets: a copy of an event that
@@ -1163,10 +1289,61 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           return toolError(loadRuleErrorMessage(loadCheck.errors));
         }
 
+        // Uses of an event variable that the move takes out of their scope,
+        // e.g. a used global variable moved into a group, where it is local
+        // (issue #38). Copies are compared with the events they were copied from.
+        const copiedAces = mapCopiedAces(eventsToMove, copiedEvents);
+        const lost = findVariableReferencesLostByChange(scopesBefore, sheetsAfter, ace => copiedAces.get(ace) ?? ace);
+        const lostCount = countDeleteReferences(lost);
+        // Global variables that are global no longer: sheets that could not be parsed may use them
+        const globalsAfter = globalVariableNames(sheetsAfter);
+        const noLongerGlobal = [...movedVariables]
+          .filter(([key]) => globalsBefore.has(key) && !globalsAfter.has(key))
+          .map(([, name]) => name);
+        let unscanned: UnscannedFileReport[] = [];
+        if (noLongerGlobal.length > 0) {
+          const allSheets = await reader.readAllEventSheets();
+          const skipped = unscannedFilesOf('eventSheets', await reader.listEventSheets(), allSheets, reader.getReadFailures('eventSheets'))
+            .filter(f => f.name !== args.sourceSheet && f.name !== args.targetSheet);
+          unscanned = await checkUnscannedFiles(reader, skipped, [
+            { categories: ['eventSheets'], allOf: [noLongerGlobal.map(n => nameTerm(n))] },
+          ]);
+        }
+        const unscannedBlock = blocksWithoutForce(unscanned);
+        const whereLost = 'where it is no longer in scope after the move';
+        const checked = 'uses of the moved event variables';
+        if ((lostCount > 0 || unscannedBlock || !lost.complete) && !args.force) {
+          sourceSheetData.events = sourceEvents as unknown as C3Event[];
+          targetSheetData.events = targetBefore;
+          const reasons = [
+            ...(lostCount > 0 ? [`${describeDanglingReferences(lost, whereLost)} ${SCOPE_LOSS_CONSEQUENCE}`] : []),
+            ...(unscannedBlock ? [unscannedRefusal(unscanned)] : []),
+            ...(!lost.complete ? [traversalLimitReason(checked)] : []),
+          ];
+          return toolResult({
+            success: false,
+            sourceSheet: args.sourceSheet,
+            targetSheet: args.targetSheet,
+            category: 'eventsheet',
+            action: 'move_blocked',
+            message: `${reasons.join(' ')} Move the events that use it along, pick another place (a global variable stays global at the top level of a sheet), or use force=true to move anyway. Nothing was written.`,
+            references: danglingReferenceList(lost),
+            ...unscannedFields(unscanned),
+          });
+        }
+
         // Copies keep their SIDs, so a copied event whose SID the target already
         // has leaves several events with that SID there. The editor opens such
         // sheets, so this is a warning, not a refusal.
         const warnings = [...loadCheck.warnings];
+        if (lostCount > 0) {
+          warnings.push(`Moved with force=true: ${describeDanglingReferences(lost, whereLost)} ` +
+            `${SCOPE_LOSS_CONSEQUENCE} Fix them before opening the project in Construct 3.`);
+        }
+        if (!lost.complete) {
+          warnings.push(`Moved with force=true: ${traversalLimitReason(checked)}`);
+        }
+        warnings.push(...unscannedWarnings(unscanned, 'Moved'));
         const sharedSids = copiedSidsWarning(args.targetSheet, targetSheetData.events as unknown as Record<string, unknown>[], copiedEvents);
         if (sharedSids) warnings.push(sharedSids);
 
@@ -1191,6 +1368,8 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           deleteSource: args.deleteSource,
           backupFiles: [targetBackup, ...(sourceBackup ? [sourceBackup] : [])].filter(Boolean),
           warnings: warnings.length > 0 ? warnings : undefined,
+          ...(lostCount > 0 ? { references: danglingReferenceList(lost) } : {}),
+          ...unscannedFields(unscanned),
         });
       } catch (error) {
         console.error('[move_events_between_sheets] failed:', error);
@@ -1218,9 +1397,12 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
           parameters: z.union([boundedRecord(), z.array(functionCallArgumentSchema).max(100)]).optional()
             .describe('New parameter values — merged with existing (max 100 keys, depth 6). For a function call: an array replaces the arguments; an object keyed by position ("0", "1", …) or parameter name replaces single arguments'),
           disabled: z.boolean().optional().describe('Enable or disable this action'),
+          text: z.string().max(10_000).optional().describe('Comment rows only: the new text; the row keeps its place and colours'),
+          'text-color': commentColorSchema.nullable().optional().describe('Comment rows only: the new text colour [red, green, blue, alpha], each 0-1; null removes it'),
+          'background-color': commentColorSchema.nullable().optional().describe('Comment rows only: the new background colour [red, green, blue, alpha], each 0-1; null removes it'),
         }, {
-          errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
-        }).strict()).optional().describe('Actions to update by index'),
+          errorMap: unknownKeysErrorMap('an updateActions entry', 'An entry has index, parameters and disabled, and for a comment row text, "text-color" and "background-color"; to change anything else, remove the action (removeActionIndices) and add a new one (addActions).'),
+        }).strict()).optional().describe('Actions to update by index. A comment row is edited in place with text, "text-color" and "background-color"'),
         updateConditions: z.array(z.object({
           index: z.number().int().min(0).describe('Condition index (0-based)'),
           parameters: boundedRecord().optional().describe('New parameter values — merged with existing (max 100 keys, depth 6)'),
@@ -1384,6 +1566,13 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
               return toolError(`Action index ${upd.index} is out of range (block has ${actions.length} action(s), indices 0-${actions.length - 1}).`);
             }
             const act = actions[upd.index];
+            const commentEdit = upd.text !== undefined || upd['text-color'] !== undefined || upd['background-color'] !== undefined;
+            if (commentEdit) {
+              if (act.type !== 'comment') {
+                return toolError(`Action ${upd.index} is not a comment row: text, "text-color" and "background-color" apply to comment rows only.`);
+              }
+              editCommentRowInPlace(act, upd);
+            }
             if (upd.parameters) {
               const rowProblem = parameterlessRowError(act, upd.index);
               if (rowProblem) return toolError(rowProblem);
@@ -1803,7 +1992,7 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
     'update_event_variable',
     'Update an existing event variable declaration (rename, change type, change initial value). A SID shared by several events in the sheet is refused with a list of candidates; pass eventPath to pick one.',
     {
-      sheetName: z.string().max(200).describe('Event sheet containing the variable'),
+      sheetName: z.string().max(200).describe('Event sheet containing the variable, as registered (letter case included)'),
       sid: z.number().int().describe('SID of the variable event to update'),
       eventPath: eventPathSchema,
       newName: z.string().max(200).optional().describe('New variable name. Refused like in the editor: a name that matches, ignoring case, an event variable or function parameter in the variable\'s scope (for a global variable: anywhere in the project) or a System expression, or that has whitespace, punctuation such as - . : or a leading underscore'),
@@ -1819,6 +2008,9 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
         if (!hasUpdates) {
           return toolError('No updates provided. Specify at least one of: newName, newType, newInitialValue, isStatic, isConstant.');
         }
+        // Its name check compares the sheet with the other sheets by registered name
+        const unregistered = await unregisteredSheetError(reader, args.sheetName);
+        if (unregistered) return unregistered;
 
         let sheet: EventSheet;
         try {
@@ -1877,6 +2069,36 @@ export function registerEventTools({ server, reader, writer, idGen }: MutationTo
   );
 }
 
+/**
+ * Edit a comment row in place: its text and colours keep their place, a new
+ * colour goes where the editor writes it ({ type, text, "text-color",
+ * "background-color" }), and null removes a colour.
+ */
+function editCommentRowInPlace(
+  row: Record<string, unknown>,
+  edit: { text?: string; 'text-color'?: number[] | null; 'background-color'?: number[] | null },
+): void {
+  if (edit.text !== undefined) row.text = edit.text;
+  for (const key of ['text-color', 'background-color'] as const) {
+    const color = edit[key];
+    if (color === undefined) continue;
+    if (color === null) {
+      delete row[key];
+    } else if (key in row) {
+      row[key] = [...color];
+    } else {
+      // After the keys the editor writes before it
+      const before = key === 'text-color' ? ['type', 'text'] : ['type', 'text', 'text-color'];
+      const entries = Object.entries(row);
+      let at = 0;
+      entries.forEach(([k], i) => { if (before.includes(k)) at = i + 1; });
+      entries.splice(at, 0, [key, [...color]]);
+      for (const k of Object.keys(row)) delete row[k];
+      for (const [k, v] of entries) row[k] = v;
+    }
+  }
+}
+
 /** SIDs listed in the copied-SIDs warning; the rest are counted. */
 const MAX_LISTED_SHARED_SIDS = 10;
 
@@ -1909,6 +2131,28 @@ function copiedSidsWarning(
     `update_event_block, update_event_block_action, update_event_variable and delete_event_from_sheet refuse ${one ? 'this SID' : 'these SIDs'} ` +
     `in "${sheetName}" unless eventPath names one of the events.`
   );
+}
+
+/**
+ * A "not found" error when the project registers no event sheet under exactly
+ * `name`, else undefined. On a file system that ignores case the reader also
+ * opens a sheet by a name that differs in case, but the tools that check a
+ * sheet together with the other event sheets key them by their registered
+ * names: they would see that sheet twice, once as saved, and miss what the
+ * change does to it (issue #38). A name that differs only in letter case gets
+ * its own hint, as in update_object_properties.
+ */
+async function unregisteredSheetError(
+  reader: MutationToolDeps['reader'],
+  name: string,
+): Promise<ReturnType<typeof toolError> | undefined> {
+  const registered = await reader.listEventSheets();
+  if (registered.includes(name)) return undefined;
+  const sameIgnoringCase = registered.find(n => n.toLowerCase() === name.toLowerCase());
+  if (sameIgnoringCase !== undefined) {
+    return toolError(`Event sheet "${name}" not found: names are matched with their letter case. Did you mean "${sameIgnoringCase}"?`);
+  }
+  return notFoundError('Event sheet', name, reader.findNearestName(name, 'eventsheets'), 'list_eventsheets');
 }
 
 /**
@@ -2031,6 +2275,37 @@ function functionParameterNamesError(
     fn.functionParameters.push({ name });
   }
   return undefined;
+}
+
+/** Error text for a function name the editor would refuse (see event-variable-names.ts, Function names). */
+function functionNameMessage(problem: FunctionNameProblem, name: string, returnType: string): string {
+  if (problem.problem === 'invalid') {
+    return `"${name}" is not a valid name for a function with return type "${returnType}": ${problem.reason}. ` +
+      'A function with a return type is used in expressions (Functions.Name(...)), so Construct 3 gives it only a name ' +
+      'it accepts for an event variable: no whitespace, no punctuation such as - . : ( ), no leading underscore, not ' +
+      'only digits. A function without a return type (functionReturnType "none") may have such a name. Choose a different name.';
+  }
+  if (problem.problem === 'reserved') {
+    return `"${name}" is the name of the System expression "${problem.expression}"${problem.expression === name ? '' : ' (ignoring case)'}. ` +
+      'Construct 3 reserves the names of its built-in System functions for functions; choose a different name.';
+  }
+  const { use } = problem;
+  const same = use.name === name ? `A function named "${name}"` : `The function "${use.name}", which differs from "${name}" only in case,`;
+  return `${same} already exists in sheet "${use.sheet}" (${use.eventPath}${use.sid !== undefined ? `, SID ${use.sid}` : ''}). ` +
+    'Construct 3 requires a function name to differ, ignoring case, from every other function in the project (it looks ' +
+    'functions up ignoring case, so a call could not tell them apart). Choose a different name.';
+}
+
+/** Error text for a copy that would leave two function blocks whose names match ignoring case. */
+function copiedFunctionNameClashMessage(targetSheet: string, groups: readonly FunctionBlockName[][]): string {
+  const lines = groups.slice(0, 10).map(g =>
+    `- ${g.map(f => `"${f.name}" in sheet "${f.sheet}" (${f.eventPath})`).join(', ')}`);
+  if (groups.length > 10) lines.push(`- and ${groups.length - 10} more`);
+  return `Copying these events to "${targetSheet}" would leave function blocks whose names match, ignoring case:\n` +
+    `${lines.join('\n')}\n\n` +
+    'Construct 3 requires a function name to differ, ignoring case, from every other function in the project, and ' +
+    'renames a pasted function block; this tool keeps the names, so nothing was written. Move the function instead ' +
+    '(deleteSource: true).';
 }
 
 /** Error text for copied or moved events whose variable or parameter names clash in their new scope. */

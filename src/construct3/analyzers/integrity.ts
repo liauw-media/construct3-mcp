@@ -28,6 +28,7 @@ import { namedAfterAnyObject } from '../object-images.js';
 import type { BehaviorLookupData } from './behavior-refs.js';
 import { everyAnimation, expectedFrameImageName, frameImageBaseName, indexImageFiles } from '../animation-rename.js';
 import { nameKey } from '../names.js';
+import { duplicateFunctionNames, functionBlockNames } from '../event-variable-names.js';
 import {
   checkEventLoadRules,
   checkFamilyPlugins,
@@ -159,6 +160,7 @@ export async function validateProjectIntegrity(
   await checkBrokenObjectReferences(reader, objects, families, layouts, warnings);
   await checkMissingBehaviorsAndVariables(reader, families, warnings);
   checkDuplicateLayerNames(layouts, warnings);
+  checkDuplicateFunctionNames(eventSheets, warnings);
   checkBrokenEventSheetReferences(layouts, eventSheets, warnings);
   checkBrokenIncludes(eventSheets, warnings);
   checkMissingAddons(objects, reader, warnings);
@@ -177,8 +179,8 @@ export async function validateProjectIntegrity(
   // expression-syntax, empty-expression, trigger-placement, else-placement,
   // duplicate-object-name, family-plugin-mismatch, file-name-case-mismatch,
   // duplicate-layer-name, missing-behavior-entry, missing-behavior-or-variable,
-  // frame-image, hierarchy-link, orphaned-image
-  const checksRun = 28;
+  // frame-image, hierarchy-link, orphaned-image, duplicate-function-name
+  const checksRun = 29;
 
   return {
     valid: errors.length === 0 && unscannedFiles.length === 0,
@@ -1235,6 +1237,30 @@ function checkHierarchyLinks(layouts: Map<string, Layout>, warnings: IntegrityIs
   }
 }
 
+// ─── Check 6c: Duplicate Function Names ─────────────────────
+
+/**
+ * Function blocks whose names match ignoring case, anywhere in the project:
+ * the editor's Function dialog refuses such a name and renames a pasted
+ * function block, and calls resolve names ignoring case, so a call names one
+ * of them ambiguously. The loader reads function names without checking
+ * them, so this is a warning.
+ */
+function checkDuplicateFunctionNames(eventSheets: Map<string, EventSheet>, warnings: IntegrityIssue[]): void {
+  const sheets = new Map<string, C3Event[]>();
+  for (const [name, sheet] of eventSheets) if (Array.isArray(sheet.events)) sheets.set(name, sheet.events);
+  for (const group of duplicateFunctionNames(functionBlockNames(sheets))) {
+    warnings.push({
+      check: 'duplicate-function-name',
+      entity: `function:${group[0].name}`,
+      message: `${group.length} function blocks have the name "${group[0].name}", ignoring case: ` +
+        group.map(f => `"${f.name}" in eventSheets/${f.sheet} at ${f.eventPath}${f.sid !== undefined ? ` (sid ${f.sid})` : ''}`).join(', ') +
+        '. Construct 3 requires a function name to differ, ignoring case, from every other function in the project and looks functions up ignoring case, so a call to this name is ambiguous.',
+      suggestion: 'Keep one of them: delete the others (delete_event_from_sheet) or rename them in the editor.',
+    });
+  }
+}
+
 // ─── Check 7: Broken Event Sheet References ─────────────────
 
 function checkBrokenEventSheetReferences(
@@ -1574,9 +1600,10 @@ async function checkOrphanedObjects(
       check: 'orphaned-object',
       entity: `objectTypes/${orphan.name}`,
       message: `Object "${orphan.name}" (${orphan.pluginId}) is not used by any event (as condition/action object, object parameter, ` +
-        'expression or in a script action), not used through a family, has no instance in any layout (on any layer or sub-layer, ' +
+        'expression, in a script action or as the literal name of Create object (by name)), not used through a family, ' +
+        'has no instance in any layout (on any layer or sub-layer, ' +
         'including non-world instances) and no other instance names it in an object property',
-      suggestion: 'Before removing it, check what this analysis cannot see: project script files, objects created by name at runtime, ' +
+      suggestion: 'Before removing it, check what this analysis cannot see: project script files, objects created by a name built at runtime, ' +
         'and script references it does not recognise. delete_object refuses objects that are still referenced.' +
         (families.length > 0
           ? ` It is a member of ${families.map(f => `"${f}"`).join(', ')}: remove it from the family first (update_family removeMembers).`

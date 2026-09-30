@@ -34,6 +34,7 @@ import {
   type UnscannedFileReport,
   type UseRule,
 } from '../construct3/analyzers/unscanned-uses.js';
+import { OWN_FILE_UNCHECKED } from '../construct3/analyzers/object-deps.js';
 import { nameTerm, numberTerm } from '../construct3/raw-text-search.js';
 import { classifyReadError, type EntityCategory } from '../construct3/project-reader.js';
 import {
@@ -83,8 +84,10 @@ import {
   findEffectUses,
   type EffectUse,
 } from '../construct3/analyzers/effect-uses.js';
+import { withProjectSync } from './project-sync.js';
 
-export function registerObjectTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerObjectTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // ─── create_object ──────────────────────────────────────────
 
   server.tool(
@@ -319,6 +322,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
         // Add behaviors
         if (args.addBehaviors && args.addBehaviors.length > 0) {
+          // All of them before registering the first: an unknown one must not leave the others registered
+          for (const b of args.addBehaviors) writer.checkAddonRegistrable('behavior', b.behaviorId);
           for (const b of args.addBehaviors) {
             const bWarning = await writer.ensureAddonRegistered('behavior', b.behaviorId);
             if (bWarning) warnings.push(bWarning);
@@ -401,7 +406,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_object',
-    'Delete an object type from the project (checks references first: events, including object parameters, expressions and runtime.objects in script actions; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by name at runtime are not detected. The frame image files (or single image) of the object in images/ are kept as <file>.bak.',
+    'Delete an object type from the project (checks references first: events, including object parameters, expressions, runtime.objects in script actions and the literal name of System "Create object (by name)"; layout instances on any layer or sub-layer, including non-world instances; object properties of other instances; families). Refused without force while anything refers to the object; the response lists where. Event sheets, layouts and families that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the name (and, in layouts, the SID): a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. References in project script files and objects created by a name built at runtime are not detected. The frame image files (or single image) of the object in images/ are kept as <file>.bak.',
     {
       name: z.string().max(200).describe('Object name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -426,7 +431,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
           ownFileReports(index.unscannedFiles, [{
             category: 'objectTypes',
             name: args.name,
-            unchecked: 'its SID is unknown, so object properties of instances that hold it could not be checked',
+            unchecked: OWN_FILE_UNCHECKED,
           }]),
           await checkUnscannedFiles(reader, index.unscannedFiles, nameOrSidRules(
             args.name, index.sidOf(args.name), ['eventSheets', 'layouts', 'families'],
@@ -802,7 +807,7 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_family',
-    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions and runtime.objects in script actions; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. The family\u2019s effects count too, when a condition or action on a member names one ("effect" parameter, e.g. Set effect parameter) and the member has no effect of that name itself or through another family. References in project script files and script access to instance variables and behaviors of member instances are not detected.',
+    'Delete a family from the project (checks references first: events that name the family, including object parameters, expressions, runtime.objects in script actions and the literal name of System "Create object (by name)"; object properties of instances that hold its SID; its instance variables and behaviors used through a member object type, as the instance variable parameter or behavior of a condition/action on the member, as "Member.name" in an expression, or as "Self.name" in an expression of a condition/action on the member). Refused without force while anything refers to the family; the response lists where. Event sheets and layouts that could not be parsed (over the 10MB read limit, not valid JSON) are searched as text for the family\'s name and SID, and event sheets for its instance variables and behaviors together with a member\'s name: a match is a possible use and refuses without force, as does such a file that cannot be read at all; unscannedFiles lists them. The member object types are kept. The family\u2019s effects count too, when a condition or action on a member names one ("effect" parameter, e.g. Set effect parameter) and the member has no effect of that name itself or through another family. References in project script files, families created by a name built at runtime and script access to instance variables and behaviors of member instances are not detected.',
     {
       name: z.string().max(200).describe('Family name to delete'),
       force: z.boolean().optional().default(false).describe('If true, delete even if referenced (does NOT clean up references)'),
@@ -1102,6 +1107,7 @@ const EVENT_USE_LABELS: Record<ObjectReference['context'], string> = {
   expression: 'expression',
   script: 'script',
   'custom-action': 'custom action definition',
+  'create-by-name': 'Create object (by name)',
 };
 
 /** A short list for messages: the first few items and how many more there are. */
@@ -1363,17 +1369,21 @@ function boundedLists(lists: Record<string, unknown[]>): Record<string, unknown>
 /**
  * The force-delete warning for the uses validate_project cannot report
  * afterwards (it reports the other leftovers as broken-object-reference and
- * missing-behavior-or-variable): uses in expressions and scripts, which are
- * recognised by the names of existing objects only, and the uses of a
+ * missing-behavior-or-variable): uses in expressions, scripts and System
+ * "Create object (by name)" literals, which are recognised by the names of
+ * existing objects only, and the uses of a
  * family's instance variables and behaviors through its members written as
  * "Member.name" in expressions (`memberUses`: the caller passes only those).
  * Empty when there are none.
  */
 function unreportedUsesWarning(events: ObjectReference[], memberUses: FamilyMemberUse[] = []): string {
-  const inCode = events.filter(r => r.context === 'expression' || r.context === 'script');
+  const inCode = events.filter(r => r.context === 'expression' || r.context === 'script' || r.context === 'create-by-name');
   if (inCode.length === 0 && memberUses.length === 0) return '';
   const counts: string[] = [];
-  if (inCode.length > 0) counts.push(`${inCode.length} use(s) in expressions and scripts`);
+  if (inCode.length > 0) {
+    const byName = inCode.some(r => r.context === 'create-by-name');
+    counts.push(`${inCode.length} use(s) in expressions${byName ? ', scripts and Create object (by name)' : ' and scripts'}`);
+  }
   if (memberUses.length > 0) {
     counts.push(`${memberUses.length} use(s) of its instance variables and behaviors through members written as "Member.name" in expressions`);
   }
