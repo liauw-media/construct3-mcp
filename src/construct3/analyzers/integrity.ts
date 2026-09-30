@@ -1179,6 +1179,27 @@ function listFew(items: string[], max = 5): string {
  * and, per its loader source, cannot load such a layout; not reproduced in the
  * editor, so a warning. None of the editor-saved projects checked has one.
  */
+function checkDuplicateLayerNames(layouts: Map<string, Layout>, warnings: IntegrityIssue[]): void {
+  for (const [layoutName, layout] of layouts) {
+    for (const group of repeatedLayerNames(layout.layers)) {
+      const paths = group.map(entry => `"${layerPathLabel(entry)}"`);
+      const subLayer = group.find(entry => entry.depth > 0);
+      warnings.push({
+        check: 'duplicate-layer-name',
+        entity: `layouts/${layoutName}`,
+        message: `Layout "${layoutName}" has ${group.length} layers named "${String(group[0].layer.name)}" (ignoring case): ` +
+          `${paths.join(', ')}. Construct 3 looks layer names up ignoring case across all layers of a layout, ` +
+          'sub-layers included, and may fail to open this layout.',
+        suggestion: 'Rename all but one of them with update_layer, which finds a layer by its exact name or a sub-layer by its path' +
+          (subLayer ? ` (e.g. "${layerPathLabel(subLayer)}")` : '') +
+          '. Layers with the same name and the same path have to be renamed in the layout file.',
+      });
+    }
+  }
+}
+
+// ─── Check 6c: Duplicate Function Names ─────────────────────
+
 /**
  * Function blocks whose names match ignoring case, anywhere in the project:
  * the editor's Function dialog refuses such a name and renames a pasted
@@ -1198,25 +1219,6 @@ function checkDuplicateFunctionNames(eventSheets: Map<string, EventSheet>, warni
         '. Construct 3 requires a function name to differ, ignoring case, from every other function in the project and looks functions up ignoring case, so a call to this name is ambiguous.',
       suggestion: 'Keep one of them: delete the others (delete_event_from_sheet) or rename them in the editor.',
     });
-  }
-}
-
-function checkDuplicateLayerNames(layouts: Map<string, Layout>, warnings: IntegrityIssue[]): void {
-  for (const [layoutName, layout] of layouts) {
-    for (const group of repeatedLayerNames(layout.layers)) {
-      const paths = group.map(entry => `"${layerPathLabel(entry)}"`);
-      const subLayer = group.find(entry => entry.depth > 0);
-      warnings.push({
-        check: 'duplicate-layer-name',
-        entity: `layouts/${layoutName}`,
-        message: `Layout "${layoutName}" has ${group.length} layers named "${String(group[0].layer.name)}" (ignoring case): ` +
-          `${paths.join(', ')}. Construct 3 looks layer names up ignoring case across all layers of a layout, ` +
-          'sub-layers included, and may fail to open this layout.',
-        suggestion: 'Rename all but one of them with update_layer, which finds a layer by its exact name or a sub-layer by its path' +
-          (subLayer ? ` (e.g. "${layerPathLabel(subLayer)}")` : '') +
-          '. Layers with the same name and the same path have to be renamed in the layout file.',
-      });
-    }
   }
 }
 

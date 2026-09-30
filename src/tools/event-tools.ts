@@ -137,7 +137,6 @@ const DANGLING_KIND_LABELS: Record<DeleteReferenceKind, string> = {
   'variable-expression': 'expression(s) using it by name',
 };
 
-/** What happens to the uses a move takes out of their variable's scope (see findVariableReferencesLostByChange). */
 /**
  * Why a reference check that stopped at its traversal limit refuses without
  * force: what it did not reach is unknown, as for a file it could not parse.
@@ -147,6 +146,7 @@ function traversalLimitReason(checked: string): string {
     'across all event sheets), so uses further on are unknown.';
 }
 
+/** What happens to the uses a move takes out of their variable's scope (see findVariableReferencesLostByChange). */
 const SCOPE_LOSS_CONSEQUENCE =
   'A variable that is not at the top level of a sheet is local: only the events beside it and below them see it. ' +
   'After loading a project, Construct 3 resolves these names and throws "cannot find event variable" when one is ' +
