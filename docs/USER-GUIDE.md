@@ -2,7 +2,7 @@
 
 How to install construct3-mcp, connect it to your AI tool and use it on a Construct 3 project without losing work.
 
-This guide is for Construct 3 developers who want to use the server with Claude Code, Claude Desktop, Cursor or VS Code. You do not need to know how MCP works. It was written for version 1.9.2. Unless a section says otherwise, the commands and outputs below come from real runs on Windows 11 with Node.js 22 and Claude Code 2.1.284. Sections that only repeat another vendor's documentation say so.
+This guide is for Construct 3 developers who want to use the server with Claude Code, Claude Desktop, Cursor or VS Code. You do not need to know how MCP works. It was written for version 1.10.0. Unless a section says otherwise, the commands and outputs below come from real runs on Windows 11 with Node.js 22 and Claude Code 2.1.284. Sections that only repeat another vendor's documentation say so.
 
 ## Contents
 
@@ -74,11 +74,11 @@ npm ci
 `npm ci` installs the dependencies **and** compiles the server into `dist/` (the `prepare` script runs the build). It took 30 to 45 seconds in our tests. The output looks like this:
 
 ```
-> construct3-mcp-server@1.9.2 prepare
+> construct3-mcp-server@1.10.0 prepare
 > npm run build
 
 
-> construct3-mcp-server@1.9.2 build
+> construct3-mcp-server@1.10.0 build
 > tsc
 
 
@@ -715,7 +715,7 @@ Single backslashes or a trailing comma in a hand-written `.mcp.json`. See [Writi
 The editor still had the old project open and saved its older state over some or all of the changes. Use git to get them back if you committed, and follow [the safe editing workflow](#the-safe-editing-workflow) next time.
 
 **The AI doesn't see a change I made in Construct 3 or with git.**
-Update the server: since the release after 1.9.2 each tool call checks the project files and reads again what changed. With version 1.9.2 or older, reconnect the server (Claude Code: `/mcp` > `construct3` > **Reconnect**); those read the lists of objects, sheets and layouts once at start.
+Update the server: since 1.10.0 each tool call checks the project files and reads again what changed. With version 1.9.2 or older, reconnect the server (Claude Code: `/mcp` > `construct3` > **Reconnect**); those read the lists of objects, sheets and layouts once at start.
 
 **`Object "Player" already exists` right after I undid the session with git.**
 Version 1.9.2 and older keep the lists from before the undo: reconnect the server, or update it. See [Undoing a session](#undoing-a-session).

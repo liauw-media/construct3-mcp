@@ -87,7 +87,7 @@ Known gap: tools that edit the large file itself, such as `add_instance_to_layou
 
 ### Changes made in the C3 editor or with git
 
-Since the release after 1.9.2 the server picks up changes made outside it by itself: each tool call checks `project.c3proj`, and the files its caches hold, against the disk (modification time, size, file id) and reads again what changed. Reconnecting is no longer needed after a save in the editor or `git restore`. Older versions kept the project list from their start and needed a reconnect (Claude Code: `/mcp` > `construct3` > **Reconnect**).
+Since 1.10.0 the server picks up changes made outside it by itself: each tool call checks `project.c3proj`, and the files its caches hold, against the disk (modification time, size, file id) and reads again what changed. Reconnecting is no longer needed after a save in the editor or `git restore`. Older versions kept the project list from their start and needed a reconnect (Claude Code: `/mcp` > `construct3` > **Reconnect**).
 
 A change that keeps a file's size, modification time and file id (possible on file systems with coarse timestamps, such as FAT32 or some network drives) is not seen; reconnect the server in that case.
 
