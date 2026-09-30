@@ -587,9 +587,10 @@ export function registerAnimationTools({ server: mcpServer, reader, writer, idGe
           const kept = await frameChangeAfterOtherWrite(reader, args.objectName, anim.name, error,
             frames => frames.length === frameCount + 1 && frames[insertAt]?.imageSpriteId === imageSpriteId);
           if (kept !== true) {
-            const cause = error instanceof Error ? error.message : String(error);
+            // A refusal of the writer ends with a full stop already
+            const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
             throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, {
-              newFrameFile: images.newFrameFile, otherWrite: kept === false,
+              newFrameFile: images.newFrameFile, kept,
             })}`);
           }
           backupPath = (error as EntityWriteError).backupPath;
@@ -682,8 +683,9 @@ export function registerAnimationTools({ server: mcpServer, reader, writer, idGe
             frames => frames.length === frameCount - 1
               && (deletedId === undefined || !frames.some(frame => frame?.imageSpriteId === deletedId)));
           if (kept !== true) {
-            const cause = error instanceof Error ? error.message : String(error);
-            throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, { otherWrite: kept === false })}`);
+            // A refusal of the writer ends with a full stop already
+            const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+            throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, { kept })}`);
           }
           backupPath = (error as EntityWriteError).backupPath;
           otherWrite = true;
@@ -999,19 +1001,22 @@ function otherWriteKeptWarning(change: string): string {
  * placeholder image (`newFrameFile`), then rename the image files back, last
  * first. The placeholder's name was free before the call (see
  * planFrameImageShift), so a file there, also one a failed write left part
- * written, is removed. With `otherWrite`, another write replaced the object
- * file during this one with content that lacks this call's change: the file
- * is left as that write left it, and the image files are renamed back to
- * match it. Returns a sentence for the error message.
+ * written, is removed. When another write replaced the object file during
+ * this one (EntityWriteError.changedByOtherWrite), the file is left as that
+ * write left it, never restored over, and the image files are renamed back to
+ * match the object as it was: `kept` (frameChangeAfterOtherWrite) false says
+ * that write lacks this call's change, undefined that the file could not be
+ * read again to tell. Returns a sentence for the error message.
  */
 async function rollBackFrameChange(
   writer: MutationToolDeps['writer'],
   error: unknown,
   renames: ImageFileRename[],
-  options: { newFrameFile?: string; otherWrite?: boolean } = {},
+  options: { newFrameFile?: string; kept?: boolean } = {},
 ): Promise<string> {
   const failed: string[] = [];
-  const restore = error instanceof EntityWriteError && !options.otherWrite;
+  const otherWrite = error instanceof EntityWriteError && error.changedByOtherWrite;
+  const restore = error instanceof EntityWriteError && !otherWrite;
   if (restore) {
     try {
       await writer.restoreEntityFile(error.backupPath);
@@ -1034,21 +1039,24 @@ async function rollBackFrameChange(
       failed.push(`image files (${e instanceof Error ? e.message : String(e)})`);
     }
   }
-  const otherWrite = options.otherWrite
-    ? 'Another write replaced the object file during this one (a tool call running in parallel?) without this call\'s change; '
-      + 'the object file was left as that write left it. '
-    : '';
+  const unchecked = otherWrite && options.kept !== false;
+  const otherWriteNote = !otherWrite ? '' : unchecked
+    ? 'Another write replaced the object file during this one (a tool call running in parallel?), and the file could not be read again '
+      + 'to tell whether it kept this call\'s change; it was left as that write left it: re-read the object to check its frames. '
+    : 'Another write replaced the object file during this one (a tool call running in parallel?) without this call\'s change; '
+      + 'the object file was left as that write left it. ';
   if (failed.length > 0) {
-    return `${otherWrite}Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
+    return `${otherWriteNote}Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
   }
   const undone = [
     ...(renames.length > 0 ? ['the image files have their old names again'] : []),
     ...(placeholderRemoved ? ['the placeholder image was removed'] : []),
     ...(restore ? ['the object file was restored from its backup'] : []),
   ];
-  return otherWrite + (undone.length === 0
-    ? 'Nothing was changed.'
-    : `Nothing was changed: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`);
+  const nothing = unchecked ? 'The rest was rolled back' : 'Nothing was changed';
+  return otherWriteNote + (undone.length === 0
+    ? `${nothing}.`
+    : `${nothing}: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`);
 }
 
 /**
