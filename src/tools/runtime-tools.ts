@@ -301,42 +301,66 @@ async function planBridgeImport(projectDir: string, mainScript: string): Promise
   return { file, before, text: `${bom}import "${specifier}"; ${BRIDGE_IMPORT_MARKER}${eol}${body}` };
 }
 
-/** Script files under scripts/ (paths relative to it, with "/"), except the bridge itself. */
-async function scriptFiles(scriptsDir: string, prefix = '', depth = 0): Promise<string[]> {
+/**
+ * Script files under scripts/ (paths relative to it, with "/"), except the
+ * bridge itself. A folder that cannot be listed, for another reason than
+ * that there is none, is added to `unreadable`: it may hold scripts.
+ */
+async function scriptFiles(scriptsDir: string, unreadable: UnreadableScript[], prefix = '', depth = 0): Promise<string[]> {
   if (depth > 32) return [];
   let entries;
   try {
     entries = await readdir(prefix ? join(scriptsDir, ...prefix.split('/')) : scriptsDir, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    // No scripts folder (or a file in its place): no scripts
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') unreadable.push({ label: prefix ? `scripts/${prefix}` : 'scripts', reason: readFailure(error) });
     return [];
   }
   const found: string[] = [];
   for (const entry of entries) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) found.push(...await scriptFiles(scriptsDir, path, depth + 1));
+    if (entry.isDirectory()) found.push(...await scriptFiles(scriptsDir, unreadable, path, depth + 1));
     else if (entry.isFile() && /\.(?:m?js|ts)$/iu.test(entry.name) && path !== BRIDGE_FILENAME) found.push(path);
   }
   return found;
+}
+
+/** A script file or folder under scripts/ that could not be read, with why (readFailure). */
+interface UnreadableScript {
+  label: string;
+  reason: string;
+}
+
+/** Why a file or folder could not be read, for a message: the fs error code (its message carries the absolute path), or the message. */
+function readFailure(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (typeof code === 'string') return code;
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
  * The scripts that import the bridge, with their text before and once those
  * import lines are gone (byte order mark and line endings kept). Throws,
  * before anything is written, when a script uses the bridge in a way that
- * cannot be taken out line by line: after the bridge file is deleted, that
- * script would import a file that no longer exists and the game would not
- * load.
+ * cannot be taken out line by line, or when a script or a folder under
+ * scripts/ cannot be read, so whether it imports the bridge is not known:
+ * after the bridge file is deleted, such a script would import a file that
+ * no longer exists and the game would not load.
  */
 async function planImportRemoval(projectDir: string): Promise<Array<{ path: string; file: string; before: string; text: string }>> {
   const scriptsDir = join(projectDir, 'scripts');
   const changes: Array<{ path: string; file: string; before: string; text: string }> = [];
   const blocking: string[] = [];
-  for (const path of await scriptFiles(scriptsDir)) {
+  const unreadable: UnreadableScript[] = [];
+  for (const path of await scriptFiles(scriptsDir, unreadable)) {
     const file = resolveProjectPath(projectDir, 'scripts', ...path.split('/'));
     let text: string;
     try {
       text = await readFile(file, 'utf-8');
-    } catch {
+    } catch (error) {
+      // Gone since the folder was listed: it imports nothing
+      if (!isNotFound(error)) unreadable.push({ label: `scripts/${path}`, reason: readFailure(error) });
       continue;
     }
     if (!text.includes(BRIDGE_FILENAME)) continue;
@@ -347,6 +371,13 @@ async function planImportRemoval(projectDir: string): Promise<Array<{ path: stri
   }
   if (blocking.length > 0) {
     throw new Error(`Nothing was changed: ${blocking.join(', ')} ${blocking.length === 1 ? 'uses' : 'use'} the bridge in a way remove_runtime_bridge cannot take out (only a line that just imports it, such as the one inject_runtime_bridge adds, is removed). Without the bridge file the game would not load. Remove that use of ${BRIDGE_FILENAME}, then call remove_runtime_bridge again.`);
+  }
+  if (unreadable.length > 0) {
+    const one = unreadable.length === 1;
+    const named = one
+      ? `${unreadable[0].label} could not be read (${unreadable[0].reason})`
+      : `${unreadable.map(item => `${item.label} (${item.reason})`).join(', ')} could not be read`;
+    throw new Error(`Nothing was changed: ${named}, so remove_runtime_bridge cannot tell whether ${one ? 'it imports' : 'they import'} the bridge. Without the bridge file, a script that imports it would keep the game from loading. Close the program that holds ${one ? 'it' : 'them'}, or give read access, then call remove_runtime_bridge again.`);
   }
   return changes;
 }
@@ -398,7 +429,8 @@ async function applyAllOrNothing(projectDir: string, steps: readonly BridgeStep[
         if (!isNotFound(undoError)) notRestored.push(relative(projectDir, step.path).replace(/\\/gu, '/') || '.');
       }
     }
-    const message = error instanceof Error ? error.message : String(error);
+    // A cause that ends with a full stop (a refusal) gets no second one
+    const message = (error instanceof Error ? error.message : String(error)).replace(/\.\s*$/u, '');
     throw new Error(notRestored.length === 0
       ? `${message}. The bridge was not ${what}: the files this call had written are back as they were.`
       : `${message}. The bridge was not ${what}, and ${notRestored.join(', ')} could not be put back as ${notRestored.length === 1 ? 'it was' : 'they were'}: check ${notRestored.length === 1 ? 'it' : 'them'} before going on.`);
@@ -432,16 +464,37 @@ async function bridgeFileBefore(bridgePath: string): Promise<string | undefined>
 }
 
 /**
+ * A step that runs `assertProjectCurrent` (writer.assertProjectFileCurrent)
+ * right before project.c3proj is written: the text written was built from
+ * the file as read at the start, so a change saved on disk since the server
+ * loaded it (#51) would be replaced. A step of its own, so its refusal leaves
+ * project.c3proj as it is (the write's undo would put the text read at the
+ * start over that change) and undoes the files written before.
+ */
+function projectFileCheck(c3projPath: string, assertProjectCurrent: (() => Promise<void>) | undefined): BridgeStep[] {
+  return assertProjectCurrent ? [{ path: c3projPath, apply: assertProjectCurrent, undo: async () => undefined }] : [];
+}
+
+/**
  * Write the bridge script into `projectDir` and register it so Construct
  * loads it: imported by the main script, or as the main script when the
  * project has none. A registration an earlier version wrote (a
  * "file-info" entry with purpose none, which nothing loaded) is replaced; a
- * new entry gets its SID from `newSid` (the project's ID generator). All or
- * nothing: the files are read and the changes worked out before the first
- * write, and when a write fails the files written before it are put back as
- * they were (the bridge file removed again if the call created it).
+ * new entry gets `sid`, from the project's ID generator, taken before this
+ * reads project.c3proj (the ID generator may scan the whole project for it).
+ * `assertProjectCurrent`, for the open project, refuses right before
+ * project.c3proj is written when it changed on disk since the server loaded
+ * it (projectFileCheck). All or nothing: the files are read and the changes
+ * worked out before the first write, and when a write fails or is refused
+ * the files written before it are put back as they were (the bridge file
+ * removed again if the call created it).
  */
-async function installBridge(projectDir: string, c3projPath: string, newSid: () => Promise<number>): Promise<BridgeInstall> {
+async function installBridge(
+  projectDir: string,
+  c3projPath: string,
+  sid: number,
+  assertProjectCurrent?: () => Promise<void>,
+): Promise<BridgeInstall> {
   const raw = await readFile(c3projPath, 'utf-8');
   const c3proj = parseJsonText(raw) as Record<string, unknown>;
   const folders = (c3proj.rootFileFolders ??= {}) as Record<string, ScriptFolder>;
@@ -456,11 +509,11 @@ async function installBridge(projectDir: string, c3projPath: string, newSid: () 
   const loadedAs: BridgeLoading = scriptsType === 'classic' ? 'classic' : mainScript ? 'import' : 'main';
   const purpose = loadedAs === 'main' ? 'main' : 'none';
 
-  const entryFor = async (earlier: Record<string, unknown> | undefined) => ({
+  const entryFor = (earlier: Record<string, unknown> | undefined) => ({
     name: BRIDGE_FILENAME,
     type: 'application/javascript',
     // A replaced entry keeps its SID; a new one gets one that no other SID of the project has
-    sid: typeof earlier?.sid === 'number' ? earlier.sid : await newSid(),
+    sid: typeof earlier?.sid === 'number' ? earlier.sid : sid,
     'script-info': { purpose },
   });
   const rootIndex = scripts.items.findIndex(item => item?.name === BRIDGE_FILENAME);
@@ -470,10 +523,10 @@ async function installBridge(projectDir: string, c3projPath: string, newSid: () 
     const current = scripts.items[rootIndex];
     const upToDate = current['file-info'] === undefined
       && (current['script-info'] as { purpose?: unknown } | undefined)?.purpose === purpose;
-    if (!upToDate) scripts.items[rootIndex] = await entryFor(current);
+    if (!upToDate) scripts.items[rootIndex] = entryFor(current);
   } else {
     const existing = takeBridgeEntries(scripts);
-    scripts.items.push(await entryFor(existing[0]));
+    scripts.items.push(entryFor(existing[0]));
   }
   // Written only when something changed, so a repeated call leaves the file as it was.
   const text = serializeJson(c3proj, jsonTextStyleOf(raw));
@@ -499,6 +552,7 @@ async function installBridge(projectDir: string, c3projPath: string, newSid: () 
   ];
   const writes: DirectWrite[] = [{ path: bridgePath, text: bridgeText }];
   if (registered) {
+    steps.push(...projectFileCheck(c3projPath, assertProjectCurrent));
     steps.push({ path: c3projPath, apply: () => writeFile(c3projPath, text, 'utf-8'), undo: () => restoreText(c3projPath, raw) });
     writes.push({ path: c3projPath, text });
   }
@@ -517,15 +571,19 @@ async function installBridge(projectDir: string, c3projPath: string, newSid: () 
 /**
  * Take the bridge out again: the lines importing it (the marked line
  * inject_runtime_bridge added, or one typed by hand), its entry, its file.
- * Refuses before writing anything while a script uses the bridge otherwise.
+ * Refuses before writing anything while a script uses the bridge otherwise,
+ * or a script or folder under scripts/ cannot be read (planImportRemoval).
  * All or nothing, like installBridge: everything is read and worked out
- * before the first write, and when a write fails the files written before
- * it are put back as they were. A folder in the bridge file's place is not
- * the bridge and is left as it is.
+ * before the first write, `assertProjectCurrent` refuses right before
+ * project.c3proj is written when it changed on disk since the server loaded
+ * it, and when a write fails or is refused the files written before it are
+ * put back as they were. A folder in the bridge file's place is not the
+ * bridge and is left as it is.
  */
 async function uninstallBridge(
   projectDir: string,
   c3projPath: string,
+  assertProjectCurrent?: () => Promise<void>,
 ): Promise<{ entries: number; importRemoved: boolean; scriptsChanged: string[]; writes: DirectWrite[] }> {
   const imports = await planImportRemoval(projectDir);
   const raw = await readFile(c3projPath, 'utf-8');
@@ -543,6 +601,7 @@ async function uninstallBridge(
     writes.push({ path: change.file, text: change.text });
   }
   if (text !== undefined) {
+    steps.push(...projectFileCheck(c3projPath, assertProjectCurrent));
     steps.push({ path: c3projPath, apply: () => writeFile(c3projPath, text, 'utf-8'), undo: () => restoreText(c3projPath, raw) });
     writes.push({ path: c3projPath, text });
   }
@@ -581,8 +640,24 @@ export function registerRuntimeTools({ server: mcpServer, reader, writer }: Runt
   const server = withProjectSync(mcpServer, reader);
   const connections = new RuntimeConnectionManager();
   const previews = new PreviewManager();
-  // The bridge entry's SID, from the project's ID generator (a clone starts as a copy of the project, so it serves there too)
-  const newSid = () => writer.generateSid();
+  /**
+   * Add the bridge to the open project (inject_runtime_bridge, and
+   * export_for_preview and pack_project when they add it), then bring the
+   * reader, the index and the ID generator in line with the files written.
+   * The SID for a new bridge entry is taken first, whether it is used or
+   * not: the ID generator may scan the whole project for it, which must not
+   * run between the check that project.c3proj is as the server loaded it and
+   * the write of that file. The check runs before the first write and again
+   * right before project.c3proj is written (#51).
+   */
+  const addBridge = async (): Promise<BridgeInstall> => {
+    const sid = await writer.generateSid();
+    // project.c3proj changed on disk during this call: refused before the first write (#51)
+    await writer.assertProjectFileCurrent();
+    const install = await installBridge(reader.getProjectDir(), reader.getProjectPath(), sid, () => writer.assertProjectFileCurrent());
+    await writer.afterDirectWrites(install.writes);
+    return install;
+  };
 
   // ── inject_runtime_bridge ─────────────────────────────────
 
@@ -593,10 +668,7 @@ export function registerRuntimeTools({ server: mcpServer, reader, writer }: Runt
     async () => {
       try {
         const projectDir = reader.getProjectDir();
-        // project.c3proj changed on disk during this call: refused before the first write (#51)
-        await writer.assertProjectFileCurrent();
-        const install = await installBridge(projectDir, reader.getProjectPath(), newSid);
-        await writer.afterDirectWrites(install.writes);
+        const install = await addBridge();
         return toolResult({
           success: true,
           injected: true,
@@ -621,9 +693,9 @@ export function registerRuntimeTools({ server: mcpServer, reader, writer }: Runt
     async () => {
       try {
         const projectDir = reader.getProjectDir();
-        // project.c3proj changed on disk during this call: refused before the first write (#51)
+        // project.c3proj changed on disk during this call: refused before the first write, and checked again right before it is written (#51)
         await writer.assertProjectFileCurrent();
-        const removed = await uninstallBridge(projectDir, reader.getProjectPath());
+        const removed = await uninstallBridge(projectDir, reader.getProjectPath(), () => writer.assertProjectFileCurrent());
         await writer.afterDirectWrites(removed.writes);
         return toolResult({
           success: true,
@@ -1169,10 +1241,7 @@ print(json.dumps({
         // Inject bridge if requested
         let install: BridgeInstall | undefined;
         if (injectBridge) {
-          // project.c3proj changed on disk during this call: refused before the first write (#51)
-          await writer.assertProjectFileCurrent();
-          install = await installBridge(projectDir, reader.getProjectPath(), newSid);
-          await writer.afterDirectWrites(install.writes);
+          install = await addBridge();
           checks.push({ check: 'runtimeBridge', status: install.loadedAs === 'classic' ? 'warning' : 'ok', detail: loadingMessage(install) });
         }
 
@@ -1218,7 +1287,8 @@ print(json.dumps({
           // Register the bridge in the cloned project, the same way as in the open one
           const c3projFiles = (await readdir(targetDir)).filter(f => f.endsWith('.c3proj'));
           if (c3projFiles.length > 0) {
-            await installBridge(targetDir, join(targetDir, c3projFiles[0]), newSid);
+            // The clone starts as a copy of the open project, so a SID new there is new in the clone
+            await installBridge(targetDir, join(targetDir, c3projFiles[0]), await writer.generateSid());
           }
         }
 
@@ -1253,10 +1323,7 @@ print(json.dumps({
         // Optionally inject bridge first
         let install: BridgeInstall | undefined;
         if (injectBridge) {
-          // project.c3proj changed on disk during this call: refused before the first write (#51)
-          await writer.assertProjectFileCurrent();
-          install = await installBridge(projectDir, reader.getProjectPath(), newSid);
-          await writer.afterDirectWrites(install.writes);
+          install = await addBridge();
         }
 
         // Collect all project files

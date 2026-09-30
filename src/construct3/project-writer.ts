@@ -441,6 +441,9 @@ export class Construct3ProjectWriter {
    * (reader.loadProject) would not do: it records the file's new state, so
    * no change on disk is found, the disk epoch does not move, and the index
    * and the ID generator keep what they built from the old file.
+   * project.c3proj counts as the tool's only while it holds exactly the text
+   * the tool wrote: one saved again since (in the editor) is left to the next
+   * call's check, which takes it in as a change made outside the server.
    */
   async afterDirectWrites(writes: ReadonlyArray<DirectWrite>): Promise<void> {
     const projectPath = this.reader.getProjectPath();
@@ -450,10 +453,11 @@ export class Construct3ProjectWriter {
       if (fileKey(path) === projectKey) projectText = text;
       else this.afterOwnWrite(path, await statFileState(path));
     }
-    if (projectText !== undefined) {
-      noteFileWritten(projectKey, await statFileState(projectPath));
+    const state = typeof projectText === 'string' ? await this.stateIfHolding(projectPath, projectText) : undefined;
+    if (typeof projectText === 'string' && state !== undefined) {
+      noteFileWritten(projectKey, state);
       await this.reader.reloadProject();
-      if (projectText !== null) this.idGen.noteWrittenText(projectText);
+      this.idGen.noteWrittenText(projectText);
     }
     resetProjectIndex(this.reader);
   }
