@@ -84,6 +84,7 @@ import {
   findEffectUses,
   type EffectUse,
 } from '../construct3/analyzers/effect-uses.js';
+import { StaleFileError } from '../construct3/disk-state.js';
 import { withProjectSync } from './project-sync.js';
 
 export function registerObjectTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
@@ -471,7 +472,11 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
         // Its frame images (or single image) lose their user: kept as .bak, like
         // the image of a deleted frame. Renamed first; when the object file cannot
         // be deleted or project.c3proj not updated, the object file is restored
-        // and the images renamed back.
+        // and the images renamed back. A write refused because a file changed on
+        // disk during the call (StaleFileError) has had the writer put back the
+        // files the call changed, or name those it had to leave as they are (an
+        // object file saved again in the editor), so only the image renames,
+        // which the writer does not track, are undone here.
         const images = await planDeletedObjectImages(reader, writer, args.name);
         const renames = images.parking?.renames ?? [];
         if (renames.length > 0) await writer.renameImageFiles(renames);
@@ -481,9 +486,11 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
           backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
           await writer.removeFromProject('objectTypes', args.name);
         } catch (error) {
-          const rollback = await rollBackObjectDelete(writer, backupPath, renames);
+          const rollback = await rollBackObjectDelete(writer, error instanceof StaleFileError ? undefined : backupPath, renames);
           if (rollback === '') throw error;
-          throw new Error(`${error instanceof Error ? error.message : String(error)}. ${rollback}`);
+          // A refusal of the writer ends with a full stop already
+          const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+          throw new Error(`${cause}. ${rollback}`);
         }
         warnings.push(...images.warnings);
 
@@ -947,7 +954,8 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
 
 /**
  * Undo what delete_object did before a step failed: restore the object file
- * from `backupPath` (when it was deleted) and rename the image files back
+ * from `backupPath` (when it was deleted and the writer did not put it back
+ * itself, as it does for a write refused as stale) and rename the image files back
  * from .bak (`renames`, as made). Returns sentences on what was undone and
  * what could not be, naming the files to recover by hand; empty when there
  * was nothing to undo.

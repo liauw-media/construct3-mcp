@@ -58,6 +58,7 @@ import {
   type LayerNameUse,
 } from '../construct3/layer-references.js';
 import { EntityWriteError } from '../construct3/project-writer.js';
+import { StaleFileError } from '../construct3/disk-state.js';
 import { withProjectSync } from './project-sync.js';
 
 /**
@@ -906,7 +907,10 @@ export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }
         if (args.scaleRate !== undefined) layer.scaleRate = args.scaleRate;
         if (args.zElevation !== undefined) layer.zElevation = args.zElevation;
 
-        // The layout first, then the event sheets; a failure restores what was written
+        // The layout first, then the event sheets; a failure restores what was written.
+        // A write refused because its file changed on disk during the call (StaleFileError)
+        // has had the writer put back what the call wrote, or name the files it had to
+        // leave as they are (saved again in the editor), which must not be restored over
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
         const written = [backupPath];
@@ -915,6 +919,7 @@ export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }
             written.push(await writer.writeEntityFile('eventSheets', sheetName, sheet, writer.getSubfolderForEntity('eventSheets', sheetName)));
           }
         } catch (error) {
+          if (error instanceof StaleFileError) throw error;
           if (error instanceof EntityWriteError) written.push(error.backupPath);
           const failed: string[] = [];
           for (const backup of written.reverse()) {
@@ -924,7 +929,7 @@ export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }
               failed.push(backup.replace(/\.bak$/, ''));
             }
           }
-          const cause = error instanceof Error ? error.message : String(error);
+          const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
           throw new Error(failed.length === 0
             ? `${cause}. The rename was rolled back: the layout and the event sheets written before were restored from their backups.`
             : `${cause}. Restoring failed for: ${failed.join('; ')} (the .bak files hold the previous JSON).`);

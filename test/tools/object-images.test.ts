@@ -166,6 +166,79 @@ describe('delete_object keeps the object\'s image files as .bak', () => {
   });
 });
 
+/**
+ * A write refused because its file changed on disk during the call (#51):
+ * the writer puts back what the call changed, or names the files it has to
+ * leave as they are; delete_object renames the images back, which the writer
+ * does not track, and never restores the object file over a save of the
+ * editor.
+ */
+describe('delete_object refused because a file changed on disk during the call', () => {
+  const IMAGES = ['coin-animation 1-000.png', 'coin-spin-000.png', 'coin-spin-001.jpg'];
+
+  /** The object file as the editor saves it with a new instance variable. */
+  async function editorText(): Promise<string> {
+    const obj = JSON.parse(await readFile(objectPath('Coin'), 'utf8'));
+    obj.instanceVariables = [...(obj.instanceVariables ?? []), { name: 'fromEditor', type: 'number', initialValue: 0, sid: 900000000000123 }];
+    return JSON.stringify(obj, null, '\t');
+  }
+
+  it('renames the images back when the object file was saved in the editor before its delete', async () => {
+    await createCoin();
+    const saved = await editorText();
+    const deleteEntityFile = writer.deleteEntityFile.bind(writer);
+    writer.deleteEntityFile = async (...args) => {
+      await writeFile(objectPath('Coin'), saved);
+      return deleteEntityFile(...args);
+    };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('objectTypes/Coin.json was changed on disk after this server read it');
+    expect(text).toContain('it reads the file as it is now. Its image files were renamed back from .bak.');
+    expect(text).not.toContain('The object file was restored');
+    expect(await readFile(objectPath('Coin'), 'utf8')).toBe(saved);
+    expect(await images()).toEqual(IMAGES);
+    expect(reader.getProject().objectTypes.items).toContain('Coin');
+  });
+
+  it('leaves an object file the editor saved again after the delete as it is when project.c3proj keeps changing', async () => {
+    await createCoin();
+    const saved = await editorText();
+    const removeFromProject = writer.removeFromProject.bind(writer);
+    writer.removeFromProject = async (...args) => {
+      // The object file is deleted by now: the editor saves it again
+      await writeFile(objectPath('Coin'), saved);
+      return removeFromProject(...args);
+    };
+    // project.c3proj changes between each read of the update and its write, so the update is refused
+    const internals = writer as unknown as { createBackup: (path: string) => Promise<string> };
+    const createBackup = internals.createBackup.bind(writer);
+    let saves = 0;
+    internals.createBackup = async (path: string) => {
+      const backup = await createBackup(path);
+      if (path.endsWith('project.c3proj')) {
+        const project = JSON.parse(await readFile(join(tmpDir, 'project.c3proj'), 'utf8'));
+        project.properties.author = `Editor${'!'.repeat(++saves)}`;
+        await writeFile(join(tmpDir, 'project.c3proj'), JSON.stringify(project, null, '\t'));
+      }
+      return backup;
+    };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('project.c3proj was changed on disk after this server read it');
+    expect(text).toContain('left as they are (changed on disk again after this call wrote them, or their backup was replaced): ' +
+      'objectTypes/Coin.json (its state from before the call is in objectTypes/Coin.json.bak)');
+    expect(text).toContain('before you run the tool again. Its image files were renamed back from .bak.');
+    expect(text).not.toContain('The object file was restored');
+    expect(await readFile(objectPath('Coin'), 'utf8')).toBe(saved);
+    expect(await images()).toEqual(IMAGES);
+  });
+});
+
 describe('validate_project orphaned-image', () => {
   it('reports files in images/ named after no object type, grouped by the name they were stored for', async () => {
     await mkdir(imagesDir(), { recursive: true });
