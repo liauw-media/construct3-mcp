@@ -48,11 +48,12 @@ C3_PROJECT_PATH=/path/to/project npm start
 ```
 construct3-mcp/
 ├── src/
-│   ├── index.ts                    # Entry point — server init, registration
+│   ├── index.ts                    # Entry point: project path, server setup, registration, shutdown
 │   ├── construct3/                 # Core project logic
-│   │   ├── project-reader.ts       # Read-only file access with caching
-│   │   ├── project-writer.ts       # Safe writes (backup/validate/write/verify)
+│   │   ├── project-reader.ts       # Project file reads, caches, checks for changes on disk
+│   │   ├── project-writer.ts       # Safe writes (backup/validate/write/verify), project.c3proj updates, undo of a tool call's writes
 │   │   ├── id-generator.ts         # SID/UID/imageSpriteId generation with collision avoidance
+│   │   ├── disk-state.ts           # File states on disk, tool call scope, stale-write error
 │   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
@@ -65,18 +66,19 @@ construct3-mcp/
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
 │   │   ├── names.ts                # Case-insensitive name and folder comparison
-│   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
+│   │   ├── event-variable-names.ts # Editor name rules for event variables, function parameters and function names
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
-│   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
+│   │   ├── png-generator.ts        # Zero-dep placeholder PNGs and image file names
 │   │   ├── raw-text-search.ts      # Streamed whole-word text search and UID/SID scan in files the reader skips
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/              # Analysis modules
 │   │       ├── index-builder.ts    # Cross-reference index (cached per reader)
-│   │       ├── event-flow.ts       # Include hierarchy visualization, function map
-│   │       ├── object-deps.ts      # Object dependency tracking, orphaned objects
-│   │       ├── asset-usage.ts      # Asset tracking
+│   │       ├── event-flow.ts       # Event sheet include hierarchy and layout bindings, function map
+│   │       ├── object-deps.ts      # Object dependencies, orphaned and unanalysed objects
+│   │       ├── asset-usage.ts      # Asset usage tracking
 │   │       ├── animations.ts       # Sprite animation trees (items + subfolders)
+│   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
 │   │       ├── performance.ts      # Performance heuristics
 │   │       ├── integrity.ts        # Project integrity checks (validate_project)
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
@@ -85,16 +87,15 @@ construct3-mcp/
 │   │       ├── delete-references.ts # Function and variable names an event or sheet delete would leave dangling
 │   │       ├── unscanned-uses.ts   # Possible uses in registered files the bulk reads skipped
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
-│   │       ├── effect-uses.ts      # Conditions/actions that name an effect of their object
-│   │       ├── group-settings.ts   # Event group settings
-│   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
+│   │       ├── effect-uses.ts      # Conditions and actions that name an effect of their object (family effect checks)
+│   │       ├── group-settings.ts   # Event group settings (get_group_settings)
 │   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
 │   │       └── script-scan.ts      # Lightweight JS/TS scanner for script actions
 │   ├── resources/                  # MCP resource handlers
 │   │   ├── project.ts              # Project data resources (6)
 │   │   ├── docs.ts                 # Documentation resources (3)
 │   │   └── pitfalls.ts             # Curated pitfalls text (construct3://docs/pitfalls)
-│   ├── runtime/
+│   ├── runtime/                    # Runtime bridge, CDP client, preview server
 │   │   ├── bridge.ts               # Injectable runtime bridge script generator
 │   │   ├── cdp-client.ts           # CDP client: game connections, bridge calls, input, screenshots
 │   │   ├── preview-server.ts       # Loopback server for exported games, browser launch
@@ -104,6 +105,7 @@ construct3-mcp/
 │   │   ├── analysis.ts             # Analysis tools (11)
 │   │   ├── mutations.ts            # Registers the domain tool modules below
 │   │   ├── shared.ts               # Validation, result/error helpers, editor reload note
+│   │   ├── project-sync.ts         # withProjectSync: each handler in a tool call scope, after a check of project.c3proj on disk
 │   │   ├── object-tools.ts         # Object and family tools (6)
 │   │   ├── event-tools.ts          # Event sheet tools (12)
 │   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators, load-time gate
@@ -119,6 +121,7 @@ construct3-mcp/
 │   ├── tools/                      # Tool handler tests (through the mock server)
 │   ├── resources/                  # Resource and prompt tests
 │   ├── runtime/                    # Runtime bridge, CDP client and preview server tests (live-browser.test.ts needs Chrome or Edge)
+│   ├── helpers/                    # Fake Construct export and WebSocket server for the runtime tests, file-system case check
 │   ├── acceptance/                 # End-to-end round trip through the tool handlers
 │   ├── mocks/                      # Mock MCP server, reader, writer, ID generator
 │   └── fixtures/                   # Small Construct 3 projects used by the tests
