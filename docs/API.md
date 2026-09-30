@@ -514,6 +514,7 @@ Delete an object type from the project.
 - Backs up the JSON file and removes from c3proj
 - Keeps the object's image files as `<file>.bak` (`<file>.1.bak`, … when that name is taken), as `delete_frame_from_animation` keeps the image of a deleted frame: every frame image of every animation (animation folders included), `images/<object>-<animation>-NNN.<ext>` with the extension of the frame's `fileType`, or the single image `images/<object>.<ext>` of a Tiled Background, 9-patch and other plugins that save one `image`; names are compared ignoring case and Unicode normalization. A warning names them. A file that another object type's frames also use (the same name) is left in place, as is one named after an object type whose file could not be parsed. The image files are renamed first; if the object file cannot be deleted or `project.c3proj` cannot be updated, the object file is restored from its backup (and `project.c3proj` too, when its update was written but the check after the write failed) and the images are renamed back (the error names any file that could not be put back; an object file or `project.c3proj` saved again in the editor meanwhile is left as it is, see [Error Response](#error-response)). When the object's own file could not be parsed (deleted with `force`), its images are unknown and left as they are, with a warning
 
+### `create_family`
 
 Create a new family. Families group object types of one plugin and share instance variables and behaviors across them.
 
@@ -563,7 +564,7 @@ Delete a family. The member object types are kept. The layout instances of its m
 
 **Behavior:**
 - Checks for references first. Uses of the family's name count as for [`delete_object`](#delete_object): the family as the object of a condition or action or of a custom action, in object parameters, expressions and script actions (`runtime.objects.Family`), and object properties of instances that hold its SID. Uses through a member count too: the `"instance-variable"` parameter or the `behaviorType` of a condition or action whose object is a member, an `"instance-variable"` parameter `{ name, objectClass }` that names a member (System *Sort Z order*), `Member.name`, `Member(0).name` or `Member.Behavior.Expression` in a parameter expression, and `Self.name` or `Self.Behavior.Expression` in a parameter expression of a condition or action whose object is a member, where `name` is an instance variable or behavior the member gets from this family only (not one it declares itself or also gets from another family). Names are matched ignoring case, as in [`update_object_properties`](#update_object_properties). A family's effects count as used through a member when a condition or action on the member names one in its `"effect"` parameter (Set effect enabled, Set effect parameter), which the editor saves as a quoted name (`"effect": "\"AdjustHSL\""`, checked on Scirra's example projects, where actions on a member name its family's effect this way), matched ignoring case, and the member has no effect of that name itself or through another family. System conditions and actions name layer and layout effects and do not count. An effect parameter that is another expression than a quoted name cannot be checked and gets a warning. Not detected: project script files and script access to instance variables and behaviors of member instances (`instVars`, `behaviors`)
-- If referenced and `force=false`: blocks (`action: "delete_blocked"`) and lists where the family is used. `message` sums it up; `references` holds `eventSheets` and `layouts` (names), `events` and `instanceProperties` (as for `delete_object`) `effectUses` (`{ eventSheet, eventPath, ace, sid, member, effect }`, only when there are any) and `memberUses` (`{ eventSheet, path, eventPath, sid, member, kind, name, context }`, `eventPath` and `sid` as for the `uses` of [`update_object_properties`](#update_object_properties), `kind` being `instance variable` or `behavior` and `context` `condition`, `action` or `expression`). Each list is capped at 50 entries; `eventsNotListed`, `instancePropertiesNotListed` and `memberUsesNotListed` count the rest
+- If referenced and `force=false`: blocks (`action: "delete_blocked"`) and lists where the family is used. `message` sums it up; `references` holds `eventSheets` and `layouts` (names), `events` and `instanceProperties` (as for `delete_object`), `effectUses` (`{ eventSheet, eventPath, ace, sid, member, effect }`, only when there are any) and `memberUses` (`{ eventSheet, path, eventPath, sid, member, kind, name, context }`, `eventPath` and `sid` as for the `uses` of [`update_object_properties`](#update_object_properties), `kind` being `instance variable` or `behavior` and `context` `condition`, `action` or `expression`). Each list is capped at 50 entries; `eventsNotListed`, `instancePropertiesNotListed` and `memberUsesNotListed` count the rest
 - If referenced and `force=true`: deletes with a warning that names the remaining uses (references NOT cleaned up). [`validate_project`](#validate_project) then reports the conditions, actions and object parameters that name the family and the Particles object properties that hold its SID as `broken-object-reference`, and the uses through members as `missing-behavior-or-variable`, but not the uses of the family's name in expressions and scripts, nor the uses through members written as `Member.name` or `Self.name` in expressions: a second warning lists those
 - Event sheets and layouts that could not be parsed (see [Files the server could not parse](#mutation-tools)) are searched for the family's name, layouts also for its SID, and event sheets for its instance variables, behaviors and effects together with a member's name: a match, or such a file that cannot be read at all, blocks as well (`unscannedFiles`)
 - Member instances in layouts lose the values of the family's instance variables and the entries for its behaviors and effects; entries and values they lack for their other behaviors and instance variables are added. A warning names the removed values other than the default and the removed effect entries (layout, UID, name and value, the first ten), since only the layout's `.bak` keeps them, until the layout is written again.
@@ -1368,11 +1369,41 @@ Check a condition at once and then every `pollIntervalMs` until it holds or `tim
 
 Conditions: `{ type: "globalVar", name, operator, value }`, `{ type: "objectProperty", objectType, property, operator, value }` (a property of the first instance, or one of its instance variables), `{ type: "layout", name }`, and `{ type: "expression", expr, operator, value }`. Operators: `eq`, `neq` (strict, `Object.is`), `gt`, `lt`, `gte`, `lte` (two numbers or two strings) and `contains` (substring or array element). An `expression` is JavaScript evaluated where the bridge runs, with the page's full rights; it is refused unless the server runs with `C3MCP_ALLOW_EVAL=1`.
 
-### `subscribe_events`, `read_events`, `unsubscribe_events`
+### `subscribe_events`
 
-Buffer events in the bridge between polls. `subscribe_events` takes `connectionId`, `eventType` (`"globalVarChange"` with `filter.variable`, `"layoutChange"`, or `"custom"` with an optional `filter.name`) and `bufferSize` (1 to 1000, default 100; the oldest event is dropped when full), and returns `subscriptionId`. Custom events come from the game's own script: `globalThis.__c3bridge.emit(name, data)`. Changes are found by comparing values once per tick, so a change and its reversal within one tick are not seen. There is no generic event-sheet signal subscription: no documented interface reports them.
+Buffer events in the bridge between polls, for [`read_events`](#read_events). Custom events come from the game's own script: `globalThis.__c3bridge.emit(name, data)`. Changes are found by comparing values once per tick, so a change and its reversal within one tick are not seen. There is no generic event-sheet signal subscription: no documented interface reports them. A subscription lives in the page: it stays after `disconnect_from_game` and ends with [`unsubscribe_events`](#unsubscribe_events) or a reload.
 
-`read_events` takes `connectionId`, `subscriptionId` and `clear` (default true) and returns `events` (`type`, `name`, `value`, `previousValue` for changes, `timestamp`, `tick`, oldest first) and `count`. `unsubscribe_events` takes `connectionId` and `subscriptionId`; an unknown subscription is an error.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `eventType` | string | Yes | `"globalVarChange"` (changes of one global variable), `"layoutChange"` (changes of the current layout) or `"custom"` (events the game emits) |
+| `filter` | object | No | `variable`: the global variable to watch, required for `"globalVarChange"`; `name`: for `"custom"`, only events emitted with this name (default: every custom event) |
+| `bufferSize` | integer | No | Events kept, 1 to 1000 (default: 100); the oldest event is dropped when full |
+
+Returns `subscriptionId`, `eventType`, `filter` and `bufferSize`.
+
+### `read_events`
+
+Read the events a subscription buffered since the last read.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `subscriptionId` | string | Yes | From `subscribe_events` |
+| `clear` | boolean | No | Empty the buffer after reading (default: true); `false` leaves the events for a later read |
+
+Returns `events` (`type`, `name`, `value`, `previousValue` for changes, `timestamp`, `tick`, oldest first) and `count`.
+
+### `unsubscribe_events`
+
+Stop a subscription and release its buffer. An unknown subscription is an error.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `subscriptionId` | string | Yes | From `subscribe_events` |
+
+Returns `subscriptionId` and `unsubscribed`.
 
 ### `simulate_input`
 
@@ -1522,7 +1553,7 @@ The text is a plain message (some start with `Error ...`, e.g. `Error creating o
 
 A write that would replace a change made on disk outside the tool call is an error: when an event sheet, layout, object type or family file changed after the call read it (saved in the Construct 3 editor, restored with git, or written by a tool call running in parallel on the same file), or, for the timeline, addon and runtime-bridge tools, `project.c3proj` changed during the call, the text says `<file> was changed on disk after this server read it (...). It was not written, so that change is kept. Run the tool again: it reads the file as it is now.` When the call had already written other files, they are put back first and the text goes on `The files this tool call had already changed were put back as they were before the call (<files>), so the call changed nothing.`; a file that changed on disk again meanwhile is left as it is and named with its `.bak` (`... left as they are (...): <file> (its state from before the call is in <file>.bak). Check the project (validate_project, git diff) before you run the tool again.`). The server's own `project.c3proj` updates (registering or removing an entity, addon auto-registration, `update_project_metadata`) keep a change made on disk and are not refused for it. Of two parallel create calls for the same name, the second fails with `Refusing to create "<name>": the file ... already exists`. A tool call whose `project.c3proj` changed on disk and is not valid JSON at the moment (still being written) fails with `project.c3proj changed on disk and could not be read again (...)`. Changes made on disk between tool calls need no reconnect: each call checks `project.c3proj`, and the files the server's caches hold when the call first uses them, and reads again what changed.
 
-Refusals by the reference checks are **not** errors: `delete_object`, `update_object_properties` and similar tools return a normal response with `"success": false`, `"action": "delete_blocked"` or `"update_blocked"`, a `message` and the `references` found, and `unscannedFiles` when files that could not be parsed possibly hold uses. Nothing is written in either case.
+Refusals by the reference checks are **not** errors: `delete_object`, `update_object_properties`, `move_events_between_sheets` and similar tools return a normal response with `"success": false`, `"action": "delete_blocked"`, `"update_blocked"` or `"move_blocked"`, a `message` and the `references` found, and `unscannedFiles` when files that could not be parsed possibly hold uses. Nothing is written in either case.
 
 ### WriteResult
 
@@ -1533,7 +1564,7 @@ interface WriteResult {
   success: boolean;
   entity: string;        // name of the entity
   category: string;      // "object" | "family" | "eventsheet" | "layout" | "timeline" | "project" | "addon"
-  action: string;        // "created" | "updated" | "deleted" (also "delete_blocked", "would_delete", "already_registered")
+  action: string;        // "created" | "updated" | "deleted" (also "delete_blocked", "update_blocked", "move_blocked", "would_delete", "already_registered")
   generatedSid?: number;
   generatedUid?: number;
   warnings?: string[];   // e.g., "Auto-registered plugin..."
@@ -1544,7 +1575,7 @@ interface WriteResult {
 }
 ```
 
-Some tools add their own fields (for example `deletedSid`, `movedSids`, `backupFiles`). Responses with `success: false` (`action: "delete_blocked"`), dry runs and no-ops carry no `editorNote`.
+Some tools add their own fields (for example `deletedSid`, `movedSids`, `backupFiles`). Responses with `success: false` (`action: "delete_blocked"`, `"update_blocked"` or `"move_blocked"`), dry runs and no-ops carry no `editorNote`.
 
 ### Common Errors
 

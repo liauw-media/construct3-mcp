@@ -27,19 +27,45 @@ function installedBrowser(): string | undefined {
 const browser = installedBrowser();
 if (!browser) console.warn('[live-browser.test] No Chrome or Edge found (CHROME_PATH or the usual locations): the live browser tests are skipped.');
 
-// Starting a browser takes a few seconds, more on a busy machine.
-const LIVE_TIMEOUT_MS = 60_000;
+// Time budgets for a loaded machine. When the full suite runs next to other
+// work, a browser start, the bridge coming up in it and the removal of its
+// profile each take seconds instead of a fraction of one. Each budget bounds
+// one wait for one event; nothing is retried.
+/** A browser start: serve_preview's readyTimeoutMs (default 15 s). */
+const BROWSER_READY_MS = 60_000;
+/** The bridge answering in the page: connect_to_game's timeoutMs (at most 60 s). */
+const BRIDGE_READY_MS = 45_000;
+/** A test that starts one browser; the tests that start two get twice this. */
+const LIVE_TIMEOUT_MS = 120_000;
+/** The cleanup after a test: its browsers and preview servers, then its files. */
+const CLEANUP_TIMEOUT_MS = 60_000;
+/**
+ * Shutdown (controller.close()) of a browser that ends on the kill takes a
+ * fraction of a second on an idle machine, most of it removing the profile,
+ * which a loaded machine stretches to seconds: up to 3.7 s measured with the
+ * full suite running next to eight busy cores, and about 10 s only under a
+ * load at which other tests missed vitest's 5 s default as well. 6 s leaves
+ * room for the first and fails a shutdown that hangs, or that waits six
+ * seconds or more on top. It does not catch a close() that sits through its
+ * own exit waits (2 s, then SIGKILL and 1 s): launch-browser-close.test.ts
+ * checks those with a fake browser and fake timers.
+ */
+const SHUTDOWN_BOUND_MS = 6_000;
 
 interface Registered { server: MockServer; controller: RuntimeToolController }
 
 const controllers: RuntimeToolController[] = [];
 const cleanups: Array<() => Promise<void>> = [];
 
+// A cleanup takes the controllers and files of its own test when it starts, so
+// one that runs on after its hook timed out cannot close the next test's browser.
 afterEach(async () => {
   vi.unstubAllEnvs();
-  while (controllers.length > 0) await controllers.pop()!.close();
-  while (cleanups.length > 0) await cleanups.pop()!();
-});
+  const ownControllers = controllers.splice(0).reverse();
+  const ownCleanups = cleanups.splice(0).reverse();
+  for (const controller of ownControllers) await controller.close();
+  for (const cleanup of ownCleanups) await cleanup();
+}, CLEANUP_TIMEOUT_MS);
 
 function register(): Registered {
   const server = new MockServer();
@@ -60,6 +86,11 @@ async function fakeExport(mode: 'dom' | 'worker'): Promise<string> {
   const folder = await writeFakeExport(mode);
   cleanups.push(() => rm(folder, { recursive: true, force: true }));
   return folder;
+}
+
+/** serve_preview with a headless browser that gets the whole start-up budget. */
+async function servePreview(server: MockServer, folder: string, options: Record<string, unknown> = {}): Promise<Record<string, any>> {
+  return parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true, readyTimeoutMs: BROWSER_READY_MS, ...options }));
 }
 
 /** An HTTP server on 127.0.0.1:`port` that records every request and upgrade, or undefined when the port is taken. */
@@ -107,39 +138,39 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     const folder = await fakeExport('dom');
     const { server } = register();
 
-    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
+    const served = await servePreview(server, folder);
     expect(served.browser.cdpPort).not.toBe(9222);
-    const connected = parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: served.browser.cdpPort, timeoutMs: 15_000 }));
+    const connected = parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: served.browser.cdpPort, timeoutMs: BRIDGE_READY_MS }));
     expect(connected.gameState.ready).toBe(true);
     parse(await server.callTool('stop_preview', { serverId: served.serverId }));
     expect(foreign!.requests).toEqual([]);
   }, LIVE_TIMEOUT_MS);
 
-  it('removes the browser profile on stop_preview and on shutdown, and shuts down within 2 s', async () => {
+  it('removes the browser profile on stop_preview and on shutdown, and shuts down within 6 s', async () => {
     // Profiles this test made that are still there (an earlier test's leftover may go meanwhile).
     const before = await profileDirs();
     const newProfileDirs = async () => (await profileDirs()).filter((name) => !before.includes(name));
     const folder = await fakeExport('dom');
     const { server, controller } = register();
 
-    const first = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
-    parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: first.browser.cdpPort, timeoutMs: 15_000 }));
+    const first = await servePreview(server, folder);
+    parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: first.browser.cdpPort, timeoutMs: BRIDGE_READY_MS }));
     parse(await server.callTool('stop_preview', { serverId: first.serverId }));
     expect(await newProfileDirs()).toEqual([]);
 
-    const second = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
-    parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: second.browser.cdpPort, timeoutMs: 15_000 }));
+    const second = await servePreview(server, folder);
+    parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: second.browser.cdpPort, timeoutMs: BRIDGE_READY_MS }));
     const startedAt = Date.now();
     await controller.close();
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(Date.now() - startedAt).toBeLessThan(SHUTDOWN_BOUND_MS);
     expect(await newProfileDirs()).toEqual([]);
-  }, LIVE_TIMEOUT_MS);
+  }, 2 * LIVE_TIMEOUT_MS);
 
   it('delivers keys with their real codes, typed text as key presses, and a canvas click', async () => {
     const folder = await fakeExport('dom');
     const { server } = register();
-    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
-    const { connectionId } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+    const served = await servePreview(server, folder);
+    const { connectionId } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: BRIDGE_READY_MS }));
     const inputLog = async () => parse(await server.callTool('call_bridge', { connectionId, command: 'callFunction', args: { name: 'InputLog' } })).result as Array<Record<string, unknown>>;
     await inputLog();
 
@@ -161,8 +192,8 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
   it('taps through touch emulation and leaves the page without touch support afterwards', async () => {
     const folder = await fakeExport('dom');
     const { server } = register();
-    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
-    const { connectionId } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+    const served = await servePreview(server, folder);
+    const { connectionId } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: BRIDGE_READY_MS }));
     const bridge = async (name: string) => parse(await server.callTool('call_bridge', { connectionId, command: 'callFunction', args: { name } })).result;
     expect(await bridge('MaxTouchPoints')).toBe(0);
     await bridge('InputLog');
@@ -176,8 +207,8 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
   it('runs the whole chain against a game whose runtime is in a worker', async () => {
     const folder = await fakeExport('worker');
     const { server } = register();
-    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
-    const connected = parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: served.browser.cdpPort, timeoutMs: 15_000 }));
+    const served = await servePreview(server, folder);
+    const connected = parse(await server.callTool('connect_to_game', { host: '127.0.0.1', port: served.browser.cdpPort, timeoutMs: BRIDGE_READY_MS }));
     expect(connected).toMatchObject({ bridgeReady: true, bridgeContext: 'worker', pageVisible: true, gameState: { ready: true, layoutName: 'Title' } });
     const { connectionId } = connected;
     const call = async (command: string, args: Record<string, unknown> = {}) => parse(await server.callTool('call_bridge', { connectionId, command, args })).result;
@@ -201,8 +232,8 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
     for (const mode of ['dom', 'worker'] as const) {
       const folder = await fakeExport(mode);
       const { server } = register();
-      const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true }));
-      const { connectionId, bridgeContext } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+      const served = await servePreview(server, folder);
+      const { connectionId, bridgeContext } = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: BRIDGE_READY_MS }));
       expect(bridgeContext).toBe(mode === 'dom' ? 'page' : 'worker');
       const call = (command: string, args: Record<string, unknown> = {}) => server.callTool('call_bridge', { connectionId, command, args });
       parse(await call('setGlobalVar', { name: 'Score', value: 42 }));
@@ -213,18 +244,18 @@ describe.skipIf(!browser)('runtime tools against a real headless browser', () =>
         const after = await call('getGlobalVar', { name: 'Score' });
         expect(after.isError, mode).toBe(true);
         expect(after.content[0].text, mode).toMatch(/reloaded or navigated/u);
-      }, { timeout: 10_000, interval: 200 });
+      }, { timeout: 30_000, interval: 200 });
       parse(await server.callTool('stop_preview', { serverId: served.serverId }));
     }
-  }, LIVE_TIMEOUT_MS);
+  }, 2 * LIVE_TIMEOUT_MS);
 
   it('runs the whole chain against a game on the page, cross-origin isolated, with a screenshot over 4 MiB', async () => {
     vi.stubEnv('C3MCP_ALLOW_EVAL', '1');
     const folder = await fakeExport('dom');
     const { server } = register();
-    const served = parse(await server.callTool('serve_preview', { folder, launchBrowser: true, headless: true, crossOriginIsolated: true, windowWidth: 1920, windowHeight: 1200 }));
+    const served = await servePreview(server, folder, { crossOriginIsolated: true, windowWidth: 1920, windowHeight: 1200 });
     expect(served.url).toBe(`http://127.0.0.1:${served.port}/`);
-    const connected = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: 15_000 }));
+    const connected = parse(await server.callTool('connect_to_game', { cdpEndpoint: served.browser.pageEndpoint, timeoutMs: BRIDGE_READY_MS }));
     expect(connected).toMatchObject({ bridgeContext: 'page', pageVisible: true, gameState: { ready: true } });
     const { connectionId } = connected;
     const expression = async (expr: string) => parse(await server.callTool('wait_for_condition', { connectionId, condition: { type: 'expression', expr, operator: 'neq', value: '__never__' }, timeoutMs: 5_000 })).finalValue;
