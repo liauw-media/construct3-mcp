@@ -2,11 +2,20 @@
 
 > An MCP server that lets Claude, Cursor and other AI assistants read, analyze and safely edit Construct 3 projects — editor-faithful writes with backups and validation. New here? Start with the [User Guide](docs/USER-GUIDE.md).
 
-> **v1.9.2** — Delete and removal tools no longer miss uses inside files the server cannot parse (over 10MB or invalid JSON). 1.9.1 brought frame images that move with their frames, no duplicate UIDs next to large layouts and a new [User Guide](docs/USER-GUIDE.md). See [What's new](#whats-new-in-192) and the [CHANGELOG](CHANGELOG.md).
+> **v1.10.0** — The server follows the project on disk (no reconnect after an editor save or `git restore`), drives a running game over the Chrome DevTools Protocol with 12 new runtime tools, checks event sheet edits the way the editor does and keeps layers, instance variables and hierarchy links consistent. See [What's new](#whats-new-in-1100) and the [CHANGELOG](CHANGELOG.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
+
+## What's new in 1.10.0
+
+- **Follows the project on disk** — each tool call checks `project.c3proj` and the files the server has cached and reads again what changed, so there is no reconnect after a save in the Construct 3 editor or `git restore`. A write over an event sheet, layout, object type or family file changed since the call read it is refused, and the call's earlier writes are put back; each file the writer changes is backed up once per tool call (#51).
+- **Drives a running game** — `serve_preview` serves an exported game and launches a browser on it; `connect_to_game`, `call_bridge`, `wait_for_condition`, `subscribe_events`, `simulate_input`, `screenshot_game` and five more tools drive it over the Chrome DevTools Protocol (connecting needs Node.js 22) (#8–#13). `inject_runtime_bridge` now imports the bridge from the main script, so Construct loads it (not yet checked in the real editor).
+- **Event sheet guards** — `delete_event_sheet` refuses while other sheets use its functions or global variables, `move_events_between_sheets` keeps event variables in scope, and `add_event_to_sheet` checks function names as the editor does and returns the SIDs it creates (#58, #38).
+- **Layers, instances and objects** — layer renames update event sheets, instance variables follow the object and its families, hierarchy links go with their instances, family effects are checked, and `delete_object` keeps its images as `.bak`. `validate_project` adds `duplicate-function-name`, `hierarchy-link` and `orphaned-image` (#38).
+- **Large and damaged projects** — the UID/SID scan of files over the 10MB read limit streams them, so a 608MB layout no longer blocks new UIDs elsewhere, and the analysis tools list objects whose own file cannot be parsed in `unanalysedObjects` (#59, #60).
+- **Stricter** — some calls that worked in 1.9.2 are refused now: a sheet name in another letter case, a function name the editor refuses, a copied function block, a move that takes a variable out of its scope, an instance variable that neither the object nor its families declare, and deleting an event sheet, object or family that is still used in ways 1.9.2 did not check. See Changed and Fixed in the [CHANGELOG](CHANGELOG.md).
 
 ## What's new in 1.9.2
 

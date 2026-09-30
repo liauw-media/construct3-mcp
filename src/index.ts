@@ -22,7 +22,7 @@ import { registerRuntimeTools } from './tools/runtime-tools.js';
 const projectPath: string = process.argv[2] || process.env.C3_PROJECT_PATH || process.cwd();
 
 const server = new McpServer(
-  { name: 'construct3-mcp-server', version: '1.9.2' },
+  { name: 'construct3-mcp-server', version: '1.10.0' },
   { capabilities: { resources: {}, tools: {}, prompts: {} } }
 );
 
