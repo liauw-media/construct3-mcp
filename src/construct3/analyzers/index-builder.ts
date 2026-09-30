@@ -93,6 +93,7 @@ import {
 } from '../event-shapes.js';
 import { forEachLayoutInstance, layerPathLabel } from '../layers.js';
 import { unscannedFilesOf, type UnscannedFile } from './unscanned-uses.js';
+import { diskEpochOf, ensureCachesFreshOf } from '../disk-state.js';
 
 /** Instances of an object type in one layout, on one layer (or among the non-world instances). */
 export interface InstancePlacement {
@@ -1280,17 +1281,25 @@ export class ProjectIndex {
 
 /**
  * The built index of each project, keyed by its reader: two projects opened in
- * one process (scripts, tests, embeddings) never see each other's index.
+ * one process (scripts, tests, embeddings) never see each other's index. Each
+ * notes the reader's disk epoch it was built in.
  */
-let cachedIndexes = new WeakMap<Construct3ProjectReader, ProjectIndex>();
+let cachedIndexes = new WeakMap<Construct3ProjectReader, { index: ProjectIndex; epoch: number }>();
 
-/** The cross-reference index of the reader's project: built on first use, then cached for that reader. */
+/**
+ * The cross-reference index of the reader's project: built on first use, then
+ * cached for that reader until a write resets it or the reader finds a change
+ * on disk the server did not make (its disk epoch moves, #51).
+ */
 export async function getProjectIndex(reader: Construct3ProjectReader): Promise<ProjectIndex> {
+  // In a tool call: a file the index was built from may have changed on disk since
+  await ensureCachesFreshOf(reader);
+  const epoch = diskEpochOf(reader);
   const cached = cachedIndexes.get(reader);
-  if (cached && cached.isBuilt()) return cached;
+  if (cached && cached.epoch === epoch && cached.index.isBuilt()) return cached.index;
   const index = new ProjectIndex();
   // Cached before the build: a reset while it runs drops it, so the next call rebuilds
-  cachedIndexes.set(reader, index);
+  cachedIndexes.set(reader, { index, epoch });
   await index.build(reader);
   return index;
 }

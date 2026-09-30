@@ -5,11 +5,13 @@
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
+import { withProjectSync } from '../tools/project-sync.js';
 
 export function registerProjectResources(
-  server: McpServer,
+  mcpServer: McpServer,
   reader: Construct3ProjectReader
 ) {
+  const server = withProjectSync(mcpServer, reader);
   // Resource: Project metadata
   server.resource(
     'project-info',

@@ -428,36 +428,33 @@ describe('Read failures survive a project reload during the bulk read (real file
     expect(result.complete).toBe(false);
   });
 
-  it('two concurrent first generateUid calls both refuse while a layout cannot be scanned', async () => {
+  it('two concurrent first generateUid calls share one scan and both refuse while a layout cannot be scanned', async () => {
     await registerInProject(tmpDir, 'layouts', 'Bad');
     await mkdir(join(tmpDir, 'layouts', 'Bad.json'));
     const reader = await openReader(tmpDir);
 
     // Pin the interleaving: call A has scanned Bad and waits in readAllFamilies
-    // until call B has started its own scan of Bad; B's scan waits until A is done.
+    // until call B has asked for a UID too. B joins A's scan instead of
+    // starting its own, so it cannot empty the list of unscanned files between
+    // A's scan and A's check, and it waits for A's result.
     let aInFamilies!: () => void;
     const aReachedFamilies = new Promise<void>(resolve => { aInFamilies = resolve; });
-    let bInScan!: () => void;
-    const bReachedScan = new Promise<void>(resolve => { bInScan = resolve; });
-    let releaseB!: () => void;
-    const bReleased = new Promise<void>(resolve => { releaseB = resolve; });
+    let releaseA!: () => void;
+    const aReleased = new Promise<void>(resolve => { releaseA = resolve; });
 
     const readAllFamilies = reader.readAllFamilies.bind(reader);
     let familyReads = 0;
     reader.readAllFamilies = async () => {
       if (++familyReads === 1) {
         aInFamilies();
-        await bReachedScan;
+        await aReleased;
       }
       return readAllFamilies();
     };
     const scanEntityIdsRaw = reader.scanEntityIdsRaw.bind(reader);
     let scans = 0;
     reader.scanEntityIdsRaw = async (category, name) => {
-      if (++scans === 2) {
-        bInScan();
-        await bReleased;
-      }
+      scans++;
       return scanEntityIdsRaw(category, name);
     };
 
@@ -466,11 +463,13 @@ describe('Read failures survive a project reload during the bulk read (real file
     const a = settle(idGen.generateUid(reader));
     await aReachedFamilies;
     const b = settle(idGen.generateUid(reader));
+    releaseA();
 
-    const resultA = await a;
-    releaseB();
-    const resultB = await b;
+    const [resultA, resultB] = await Promise.all([a, b]);
     expect(resultA).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
     expect(resultB).toMatch(/Cannot generate a safe UID.*layouts\/Bad/);
+    // One project scan, then each call tries Bad once more before it refuses
+    expect(familyReads).toBe(1);
+    expect(scans).toBe(3);
   });
 });

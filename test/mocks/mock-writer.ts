@@ -67,6 +67,14 @@ export class MockWriter {
     return undefined;
   }
 
+  checkAddonRegistrable(_type: 'plugin' | 'behavior', _id: string): void {
+    // every addon is registrable in the mock
+  }
+
+  async assertProjectFileCurrent(): Promise<void> {
+    // the mock has no project file that could change
+  }
+
   getSubfolderForEntity(
     _category: string,
     _name: string,

@@ -32,6 +32,7 @@ import {
   transitionsFolderIndex,
   type ProjectFolderNode,
 } from '../construct3/timeline-folders.js';
+import { withProjectSync } from './project-sync.js';
 
 // ─── Timeline Type ─────────────────────────────────────────
 
@@ -318,7 +319,8 @@ async function removeTimelineFromProject(projectPath: string, name: string, fold
 
 // ─── Registration ──────────────────────────────────────────
 
-export function registerTimelineTools({ server, reader, writer }: MutationToolDeps) {
+export function registerTimelineTools({ server: mcpServer, reader, writer }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // ─── list_timelines ───────────────────────────────────────
 
   server.tool(
@@ -452,6 +454,8 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
             'deleted timeline, check it and remove it first.',
           );
         }
+        // project.c3proj changed on disk since it was loaded: refused before any write (#51)
+        await writer.assertProjectFileCurrent();
         await atomicWriteTimeline(filePath, data, reader.getProjectPath());
 
         // Register in project.c3proj (under lock via withProjectLock is internal to writer;
@@ -564,6 +568,8 @@ export function registerTimelineTools({ server, reader, writer }: MutationToolDe
         }
         if (location.kind === 'transition') return toolError(transitionRefusal(args.name));
 
+        // project.c3proj changed on disk since it was loaded: refused before any change (#51)
+        await writer.assertProjectFileCurrent();
         // Back up exactly the file that is deleted; a failed backup or delete aborts
         const filePath = locatedFilePath(reader.getProjectDir(), args.name, location);
         const fileLabel = locatedFileLabel(args.name, location);
