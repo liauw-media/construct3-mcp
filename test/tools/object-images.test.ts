@@ -239,6 +239,40 @@ describe('delete_object refused because a file changed on disk during the call',
   });
 });
 
+/**
+ * An update of project.c3proj that fails for another reason than a refusal
+ * as stale: the writer puts back the object file (undoToolCall), with the
+ * same checks as after a refusal, so one saved in the editor during the call
+ * is never overwritten with its backup.
+ */
+describe('delete_object whose project.c3proj update fails otherwise', () => {
+  it('leaves an object file the editor saved again after the delete as it is when project.c3proj cannot be read', async () => {
+    await createCoin();
+    const obj = JSON.parse(await readFile(objectPath('Coin'), 'utf8'));
+    obj.instanceVariables = [...(obj.instanceVariables ?? []), { name: 'fromEditor', type: 'number', initialValue: 0, sid: 900000000000123 }];
+    const saved = JSON.stringify(obj, null, '\t');
+    const removeFromProject = writer.removeFromProject.bind(writer);
+    writer.removeFromProject = async (...args) => {
+      // The object file is deleted by now: the editor saves it again and is still writing project.c3proj
+      await writeFile(objectPath('Coin'), saved);
+      const project = await readFile(join(tmpDir, 'project.c3proj'), 'utf8');
+      await writeFile(join(tmpDir, 'project.c3proj'), project.slice(0, project.length / 2));
+      return removeFromProject(...args);
+    };
+
+    const result = await server.callTool('delete_object', { name: 'Coin' });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('project.c3proj changed on disk and could not be read again');
+    expect(text).toContain('Left as they are (changed on disk again after this call wrote them, or their backup was replaced): ' +
+      'objectTypes/Coin.json (its state from before the call is in objectTypes/Coin.json.bak). ' +
+      'Check the project (validate_project, git diff) before you run the tool again. Its image files were renamed back from .bak.');
+    expect(text).not.toContain('The object file was restored');
+    expect(await readFile(objectPath('Coin'), 'utf8')).toBe(saved);
+    expect(await images()).toEqual(['coin-animation 1-000.png', 'coin-spin-000.png', 'coin-spin-001.jpg']);
+  });
+});
+
 describe('validate_project orphaned-image', () => {
   it('reports files in images/ named after no object type, grouped by the name they were stored for', async () => {
     await mkdir(imagesDir(), { recursive: true });

@@ -235,6 +235,61 @@ describe('update_layer refused because a file changed on disk during the call', 
   });
 });
 
+/**
+ * An event sheet write that fails for another reason than a refusal as
+ * stale: the writer puts back what the call wrote (undoToolCall), with the
+ * same checks as after a refusal, so a file saved in the editor during the
+ * call is never overwritten with its backup.
+ */
+describe('update_layer whose event sheet write fails otherwise', () => {
+  it('leaves an event sheet the editor saved during its write as it is, and puts the layout back', async () => {
+    await addActions(LAYER_ACTIONS);
+    const layoutBefore = await readFile(layoutPath(), 'utf8');
+    const sheet = await readJson(sheetPath());
+    sheet.events.push({ eventType: 'comment', text: 'saved in the editor' });
+    const saved = JSON.stringify(sheet, null, '\t');
+    // The editor saves the sheet right after the writer replaced it, before the write is checked
+    const internals = writer as unknown as { atomicWrite: (path: string, content: string | Buffer) => Promise<void> };
+    const atomicWrite = internals.atomicWrite.bind(writer);
+    let saves = 0;
+    internals.atomicWrite = async (path, content) => {
+      await atomicWrite(path, content);
+      if (path.endsWith('MainSheet.json') && saves++ === 0) await writeFile(sheetPath(), saved);
+    };
+
+    const data = await rename('Game');
+    expect(data.isError).toBe(true);
+    expect(data.text).toContain('the file was changed by another write during this one');
+    expect(data.text).toContain('The event sheet was left as that write left it. The rename was rolled back: ' +
+      'the layout and the event sheets written before were restored from their backups.');
+    expect(await readFile(sheetPath(), 'utf8')).toBe(saved);
+    expect(await readFile(layoutPath(), 'utf8')).toBe(layoutBefore);
+  });
+
+  it('leaves a layout the editor saved again after the call wrote it as it is and names it', async () => {
+    await addActions(LAYER_ACTIONS);
+    const write = writer.writeEntityFile.bind(writer);
+    writer.writeEntityFile = async (category, ...rest) => {
+      if (category === 'eventSheets') throw new Error('disk full');
+      const backup = await write(category, ...rest);
+      const layout = await readJson(layoutPath());
+      layout.width = 12345;
+      await writeFile(layoutPath(), JSON.stringify(layout, null, '\t'));
+      return backup;
+    };
+
+    const data = await rename('Game');
+    expect(data.isError).toBe(true);
+    expect(data.text).toContain('disk full. The rename was rolled back only in part: ' +
+      'left as they are (changed on disk again after this call wrote them, or their backup was replaced): ' +
+      'layouts/Layout 1.json (its state from before the call is in layouts/Layout 1.json.bak). Check the project');
+    const layout = await readJson(layoutPath());
+    expect(layout.width).toBe(12345);
+    expect(layout.layers[0].name).toBe('Game');
+    expect((await params())[0].layer).toBe('"Main"');
+  });
+});
+
 describe('expressionStringLiterals', () => {
   it('finds the literals of an expression, two quotes being one', () => {
     expect(expressionStringLiterals('LayerScale("Main") & "a""b"').map(l => l.text)).toEqual(['Main', 'a"b']);

@@ -7,7 +7,8 @@ import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
 import type { WriteResult, ObjectType, Instance, ObjectReference } from '../construct3/types.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
-import type { Construct3ProjectWriter } from '../construct3/project-writer.js';
+import type { Construct3ProjectWriter, UndoReport } from '../construct3/project-writer.js';
+import { filesLeftClause } from '../construct3/project-writer.js';
 import { validateName, validateSubfolder, toolResult, toolError, notFoundError, folderCaseClashError } from './shared.js';
 import { findFolderPathClash } from '../construct3/names.js';
 import {
@@ -471,12 +472,13 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
 
         // Its frame images (or single image) lose their user: kept as .bak, like
         // the image of a deleted frame. Renamed first; when the object file cannot
-        // be deleted or project.c3proj not updated, the object file is restored
-        // and the images renamed back. A write refused because a file changed on
-        // disk during the call (StaleFileError) has had the writer put back the
-        // files the call changed, or name those it had to leave as they are (an
-        // object file saved again in the editor), so only the image renames,
-        // which the writer does not track, are undone here.
+        // be deleted or project.c3proj not updated, the writer puts back the files
+        // the call changed (undoToolCall), leaving one changed on disk after the
+        // call changed it (an object file saved again in the editor) as it is,
+        // and the images are renamed back. A write refused because a file changed
+        // on disk during the call (StaleFileError) has had the writer put back the
+        // files already, so only the image renames, which the writer does not
+        // track, are undone here.
         const images = await planDeletedObjectImages(reader, writer, args.name);
         const renames = images.parking?.renames ?? [];
         if (renames.length > 0) await writer.renameImageFiles(renames);
@@ -486,7 +488,8 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
           backupPath = await writer.deleteEntityFile('objectTypes', args.name, subfolder);
           await writer.removeFromProject('objectTypes', args.name);
         } catch (error) {
-          const rollback = await rollBackObjectDelete(writer, error instanceof StaleFileError ? undefined : backupPath, renames);
+          const undo = error instanceof StaleFileError ? undefined : await writer.undoToolCall();
+          const rollback = await rollBackObjectDelete(writer, undo, renames);
           if (rollback === '') throw error;
           // A refusal of the writer ends with a full stop already
           const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
@@ -953,26 +956,29 @@ export function registerObjectTools({ server: mcpServer, reader, writer, idGen }
 }
 
 /**
- * Undo what delete_object did before a step failed: restore the object file
- * from `backupPath` (when it was deleted and the writer did not put it back
- * itself, as it does for a write refused as stale) and rename the image files back
- * from .bak (`renames`, as made). Returns sentences on what was undone and
- * what could not be, naming the files to recover by hand; empty when there
- * was nothing to undo.
+ * Undo what delete_object did before a step failed: say what the writer put
+ * back of the files the call changed and what it left as it is (`undo`, from
+ * Construct3ProjectWriter.undoToolCall; none after a write refused as stale,
+ * whose error says so), and rename the image files back from .bak
+ * (`renames`, as made). Returns sentences on what was undone and what could
+ * not be, naming the files to recover by hand; empty when there was nothing
+ * to undo.
  */
 async function rollBackObjectDelete(
   writer: Construct3ProjectWriter,
-  backupPath: string | undefined,
+  undo: UndoReport | undefined,
   renames: ReadonlyArray<{ from: string; to: string }>,
 ): Promise<string> {
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
   const sentences: string[] = [];
-  if (backupPath !== undefined) {
-    try {
-      await writer.restoreEntityFile(backupPath);
-      sentences.push('The object file was restored from its backup.');
-    } catch (e) {
-      sentences.push(`Restoring the object file failed (${message(e)}): ${backupPath} holds it.`);
+  if (undo !== undefined) {
+    const isObjectFile = (label: string) => label.startsWith('objectTypes/');
+    if (undo.restored.some(isObjectFile)) sentences.push('The object file was restored from its backup.');
+    const others = undo.restored.filter(label => !isObjectFile(label));
+    if (others.length > 0) sentences.push(`Put back as it was before the call: ${others.join(', ')}.`);
+    if (undo.left.length > 0) {
+      const left = filesLeftClause(undo.left);
+      sentences.push(`${left[0].toUpperCase()}${left.slice(1)}. Check the project (validate_project, git diff) before you run the tool again.`);
     }
   }
   if (renames.length > 0) {

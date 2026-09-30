@@ -57,7 +57,7 @@ import {
   renameLayerParameters,
   type LayerNameUse,
 } from '../construct3/layer-references.js';
-import { EntityWriteError } from '../construct3/project-writer.js';
+import { EntityWriteError, filesLeftClause } from '../construct3/project-writer.js';
 import { StaleFileError } from '../construct3/disk-state.js';
 import { withProjectSync } from './project-sync.js';
 
@@ -907,32 +907,19 @@ export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }
         if (args.scaleRate !== undefined) layer.scaleRate = args.scaleRate;
         if (args.zElevation !== undefined) layer.zElevation = args.zElevation;
 
-        // The layout first, then the event sheets; a failure restores what was written.
-        // A write refused because its file changed on disk during the call (StaleFileError)
-        // has had the writer put back what the call wrote, or name the files it had to
-        // leave as they are (saved again in the editor), which must not be restored over
+        // The layout first, then the event sheets; a failure puts back what was written
+        // (rollBackLayerRename), except a file changed on disk after the call wrote it,
+        // which is left as it is and named. A write refused because its file changed on
+        // disk during the call (StaleFileError) has had the writer do so already
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
-        const written = [backupPath];
         try {
           for (const [sheetName, sheet] of references?.rewrites ?? []) {
-            written.push(await writer.writeEntityFile('eventSheets', sheetName, sheet, writer.getSubfolderForEntity('eventSheets', sheetName)));
+            await writer.writeEntityFile('eventSheets', sheetName, sheet, writer.getSubfolderForEntity('eventSheets', sheetName));
           }
         } catch (error) {
           if (error instanceof StaleFileError) throw error;
-          if (error instanceof EntityWriteError) written.push(error.backupPath);
-          const failed: string[] = [];
-          for (const backup of written.reverse()) {
-            try {
-              await writer.restoreEntityFile(backup);
-            } catch {
-              failed.push(backup.replace(/\.bak$/, ''));
-            }
-          }
-          const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
-          throw new Error(failed.length === 0
-            ? `${cause}. The rename was rolled back: the layout and the event sheets written before were restored from their backups.`
-            : `${cause}. Restoring failed for: ${failed.join('; ')} (the .bak files hold the previous JSON).`);
+          throw new Error(await rollBackLayerRename(writer, error));
         }
 
         const warnings = references?.warnings ?? [];
@@ -1129,6 +1116,46 @@ function undeclaredVariablesError(
     : '';
   return `"${objectType}" and its families have no instance variable ${names.join(', ')}. Its instance variables: ${defined}. ${unparsed}` +
     'Add the variable to the object type (update_object_properties) or its family (update_family) first. Nothing was changed.';
+}
+
+/**
+ * Undo an update_layer rename whose event sheet write failed for a reason
+ * other than a refusal as stale, and return the error message. The layout
+ * and the event sheets written before are put back by the writer
+ * (undoToolCall), which leaves a file saved again in the editor after the
+ * call wrote it as it is. The event sheet whose write failed is restored from
+ * its backup, unless another write replaced it during this one
+ * (EntityWriteError.changedByOtherWrite): only a write from outside the
+ * server can land there, such as a save in the editor, so it is left as that
+ * write left it.
+ */
+async function rollBackLayerRename(writer: MutationToolDeps['writer'], error: unknown): Promise<string> {
+  // A refusal of the writer ends with a full stop already
+  const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+  const failed: string[] = [];
+  let otherWrite = '';
+  if (error instanceof EntityWriteError) {
+    if (error.changedByOtherWrite) {
+      otherWrite = ' The event sheet was left as that write left it.';
+    } else {
+      try {
+        await writer.restoreEntityFile(error.backupPath);
+      } catch {
+        failed.push(error.backupPath.replace(/\.bak$/, ''));
+      }
+    }
+  }
+  const undo = await writer.undoToolCall();
+  if (undo.left.length === 0 && failed.length === 0) {
+    return `${cause}.${otherWrite} The rename was rolled back: the layout and the event sheets written before were restored from their backups.`;
+  }
+  const parts = [
+    ...(undo.restored.length > 0 ? [`put back as they were before the call: ${undo.restored.join(', ')}`] : []),
+    ...(undo.left.length > 0 ? [filesLeftClause(undo.left)] : []),
+    ...(failed.length > 0 ? [`restoring failed for: ${failed.join(', ')} (the .bak file holds the previous JSON)`] : []),
+  ];
+  return `${cause}.${otherWrite} The rename was rolled back only in part: ${parts.join('; ')}. ` +
+    'Check the project (validate_project, git diff) before you run the tool again.';
 }
 
 /** The first few locations and how many more there are. */

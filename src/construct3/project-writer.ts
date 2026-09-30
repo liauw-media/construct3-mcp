@@ -118,11 +118,23 @@ export class ConcurrentWriteError extends Error {
 const MAX_PROJECT_UPDATE_ROUNDS = 3;
 
 /** What undoing a tool call's earlier changes did (see Construct3ProjectWriter.undoCallChanges). */
-interface UndoReport {
+export interface UndoReport {
   /** Files put back as they were before the call. */
   restored: string[];
   /** Files that could not be put back, with their backup (null: the file did not exist before the call). */
   left: Array<{ label: string; backup: string | null }>;
+}
+
+/**
+ * The files undoing a tool call left as they are (UndoReport.left), for a
+ * message: "left as they are (...): layouts/Level 1.json (its state from
+ * before the call is in layouts/Level 1.json.bak)".
+ */
+export function filesLeftClause(left: UndoReport['left']): string {
+  const files = left.map(f => (f.backup
+    ? `${f.label} (its state from before the call is in ${f.backup})`
+    : `${f.label} (it did not exist before the call)`));
+  return `left as they are (changed on disk again after this call wrote them, or their backup was replaced): ${files.join(', ')}`;
 }
 
 /**
@@ -140,12 +152,9 @@ function staleFileMessage(label: string, undo?: UndoReport): string {
     return `${cause} The files this tool call had already changed were put back as they were before the call ` +
       `(${undo.restored.join(', ')}), so the call changed nothing. Run the tool again: it reads the files as they are now.`;
   }
-  const left = undo.left.map(f => (f.backup
-    ? `${f.label} (its state from before the call is in ${f.backup})`
-    : `${f.label} (it did not exist before the call)`));
   return `${cause} This tool call had already changed other files, and not all of them could be put back: ` +
     (undo.restored.length > 0 ? `put back as they were before the call: ${undo.restored.join(', ')}; ` : '') +
-    `left as they are (changed on disk again after this call wrote them, or their backup was replaced): ${left.join(', ')}. ` +
+    `${filesLeftClause(undo.left)}. ` +
     'Check the project (validate_project, git diff) before you run the tool again.';
 }
 
@@ -346,6 +355,23 @@ export class Construct3ProjectWriter {
     if (!scope || scope.changes.size === 0) return error;
     const undo = await this.undoCallChanges(scope);
     return new StaleFileError(staleFileMessage(error.file, undo), error.file, true);
+  }
+
+  /**
+   * Undo what the running tool call changed through the writer, for a tool
+   * whose later step failed for a reason other than a write refused as stale
+   * (after such a refusal the writer has undone them already). As there
+   * (undoCallChanges), each file is put back from its backup, last change
+   * first, and a file the call created is removed; a file that changed on
+   * disk after the call wrote it (saved again in the editor), or whose backup
+   * was replaced meanwhile, is left as it is. A file whose own write failed
+   * is not among them (restoreEntityFile). Returns what was put back and what
+   * was left; nothing outside a tool call. Called outside the writer's locks.
+   */
+  async undoToolCall(): Promise<UndoReport> {
+    const scope = currentToolCall();
+    if (!scope || scope.changes.size === 0) return { restored: [], left: [] };
+    return this.undoCallChanges(scope);
   }
 
   /**
