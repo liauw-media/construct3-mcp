@@ -13,14 +13,15 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  MCP Protocol Layer                                      │  │
 │  │  Resources (9) · Query Tools (9) · Analysis (11)         │  │
-│  │  Mutations (44) · Runtime (7) · Prompts (7)              │  │
+│  │  Mutations (44) · Runtime (19) · Prompts (7)             │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
 │  ┌──────────▼───────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                    │  │
 │  │  ProjectReader · ProjectWriter · IdGenerator             │  │
 │  │  Templates · Analyzers (17) · Cross-Reference Index      │  │
-│  │  Runtime bridge · ZIP writer · PNG generator             │  │
+│  │  Runtime bridge · CDP client · Preview server            │  │
+│  │  ZIP writer · PNG generator                              │  │
 │  └──────────┬───────────────────────────────────────────────┘  │
 │             │                                                  │
 │  ┌──────────▼───────────────────────────────────────────────┐  │
@@ -42,7 +43,7 @@ The Construct3 MCP Server is a TypeScript application implementing the Model Con
 └────────────────────────────────┘
 ```
 
-The server registers 71 tools, 9 resources and 7 prompts. The layer counts follow the module that registers each tool, so the read-only `list_addons`, `list_timelines` and `get_timeline_details` count as mutations: they live in the project and timeline modules.
+The server registers 83 tools, 9 resources and 7 prompts. The layer counts follow the module that registers each tool, so the read-only `list_addons`, `list_timelines` and `get_timeline_details` count as mutations: they live in the project and timeline modules.
 
 ## Core Components
 
@@ -55,7 +56,9 @@ reader  → registerProjectResources, registerQueryTools, registerWorkflowPrompt
           registerAnalysisTools
 (none)  → registerDocsResources (docs index, manual topics, pitfalls)
 writer  → registerMutationTools (also needs reader + idGen)
-          registerRuntimeTools (also needs reader)
+          registerRuntimeTools (also needs reader); returns a controller whose
+          close() index.ts calls on SIGINT, SIGTERM and the end of stdin, ending
+          game connections, preview servers and the browsers they launched
 idGen   → shared between writer and mutations
 ```
 
@@ -247,7 +250,9 @@ Supporting modules next to the templates:
 | `construct3/raw-text-search.ts` | Streamed text search in files the reader skips: whole-word names ignoring case (as JSON writes them in a string), whole numbers, bounded patterns; one alternation of literals, word boundaries checked where a literal matched. Also the streamed UID/SID scan of the ID generator (`RawIdScan`, `scanFileIds`) |
 | `construct3/timeline-folders.ts` | The editor's Transitions folder in the timelines container (first nameless first-level folder, files in `timelines/transitions/`), shared by the timeline tools and `validate_project` |
 | `construct3/types.ts` | TypeScript types for project files and analysis results |
-| `runtime/bridge.ts` | Generates the injectable runtime bridge script (`globalThis.__c3bridge`) |
+| `runtime/bridge.ts` | Generates the injectable runtime bridge script (`globalThis.__c3bridge`): command queue, results with cancel and a 60 s expiry, event subscriptions, layer coordinate conversion |
+| `runtime/cdp-client.ts` | Chrome DevTools Protocol client over Node's built-in WebSocket (Node.js 22+): connects to the game's page (trying the pages the browser lists, narrowed by `pageUrl`/`urlContains`, and refusing when more than one has a ready bridge), reaches a bridge on the page or in a dedicated worker (`Target.setAutoAttach`, flat sessions), marks the bridge's global scope so a reload closes the connection, runs bridge commands, conditions, input and screenshots |
+| `runtime/preview-server.ts` | Serves an exported game on 127.0.0.1 (Host check, no links out of the folder, each file opened once per request and closed on an abort, a port in use refused, optional COOP/COEP) and launches Chrome or Edge with a fresh profile and `--remote-debugging-port=0` (the port read back from `DevToolsActivePort`); a failed start is an error of the call; removes profiles on stop and leftovers of ended runs |
 | `runtime/zip-writer.ts` | Zero-dependency ZIP writer used to pack `.c3p` files |
 
 ### 6. Analyzers (`src/construct3/analyzers/`)
@@ -285,7 +290,7 @@ The cross-reference index (`ProjectIndex`) is cached per reader, so projects ope
 | Query Tools | `tools/query.ts` | 9 | List, search, get details |
 | Analysis Tools | `tools/analysis.ts` | 11 | Deep analysis, validation, event locating, runtime traps |
 | Mutation Tools | `tools/mutations.ts` → `object-tools.ts` (6), `event-tools.ts` (12), `layout-tools.ts` (9), `animation-tools.ts` (8), `timeline-tools.ts` (5), `project-tools.ts` (4) | 44 | Safe create, update, delete |
-| Runtime Tools | `tools/runtime-tools.ts` | 7 | Runtime bridge, preview checks, project clone, `.c3p` packing |
+| Runtime Tools | `tools/runtime-tools.ts` | 19 | Runtime bridge (inject, remove, commands), game connection, bridge calls, conditions, event buffers, input, canvas, screenshots, preview server, preview checks, project clone, `.c3p` packing |
 | Prompts | `prompts/workflows.ts` | 7 | Workflow templates |
 
 `tools/mutations.ts` only calls the domain modules' `register*Tools()` functions. Every `register*` function that gets the reader registers through `withProjectSync(server, reader)` (`tools/project-sync.ts`), which wraps each tool, resource and prompt handler: it opens a tool call scope and runs `reader.checkProjectFile()` before the handler; a tool whose `project.c3proj` changed and cannot be read returns that as a tool error. Shared tool code lives in `tools/shared.ts` (name and subfolder validation, `toolResult` / `toolError`, not-found suggestions, the editor reload note) and `tools/event-helpers.ts` (event Zod schemas, builders, validators and the load-time pre-write check).
