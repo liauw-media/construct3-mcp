@@ -509,8 +509,10 @@ export interface EventSheetFlowNode {
   groupCount: number;
 }
 
-/** Node in the object dependency graph */
-/** An object type whose own file could not be parsed (issue #60). */
+/**
+ * An object type whose own file could not be parsed (issue #60): its SID is
+ * unknown, so uses by SID cannot be looked up.
+ */
 export interface UnanalysedObjectFile {
   /** "objectTypes/<name>", as validate_project lists unscanned files */
   file: string;
@@ -520,6 +522,7 @@ export interface UnanalysedObjectFile {
   unchecked: string;
 }
 
+/** Node in the object dependency graph */
 export interface ObjectDependencyNode {
   objectName: string;
   referencedIn: {

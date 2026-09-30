@@ -482,30 +482,34 @@ Once the MCP server is running, ask Claude:
 ```
 construct3-mcp/
 ├── src/
-│   ├── index.ts                    # Main MCP server entry point
+│   ├── index.ts                    # Entry point: project path, server setup, registration, shutdown
 │   ├── construct3/
-│   │   ├── project-reader.ts       # Project file parser and cache
-│   │   ├── project-writer.ts       # Safe write operations with backup
-│   │   ├── id-generator.ts         # SID/UID generation with collision avoidance
+│   │   ├── project-reader.ts       # Project file reads, caches, checks for changes on disk
+│   │   ├── project-writer.ts       # Safe writes (backup/validate/write/verify), project.c3proj updates, undo of a tool call's writes
+│   │   ├── id-generator.ts         # SID/UID/imageSpriteId generation with collision avoidance
 │   │   ├── disk-state.ts           # File states on disk, tool call scope, stale-write error
-│   │   ├── templates.ts            # Object, event sheet, layout templates
+│   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
+│   │   ├── instance-variables.ts   # Instance variable values and effect entries on layout instances
+│   │   ├── hierarchy.ts            # Hierarchy (scene graph) links between layout instances
+│   │   ├── layer-references.ts     # Event sheet strings that name a layer (update_layer rename)
+│   │   ├── object-images.ts        # An object type's image files in images/ (kept as .bak on delete)
 │   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes, frame image moves on frame insert/delete
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
 │   │   ├── atomic-write.ts         # Temp-file-and-rename writes that keep file names on disk
 │   │   ├── names.ts                # Case-insensitive name and folder comparison
-│   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
+│   │   ├── event-variable-names.ts # Editor name rules for event variables, function parameters and function names
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
-│   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
-│   │   ├── raw-text-search.ts      # Streamed whole-word text search in files the reader skips
+│   │   ├── png-generator.ts        # Zero-dep placeholder PNGs and image file names
+│   │   ├── raw-text-search.ts      # Streamed whole-word text search and UID/SID scan in files the reader skips
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/
-│   │       ├── index-builder.ts    # Cross-reference index
-│   │       ├── event-flow.ts       # Event sheet flow and function map
-│   │       ├── object-deps.ts      # Object dependencies and orphaned objects
+│   │       ├── index-builder.ts    # Cross-reference index (cached per reader)
+│   │       ├── event-flow.ts       # Event sheet include hierarchy and layout bindings, function map
+│   │       ├── object-deps.ts      # Object dependencies, orphaned and unanalysed objects
 │   │       ├── asset-usage.ts      # Asset usage tracking
 │   │       ├── animations.ts       # Sprite animation trees (items + subfolders)
 │   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
@@ -514,37 +518,38 @@ construct3-mcp/
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
 │   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
 │   │       ├── legacy-event-shapes.ts # Legacy isElse/isOr/function call/script shape scan and repair
-│   │       ├── delete-references.ts # Function and variable names an event delete would leave dangling
+│   │       ├── delete-references.ts # Function and variable names an event or sheet delete would leave dangling
 │   │       ├── unscanned-uses.ts   # Possible uses in registered files the bulk reads skipped
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
+│   │       ├── effect-uses.ts      # Conditions and actions that name an effect of their object (family effect checks)
 │   │       ├── group-settings.ts   # Event group settings (get_group_settings)
 │   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
 │   │       └── script-scan.ts      # Lightweight JS/TS scanner for script actions
 │   ├── resources/
-│   │   ├── project.ts              # 6 project resources
-│   │   ├── docs.ts                 # 3 Construct 3 documentation resources
-│   │   └── pitfalls.ts             # Curated pitfalls doc (construct3://docs/pitfalls)
+│   │   ├── project.ts              # Project data resources (6)
+│   │   ├── docs.ts                 # Documentation resources (3)
+│   │   └── pitfalls.ts             # Curated pitfalls text (construct3://docs/pitfalls)
 │   ├── runtime/
-│   │   ├── bridge.ts               # Injectable C3 runtime bridge script generator
+│   │   ├── bridge.ts               # Injectable runtime bridge script generator
 │   │   ├── cdp-client.ts           # CDP client: game connections, bridge calls, input, screenshots
 │   │   ├── preview-server.ts       # Loopback server for exported games, browser launch
 │   │   └── zip-writer.ts           # Zero-dep ZIP writer for .c3p packing
 │   ├── tools/
-│   │   ├── query.ts                # 9 query tools
-│   │   ├── analysis.ts             # 11 analysis tools
+│   │   ├── query.ts                # Query tools (9)
+│   │   ├── analysis.ts             # Analysis tools (11)
 │   │   ├── mutations.ts            # Registers the domain tool modules below
-│   │   ├── shared.ts               # Shared validation, result/error helpers, editor reload note
-│   │   ├── project-sync.ts         # Each handler: tool call scope + check of the project on disk
+│   │   ├── shared.ts               # Validation, result/error helpers, editor reload note
+│   │   ├── project-sync.ts         # withProjectSync: each handler in a tool call scope, after a check of project.c3proj on disk
 │   │   ├── object-tools.ts         # Object and family tools (6)
 │   │   ├── event-tools.ts          # Event sheet tools (12)
-│   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators
+│   │   ├── event-helpers.ts        # Event Zod schemas, builders, validators, load-time gate
 │   │   ├── layout-tools.ts         # Layout, layer and instance tools (9)
 │   │   ├── animation-tools.ts      # Sprite animation and frame tools (8)
 │   │   ├── timeline-tools.ts       # Timeline tools (5)
 │   │   ├── project-tools.ts        # Project metadata and addon tools (4)
-│   │   └── runtime-tools.ts        # 19 runtime control tools
+│   │   └── runtime-tools.ts        # Runtime control tools (19)
 │   └── prompts/
-│       └── workflows.ts            # 7 workflow prompts
+│       └── workflows.ts            # Workflow prompts (7)
 ├── test/                           # Vitest suites, mocks and fixtures
 ├── dist/                           # Compiled JavaScript (generated)
 ├── package.json
@@ -638,7 +643,7 @@ We welcome contributions! Here's how to get started:
 - [x] Bridge commands: callFunction, get/setGlobalVar, getObjectState, evaluateExpression, etc.
 - [x] Project cloning with bridge injection
 - [x] Export-for-preview pre-flight checks (worker mode, bridge registration)
-- [x] Bridge eval script generation (curl/python for browser CDP)
+- [x] Bridge eval script generation (browser-console lines, and a Python snippet that prints them)
 - [x] Game connection over CDP (page or worker), bridge calls, conditions, event buffers, input, screenshots, preview server (issues #8 to #13)
 
 ### M1 Primitive Surface ✅ (v1.8)
