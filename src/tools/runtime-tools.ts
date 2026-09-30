@@ -21,6 +21,7 @@ import { toolResult, toolError, boundedRecord } from './shared.js';
 import { writeZip } from '../runtime/zip-writer.js';
 import { jsonTextStyleOf, parseJsonText, serializeJson } from '../construct3/json-format.js';
 import { resolveProjectPath } from '../construct3/path-utils.js';
+import { withProjectSync } from './project-sync.js';
 
 import { PreviewManager, isLoopbackHost } from '../runtime/preview-server.js';
 import { RuntimeConnectionManager } from '../runtime/cdp-client.js';
@@ -431,7 +432,8 @@ function loadingMessage(install: BridgeInstall): string {
   return 'The project uses classic scripts, where imports are not available; the bridge is listed with purpose none. Loading it that way is not verified: switch the project to module scripts if the bridge does not start.';
 }
 
-export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps): RuntimeToolController {
+export function registerRuntimeTools({ server: mcpServer, reader, writer }: RuntimeToolDeps): RuntimeToolController {
+  const server = withProjectSync(mcpServer, reader);
   const connections = new RuntimeConnectionManager();
   const previews = new PreviewManager();
 
@@ -444,6 +446,8 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
     async () => {
       try {
         const projectDir = reader.getProjectDir();
+        // project.c3proj changed on disk during this call: refused before the first write (#51)
+        await writer.assertProjectFileCurrent();
         const install = await installBridge(projectDir, reader.getProjectPath());
         await reader.loadProject();
         return toolResult({
@@ -470,6 +474,8 @@ export function registerRuntimeTools({ server, reader, writer }: RuntimeToolDeps
     async () => {
       try {
         const projectDir = reader.getProjectDir();
+        // project.c3proj changed on disk during this call: refused before the first write (#51)
+        await writer.assertProjectFileCurrent();
         const removed = await uninstallBridge(projectDir, reader.getProjectPath());
         await reader.loadProject();
         return toolResult({
@@ -1016,6 +1022,8 @@ print(json.dumps({
         // Inject bridge if requested
         let install: BridgeInstall | undefined;
         if (injectBridge) {
+          // project.c3proj changed on disk during this call: refused before the first write (#51)
+          await writer.assertProjectFileCurrent();
           install = await installBridge(projectDir, reader.getProjectPath());
           await reader.loadProject();
           checks.push({ check: 'runtimeBridge', status: install.loadedAs === 'classic' ? 'warning' : 'ok', detail: loadingMessage(install) });
@@ -1098,6 +1106,8 @@ print(json.dumps({
         // Optionally inject bridge first
         let install: BridgeInstall | undefined;
         if (injectBridge) {
+          // project.c3proj changed on disk during this call: refused before the first write (#51)
+          await writer.assertProjectFileCurrent();
           install = await installBridge(projectDir, reader.getProjectPath());
           await reader.loadProject();
         }

@@ -56,6 +56,10 @@ construct3-mcp/
 │   │   ├── templates.ts            # Entity templates and known addon maps
 │   │   ├── event-shapes.ts         # The event shapes the editor writes (else, OR, calls, scripts)
 │   │   ├── instance-behaviors.ts   # Behavior entries on layout instances
+│   │   ├── instance-variables.ts   # Instance variable values and effect entries on layout instances
+│   │   ├── hierarchy.ts            # Hierarchy (scene graph) links between layout instances
+│   │   ├── layer-references.ts     # Event sheet strings that name a layer (update_layer rename)
+│   │   ├── object-images.ts        # An object type's image files in images/ (kept as .bak on delete)
 │   │   ├── animation-rename.ts     # Frame image files and layout instances a rename_animation changes, frame image moves on frame insert/delete
 │   │   ├── json-format.ts          # On-disk text style (line endings, trailing newline, BOM)
 │   │   ├── layers.ts               # Layer trees: every layer and sub-layer, their instances, layer names
@@ -64,7 +68,7 @@ construct3-mcp/
 │   │   ├── event-variable-names.ts # Editor name rules for event variables and function parameters
 │   │   ├── path-utils.ts           # Path resolution inside the project folder
 │   │   ├── png-generator.ts        # Zero-dep placeholder PNG generation
-│   │   ├── raw-text-search.ts      # Streamed whole-word text search in files the reader skips
+│   │   ├── raw-text-search.ts      # Streamed whole-word text search and UID/SID scan in files the reader skips
 │   │   ├── timeline-folders.ts     # The editor's Transitions folder in the timelines container
 │   │   ├── types.ts                # TypeScript type definitions
 │   │   └── analyzers/              # Analysis modules
@@ -78,9 +82,10 @@ construct3-mcp/
 │   │       ├── load-rules.ts       # Editor load-time rules (validate_project, pre-write checks)
 │   │       ├── legacy-behavior-keys.ts # Legacy "behavior-type" key scan and repair
 │   │       ├── legacy-event-shapes.ts # Legacy isElse/isOr/function call/script shape scan and repair
-│   │       ├── delete-references.ts # Function and variable names an event delete would leave dangling
+│   │       ├── delete-references.ts # Function and variable names an event or sheet delete would leave dangling
 │   │       ├── unscanned-uses.ts   # Possible uses in registered files the bulk reads skipped
 │   │       ├── behavior-refs.ts    # Behavior name checks against objects and families
+│   │       ├── effect-uses.ts      # Conditions/actions that name an effect of their object
 │   │       ├── group-settings.ts   # Event group settings
 │   │       ├── event-outline.ts    # Editor event numbers, event sheet outline
 │   │       ├── runtime-traps.ts    # Signal pairing and order, script/parameter traps
@@ -201,7 +206,8 @@ Key things to know when working with Construct 3 project files:
 - **c3proj containers** use `{ items: string[], subfolders: Subfolder[] }` recursive structure
 - **usedAddons** in c3proj must list every plugin, behavior, and effect used
 - **Global plugins** (Audio, AJAX, Mouse, etc.) use `singleglobal-inst` instead of layout placement
-- **Layout instances** carry a `behaviors` entry (`{ properties: {...} }`) for every behavior of their object type and of its families, family behaviors first (`instance-behaviors.ts`)
+- **Layout instances** carry a `behaviors` entry (`{ properties: {...} }`) for every behavior of their object type and of its families, family behaviors first (`instance-behaviors.ts`), a value in `instanceVariables` for every instance variable of the object and its families, family variables first, and an `effects` entry per effect (`instance-variables.ts`)
+- **Hierarchies**: both sides of a link are stored in `sceneGraphData` (the child's `"parent-uid"`, the parent's `children` entry), by UID; a tool that removes instances removes the links to them (`hierarchy.ts`)
 - **Image files** are named `images/<object>-<animation>-<frame, 3 digits>.png` (TiledBg: `images/<object>.png`), the whole name lowercased; `.jpg` for a JPEG frame. The number is the frame's index, so inserting or deleting a frame renames the image files of the frames after it (`planFrameImageShift` in `animation-rename.ts`)
 - **Event shapes** follow editor-saved sheets (`event-shapes.ts`): Else is a System `else` condition at index 0 (conditions after it make an else-if), an OR block has `"isOrBlock": true` on the event, a function call is `{ callFunction, sid, parameters: [positional arguments] }` without `id`/`objectClass`, and a script action is `{ type: "script", language: "javascript", script: [lines] }`. Never write the block-level `isElse` or per-condition `isOr` keys older versions wrote
 - **Behavior conditions/actions** name their behavior under `behaviorType`; a condition or action that names its behavior only under the legacy `behavior-type` key makes the editor refuse to open the project (a leftover `behavior-type` next to a valid `behaviorType` is ignored)
@@ -211,13 +217,16 @@ Key things to know when working with Construct 3 project files:
 
 ## Cache Invalidation
 
-After any write operation, three caches must be cleared:
+After any write operation the cached state must follow the new content:
 
 1. **Reader caches** — `reader.invalidateCaches()` clears entity caches
 2. **Project index** — `resetProjectIndex(reader)` clears the cross-reference index of that reader's project
-3. **ID generator** — `idGen.reset()` forces re-scan of existing IDs
+3. **ID generator** — `idGen.noteWrittenText(text)` adds the IDs in the written file; the generator keeps its scan (`idGen.reset()` would force a full rescan)
+4. **File state** — `reader.noteOwnWrite(path, state)` records the file's new state, so the next tool call does not take the write for a change made outside the server
 
-The `ProjectWriter.invalidateAll()` method handles all three. The `addToProject()` and `removeFromProject()` methods also call `reader.reloadProject()` which re-reads the c3proj file.
+The writer's `afterOwnWrite()` handles all four for its entity writes. The `addToProject()` and `removeFromProject()` methods also call `reader.reloadProject()` which re-reads the c3proj file and records its state.
+
+**Changes made outside the server (#51).** Register tools, resources and prompts through `withProjectSync(server, reader)` (`tools/project-sync.ts`; every `register*` function does): each handler then runs as a tool call scope and first checks `project.c3proj` on disk (`reader.checkProjectFile()`). The files the caches hold are checked the first time the call uses a bulk read, the index or the ID generator (`reader.ensureCachesFresh()`); a change drops the cached state and moves `reader.getDiskEpoch()`, on which the index and the ID generator rebuild. Inside the scope the writer backs each file up once per call and refuses (`StaleFileError`) to write a file whose state on disk differs from the state the call read it in. Outside a tool call scope (scripts, direct reader use) the caches are not checked by themselves: call `reader.syncWithDisk()` after changing files outside the reader. The writer's check still applies there, against the state the reader last read or wrote the file in. A tool that updates `project.c3proj` without the writer calls `writer.assertProjectFileCurrent()` before its first write (a file written before it would stay when it refuses). The writer's own `project.c3proj` updates go through `updateProjectFile()`: they take a change made on disk in (`reader.checkProjectFile()`) and merge into it instead of refusing, because they run after the tool wrote other files. The scope also records each file the call changed through the writer; when a later write of the call is refused as stale, the writer puts those files back from their backups before it throws (`undoCallChanges`), so a refused call changes nothing. Files written outside the writer (images, timelines, scripts) are not put back.
 
 `getProjectIndex(reader)` caches one index per reader, so a script, test or embedding can open several projects in one process: give each project its own reader, writer and `IdGenerator` (a generator scans the project of the reader it is first called with), and open each project with one reader only: a second reader on the same project sees the other's writes neither in its caches nor in its index. A write through the writer or the event tools resets only its own project's index; `resetProjectIndex()` without a reader resets every project's index, which tests use between cases. The MCP server opens one project per process.
 

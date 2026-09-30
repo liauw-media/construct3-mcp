@@ -23,11 +23,15 @@ export interface FunctionMapResult {
     /** Call function actions, Functions.Name(...) expression calls and function map registrations (see FunctionCallSite.via) */
     callSites: FunctionCallSite[];
     callCount: number;
+    /** Other function blocks whose name matches this one's, ignoring case (a name the editor refuses to give twice) */
+    sameNameAs?: Array<{ name: string; sheet: string }>;
   }>;
   summary: {
     totalFunctions: number;
     totalCallSites: number;
     uncalledFunctions: string[];
+    /** Function names (ignoring case) that several function blocks have */
+    duplicateFunctionNames?: string[];
   };
 }
 
@@ -85,7 +89,7 @@ function buildFlowNodes(
     // Count functions and groups from references
     let functionCount = 0;
     let groupCount = 0;
-    for (const [, def] of index.functionDefinitions) {
+    for (const def of index.functionDefinitionList) {
       if (def.sheet === sheetName) functionCount++;
     }
     // Approximate group count from the event sheet references
@@ -142,7 +146,7 @@ function buildMermaidDiagram(
   if (detail !== 'summary') {
     for (const sheet of sheets) {
       let funcCount = 0;
-      for (const [, def] of index.functionDefinitions) {
+      for (const def of index.functionDefinitionList) {
         if (def.sheet === sheet) funcCount++;
       }
       if (funcCount > 0) {
@@ -200,25 +204,38 @@ export async function getFunctionMap(
   const functions: FunctionMapResult['functions'] = [];
   let totalCallSites = 0;
   const uncalledFunctions: string[] = [];
+  // Function blocks whose names match ignoring case are listed one by one;
+  // calls name them by name, so they share their call sites (counted once)
+  const byName = new Map<string, Array<{ name: string; sheet: string }>>();
+  for (const def of index.functionDefinitionList) {
+    const key = def.name.toLowerCase();
+    byName.set(key, [...(byName.get(key) ?? []), def]);
+  }
+  const counted = new Set<string>();
 
-  for (const [funcName, def] of index.functionDefinitions) {
+  for (const def of index.functionDefinitionList) {
     if (options.eventsheet && def.sheet !== options.eventsheet) continue;
+    const key = def.name.toLowerCase();
 
-    const callSites = index.getFunctionCalls(funcName);
-    totalCallSites += callSites.length;
+    const callSites = index.getFunctionCalls(def.name);
+    if (!counted.has(key)) totalCallSites += callSites.length;
+    counted.add(key);
 
-    if (callSites.length === 0) {
-      uncalledFunctions.push(funcName);
+    if (callSites.length === 0 && !uncalledFunctions.includes(def.name)) {
+      uncalledFunctions.push(def.name);
     }
 
+    const others = (byName.get(key) ?? []).filter(o => o !== def).map(o => ({ name: o.name, sheet: o.sheet }));
     functions.push({
-      name: funcName,
+      name: def.name,
       sheet: def.sheet,
       params: def.params,
       callSites: options.detail === 'full' ? callSites : callSites.slice(0, 10),
       callCount: callSites.length,
+      ...(others.length > 0 ? { sameNameAs: others } : {}),
     });
   }
+  const duplicateFunctionNames = [...byName.values()].filter(g => g.length > 1).map(g => g[0].name);
 
   // Sort by call count descending
   functions.sort((a, b) => b.callCount - a.callCount);
@@ -229,6 +246,7 @@ export async function getFunctionMap(
       totalFunctions: functions.length,
       totalCallSites,
       uncalledFunctions,
+      ...(duplicateFunctionNames.length > 0 ? { duplicateFunctionNames } : {}),
     },
   };
 }

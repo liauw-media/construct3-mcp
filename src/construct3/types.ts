@@ -491,10 +491,11 @@ export interface ObjectReference {
   /**
    * How the object is used: as the object of a condition/action, as a whole
    * parameter value (object parameters), inside a parameter expression
-   * ("Name.X"), from a script action/event (runtime.objects.Name), or as the
-   * object a custom action block defines a custom action for.
+   * ("Name.X"), from a script action/event (runtime.objects.Name), as the
+   * object a custom action block defines a custom action for, or as the
+   * literal name System "Create object (by name)" creates.
    */
-  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script' | 'custom-action';
+  context: 'condition' | 'action' | 'parameter' | 'expression' | 'script' | 'custom-action' | 'create-by-name';
 }
 
 /** Node in the event sheet flow graph */
@@ -509,6 +510,16 @@ export interface EventSheetFlowNode {
 }
 
 /** Node in the object dependency graph */
+/** An object type whose own file could not be parsed (issue #60). */
+export interface UnanalysedObjectFile {
+  /** "objectTypes/<name>", as validate_project lists unscanned files */
+  file: string;
+  /** Why it was not parsed, e.g. "over the 10MB read limit" */
+  reason: string;
+  /** What could not be checked because of it */
+  unchecked: string;
+}
+
 export interface ObjectDependencyNode {
   objectName: string;
   referencedIn: {
@@ -525,6 +536,12 @@ export interface ObjectDependencyNode {
    * referenceCount does not count
    */
   possiblyReferencedIn?: string[];
+  /**
+   * The object's own object type file could not be parsed: its SID is
+   * unknown, so references by SID (object properties of other instances)
+   * are not counted, and `unchecked` says so
+   */
+  unanalysed?: UnanalysedObjectFile;
 }
 
 /** Performance issue found by heuristic analysis */

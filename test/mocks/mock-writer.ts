@@ -67,6 +67,14 @@ export class MockWriter {
     return undefined;
   }
 
+  checkAddonRegistrable(_type: 'plugin' | 'behavior', _id: string): void {
+    // every addon is registrable in the mock
+  }
+
+  async assertProjectFileCurrent(): Promise<void> {
+    // the mock has no project file that could change
+  }
+
   getSubfolderForEntity(
     _category: string,
     _name: string,
@@ -116,6 +124,12 @@ export class MockWriter {
 
   async restoreEntityFile(backupPath: string): Promise<void> {
     this.calls.push({ method: 'restoreEntityFile', args: [backupPath] });
+  }
+
+  /** The mock changes no files, so undoing a tool call puts nothing back */
+  async undoToolCall(): Promise<{ restored: string[]; left: Array<{ label: string; backup: string | null }> }> {
+    this.calls.push({ method: 'undoToolCall', args: [] });
+    return { restored: [], left: [] };
   }
 
   async deleteImageFile(name: string): Promise<boolean> {

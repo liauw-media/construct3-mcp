@@ -35,8 +35,10 @@ import {
   type UnscannedFileReport,
 } from '../construct3/analyzers/unscanned-uses.js';
 import { nameTerm } from '../construct3/raw-text-search.js';
+import { withProjectSync } from './project-sync.js';
 
-export function registerAnimationTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerAnimationTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // Every animation tool reads a Sprite's object file and writes it back, and
   // several rename or write frame image files, whose names hold the frame
   // index: they run one at a time (see withAnimationLock)

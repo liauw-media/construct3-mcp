@@ -126,6 +126,30 @@ export function functionsObjectName(source: { getProject?: () => unknown } | und
   }
 }
 
+// ─── Create object (by name) ────────────────────────────────
+
+/**
+ * What a System "Create object (by name)" action (id "create-object-by-name")
+ * creates: the object type or family name when its "object-name" parameter is
+ * one string literal (`"Bullet"`, surrounding spaces allowed; `""` inside is a
+ * quote), null when it is any other expression (a name built at runtime), and
+ * undefined for any other condition or action. The runtime looks the name up
+ * ignoring case. get_asset_usage and the cross-reference index share this rule.
+ */
+export function createByNameTarget(ace: unknown): string | null | undefined {
+  if (!ace || typeof ace !== 'object' || Array.isArray(ace)) return undefined;
+  const record = ace as Record<string, unknown>;
+  const parameters = record.parameters;
+  if (record.id !== 'create-object-by-name' || !parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
+    return undefined;
+  }
+  const expression = (parameters as Record<string, unknown>)['object-name'];
+  if (typeof expression !== 'string') return undefined;
+  const s = expression.trim();
+  if (!s.startsWith('"') || c3StringEnd(s, 0) !== s.length - 1) return null;
+  return s.slice(1, -1).replace(/""/g, '"');
+}
+
 // ─── Function calls in expressions ──────────────────────────
 
 /** Index of the quote that closes the C3 string literal opening at `start`, or -1. */
@@ -512,11 +536,19 @@ export function isLegacyFunctionCall(ace: Readonly<Record<string, unknown>>): bo
 }
 
 /**
- * Rewrite a stored function call in place into the editor's shape: drops the
- * legacy keys and writes `args` as positional parameters, in the order
- * callFunction, sid, disabled, other keys, parameters.
+ * Write `args` as the positional parameters of a stored function call. A call
+ * already in the editor's shape keeps its keys where they are (only the
+ * arguments change, so an update with the same arguments changes nothing); a
+ * call in an older shape is rewritten into the editor's shape: the legacy
+ * keys dropped, in the order callFunction, sid, disabled, other keys,
+ * parameters.
  */
 export function rewriteFunctionCallInPlace(ace: Record<string, unknown>, args: FunctionArgument[]): void {
+  if (!isLegacyFunctionCall(ace)) {
+    if (args.length > 0) ace.parameters = args;
+    else delete ace.parameters;
+    return;
+  }
   const others = Object.entries(ace).filter(([k]) =>
     !['callFunction', 'sid', 'disabled', 'parameters', ...LEGACY_CALL_KEYS].includes(k));
   const { callFunction, sid, disabled } = ace;

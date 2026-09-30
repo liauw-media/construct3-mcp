@@ -7,11 +7,13 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Construct3ProjectReader } from '../construct3/project-reader.js';
 import { findRuntimeTraps } from '../construct3/analyzers/runtime-traps.js';
 import { PITFALLS_URI } from '../resources/pitfalls.js';
+import { withProjectSync } from '../tools/project-sync.js';
 
 export function registerWorkflowPrompts(
-  server: McpServer,
+  mcpServer: McpServer,
   reader: Construct3ProjectReader
 ) {
+  const server = withProjectSync(mcpServer, reader);
   server.prompt(
     'analyze_project',
     'Get a detailed analysis of the Construct3 project structure and organization',

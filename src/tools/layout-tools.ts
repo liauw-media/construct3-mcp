@@ -5,7 +5,7 @@
 
 import { z } from 'zod';
 import type { MutationToolDeps } from './shared.js';
-import type { WriteResult, Layout, Layer } from '../construct3/types.js';
+import type { WriteResult, Layout, Layer, EventSheet } from '../construct3/types.js';
 import { validateName, toolResult, toolError, notFoundError, boundedRecord, caseClashError } from './shared.js';
 import { findNameClash } from '../construct3/names.js';
 import { getProjectIndex } from '../construct3/analyzers/index-builder.js';
@@ -14,10 +14,12 @@ import {
   checkUnscannedFiles,
   describeUnscannedFile,
   unscannedFields,
+  unscannedFilesOf,
   unscannedWarnings,
   type UnscannedFileReport,
+  type UseRule,
 } from '../construct3/analyzers/unscanned-uses.js';
-import { patternTerm } from '../construct3/raw-text-search.js';
+import { nameTerm, patternTerm } from '../construct3/raw-text-search.js';
 import {
   DEFAULT_INSTANCE_PROPERTIES,
   createLayout,
@@ -33,12 +35,31 @@ import {
 import {
   countInstancesInLayerTree,
   findInstanceByUid,
+  forEachLayerInstance,
   findLayerNameClash,
   findLayersByName,
   layerEntries,
+  layerNameKey,
   layerPathLabel,
   type LayerEntry,
 } from '../construct3/layers.js';
+import { hierarchyUnlinkWarnings, unlinkRemovedInstances } from '../construct3/hierarchy.js';
+import {
+  buildInstanceVariableValues,
+  checkInstanceVariableValues,
+  expectedInstanceVariables,
+  type InstanceVariableDef,
+} from '../construct3/instance-variables.js';
+import { classifyReadError } from '../construct3/project-reader.js';
+import {
+  findLayerNameUses,
+  layerNameUseLocation,
+  renameLayerParameters,
+  type LayerNameUse,
+} from '../construct3/layer-references.js';
+import { EntityWriteError, filesLeftClause } from '../construct3/project-writer.js';
+import { StaleFileError } from '../construct3/disk-state.js';
+import { withProjectSync } from './project-sync.js';
 
 /**
  * What delete_layout looks for in the text of a layout file it could not
@@ -112,7 +133,171 @@ function describeInstancePlace(entry: LayerEntry | undefined): string {
   return `${entry.depth > 0 ? 'sub-layer' : 'layer'} "${layerPathLabel(entry)}"`;
 }
 
-export function registerLayoutTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerLayoutTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
+  /**
+   * The instance variables the instances of `objectType` hold values for (its
+   * own and its families'); a warning instead when its file could not be
+   * parsed, and an error when it does not exist.
+   */
+  async function declaredInstanceVariables(
+    objectType: unknown,
+  ): Promise<{ variables: InstanceVariableDef[] } | { variables?: undefined; warning: string } | { error: string }> {
+    const name = String(objectType);
+    try {
+      const obj = await reader.readObjectType(name);
+      return { variables: expectedInstanceVariables(name, obj, await readFamiliesForInstances(reader)) };
+    } catch (error) {
+      if (classifyReadError(error) === 'E_FILE_NOT_FOUND') {
+        return { error: `The instance's object type "${name}" does not exist, so it has no instance variables to set. Nothing was changed.` };
+      }
+      return {
+        warning: `The object type "${name}" could not be parsed, so the instance variable names were not checked against its variables.`,
+      };
+    }
+  }
+
+  /**
+   * Registered family files the reader could not parse (over the 10MB read
+   * limit, not valid JSON) whose text names the object type `objectName`, or
+   * that cannot be read at all: the object is possibly a member of such a
+   * family, whose instance variables and behaviors are unknown. Their text is
+   * also searched for `variableNames`; a report lists those it found next to
+   * the object's name in `names`.
+   */
+  async function unparsedFamiliesNaming(objectName: string, variableNames: readonly string[]): Promise<UnscannedFileReport[]> {
+    const families = await readFamiliesForInstances(reader);
+    const files = unscannedFilesOf('families', await reader.listFamilies(), families, reader.getReadFailures('families'));
+    if (files.length === 0) return [];
+    const object = [nameTerm(objectName)];
+    const rules: UseRule[] = [{ categories: ['families'], allOf: [object] }];
+    if (variableNames.length > 0) rules.push({ categories: ['families'], allOf: [object, variableNames.map(n => nameTerm(n))] });
+    return (await checkUnscannedFiles(reader, files, rules)).filter(r => r.textSearch !== 'no-match');
+  }
+
+  /**
+   * Check the instance variable values `given` for an instance of
+   * `objectName` against the variables it has (`expected`: those of its
+   * object type and the families that could be parsed). A name it has no
+   * variable of is refused (`error`), unless a family file that could not be
+   * parsed possibly declares it (its text names the object and the variable,
+   * or it cannot be read at all): such a name is in `unlisted`, to be written
+   * as given, with a warning. For a `newInstance`, the warning also says that
+   * such a family's other variables and its behaviors got nothing.
+   * `unscanned` lists the family files the warnings are about.
+   */
+  async function checkGivenInstanceVariables(
+    objectName: string,
+    expected: InstanceVariableDef[],
+    given: Record<string, unknown>,
+    newInstance: boolean,
+  ): Promise<{ error: string } | { error?: undefined; unlisted: string[]; warnings: string[]; unscanned: UnscannedFileReport[] }> {
+    const check = checkInstanceVariableValues(expected, given);
+    let families: UnscannedFileReport[] = [];
+    let unlisted: string[] = [];
+    if (check.unknown.length > 0 || newInstance) {
+      families = await unparsedFamiliesNaming(objectName, check.unknown);
+      const unreadable = families.some(r => r.textSearch === 'unreadable');
+      const found = new Set(families.flatMap(r => r.names ?? []));
+      unlisted = check.unknown.filter(name => unreadable || found.has(name));
+    }
+    const refused = check.unknown.filter(name => !unlisted.includes(name));
+    if (refused.length > 0) {
+      return { error: undeclaredVariablesError(objectName, { ...check, unknown: refused }, expected, families) };
+    }
+
+    const warnings: string[] = [];
+    if (check.mistyped.length > 0) {
+      warnings.push(`Instance variable values of another type than the variable: ${check.mistyped.join('; ')}. Written as given.`);
+    }
+    const concerned = newInstance || unlisted.length > 0 ? families : [];
+    if (concerned.length > 0) {
+      const files = concerned.map(r => r.textSearch === 'unreadable'
+        ? describeUnscannedFile(r)
+        : `${describeUnscannedFile(r)}, whose text names "${objectName}"`);
+      warnings.push(`Family file(s) that could not be parsed possibly list "${objectName}" as a member: ${files.join('; ')}. ` +
+        (unlisted.length > 0
+          ? `Their instance variables are unknown, so ${unlisted.map(n => `"${n}"`).join(', ')} ${unlisted.length === 1 ? 'was' : 'were'} written as given, without a check. `
+          : '') +
+        (newInstance ? 'The new instance got no values for their other instance variables and no entries for their behaviors. ' : '') +
+        'Check the instance in the Construct 3 editor once the file is repaired.');
+    }
+    return { unlisted, warnings, unscanned: concerned };
+  }
+
+  /**
+   * What renaming the layer `oldName` of `layoutName` to `newName` changes in
+   * the event sheets (see layer-references.ts): the sheets to rewrite (the
+   * definite uses, unless `update` is false or another layout has a layer of
+   * the old name, ignoring case, in which case a layer parameter may name
+   * that one), and the warnings. Layouts the reader could not parse are
+   * searched as text for the old name (a match counts as such a layer), event
+   * sheets it could not parse for the old name (possibly uses, not updated).
+   */
+  async function planLayerReferences(
+    layoutName: string, oldName: string, newName: string, update: boolean,
+  ): Promise<{ rewrites: Map<string, EventSheet>; warnings: string[]; unscanned: UnscannedFileReport[] }> {
+    const sheets = await reader.readAllEventSheets();
+    const sheetFailures = reader.getReadFailures('eventSheets');
+    const uses = findLayerNameUses(sheets, oldName);
+    const definite = uses.filter(u => u.definite);
+    const possible = uses.filter(u => !u.definite);
+
+    // Other layouts with a layer of the old name: a layer parameter may name that one.
+    // The renamed layout by its registered name (layoutName may differ in case, which
+    // the file system accepts), or the cached copy with the old layer name counts as another
+    const layouts = await reader.readAllLayouts();
+    const layoutFailures = reader.getReadFailures('layouts');
+    const registered = await reader.listLayouts();
+    const own = findNameClash(layoutName, registered) ?? layoutName;
+    const key = layerNameKey(oldName);
+    const sameName = [...layouts]
+      .filter(([name, other]) => name !== own && layerEntries(other.layers).some(e => typeof e.layer.name === 'string' && layerNameKey(e.layer.name) === key))
+      .map(([name]) => name);
+    const unscannedLayouts = await checkUnscannedFiles(reader,
+      unscannedFilesOf('layouts', registered, layouts, layoutFailures).filter(f => f.name !== own),
+      [{ categories: ['layouts'], allOf: [[nameTerm(oldName)]] }]);
+    const unscannedSheets = await checkUnscannedFiles(reader,
+      unscannedFilesOf('eventSheets', await reader.listEventSheets(), sheets, sheetFailures),
+      [{ categories: ['eventSheets'], allOf: [[nameTerm(oldName)]] }]);
+    const maybeSameName = unscannedLayouts.filter(r => r.textSearch === 'possible-use' || r.textSearch === 'unreadable');
+
+    const warnings: string[] = [];
+    const rewrites = new Map<string, EventSheet>();
+    const where = (list: LayerNameUse[]) => listUses(list.map(layerNameUseLocation));
+    if (definite.length > 0) {
+      if (!update) {
+        warnings.push(`${definite.length} "layer" parameter(s) still name "${oldName}" (updateReferences is false): ${where(definite)}. ` +
+          `Update them to "${newName}" if they mean this layer.`);
+      } else if (sameName.length > 0 || maybeSameName.length > 0) {
+        const others = [
+          ...sameName.map(n => `"${n}"`),
+          ...maybeSameName.map(r => `${r.file} (could not be parsed; ${r.textSearch === 'unreadable' ? 'not searched' : 'its text names it'})`),
+        ];
+        warnings.push(`${definite.length} "layer" parameter(s) name "${oldName}" and were NOT changed: layout(s) ${listUses(others)} ` +
+          `${sameName.length + maybeSameName.length === 1 ? 'has' : 'possibly have'} a layer of that name too, and a layer parameter names a layer of ` +
+          `whatever layout runs the event sheet. Update those meant for this layer to "${newName}": ${where(definite)}.`);
+      } else {
+        for (const sheetName of new Set(definite.map(u => u.eventSheet))) {
+          const sheet = await reader.readEventSheet(sheetName);
+          if (renameLayerParameters(sheet, oldName, newName) > 0) rewrites.set(sheetName, sheet);
+        }
+        warnings.push(`Pointed ${definite.length} "layer" parameter(s) that named "${oldName}" at "${newName}", in event sheet(s) ` +
+          `${listUses([...rewrites.keys()].map(n => `"${n}"`))}: ${where(definite)}.`);
+      }
+    }
+    if (possible.length > 0) {
+      warnings.push(`${possible.length} other expression(s) or script line(s) contain the string "${oldName}", which may name this layer ` +
+        `(e.g. LayerScale("${oldName}")) or something else of that name; they were NOT changed: ${where(possible)}.`);
+    }
+    for (const report of unscannedSheets.filter(r => r.textSearch !== 'no-match')) {
+      warnings.push(`${report.file} could not be parsed (${report.reason}) and ` +
+        (report.textSearch === 'unreadable' ? 'could not be searched either' : `its text names "${oldName}"`) +
+        ': strings there that name the layer were NOT updated; check it in the Construct 3 editor.');
+    }
+    return { rewrites, warnings, unscanned: [...unscannedLayouts, ...unscannedSheets] };
+  }
+
   // ─── create_layout ────────────────────────────────────────
 
   server.tool(
@@ -218,7 +403,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       originX: z.number().min(0).max(1).optional().describe('Horizontal origin 0-1 (default: 0.5 = center)'),
       originY: z.number().min(0).max(1).optional().describe('Vertical origin 0-1 (default: 0.5 = center)'),
       instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-        .describe('Instance variable values as {varName: value}'),
+        .describe('Instance variable values as {varName: value}; every instance variable of the object and its families not given gets its default (0, "" or false); a name the object and its families have no variable of is refused'),
       behaviors: z.record(z.string(), boundedRecord())
         .refine(obj => Object.keys(obj).length <= 50, 'Too many behaviors (max 50)')
         .refine(obj => JSON.stringify(obj).length <= 50_000, 'Behaviors payload too large (max 50KB)')
@@ -258,25 +443,28 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return notFoundError('Layout', args.layoutName, reader.findNearestName(args.layoutName, 'layouts'), 'list_layouts');
         }
 
+        const warnings: string[] = [];
+        const families = await readFamiliesForInstances(reader);
+
+        // A value for every instance variable of the object and its families, like the
+        // editor writes them; values given for a variable it does not have are refused
+        // (unless a family file that could not be parsed possibly declares it)
+        const expectedVariables = expectedInstanceVariables(args.objectType, objData, families);
+        const variableCheck = await checkGivenInstanceVariables(args.objectType, expectedVariables, args.instanceVariables ?? {}, true);
+        if (variableCheck.error !== undefined) return toolError(variableCheck.error);
+        warnings.push(...variableCheck.warnings);
+        const instanceVariables = {
+          // Possibly variables of a family that could not be parsed, which come first
+          ...Object.fromEntries(variableCheck.unlisted.map(name => [name, args.instanceVariables![name]])),
+          ...buildInstanceVariableValues(expectedVariables, args.instanceVariables),
+        };
+
         const uid = await idGen.generateUid(reader);
         const sid = await idGen.generateSid(reader);
-        const warnings: string[] = [];
-
-        // Validate instanceVariables keys against object type definition
-        if (args.instanceVariables && objData) {
-          const definedVars = new Set((objData.instanceVariables ?? []).map(v => v.name));
-          for (const key of Object.keys(args.instanceVariables)) {
-            if (!definedVars.has(key)) {
-              warnings.push(`Instance variable "${key}" is not defined on "${args.objectType}". Defined variables: ${[...definedVars].join(', ') || '(none)'}. It may be inherited from a family.`);
-            }
-          }
-        }
 
         // One behavior entry per behavior of the object and its families, like
         // the editor writes them; caller values override the defaults
-        const expectedBehaviors = expectedInstanceBehaviors(
-          args.objectType, objData, await readFamiliesForInstances(reader),
-        );
+        const expectedBehaviors = expectedInstanceBehaviors(args.objectType, objData, families);
         const instanceBehaviors = buildInstanceBehaviors(args.objectType, expectedBehaviors, args.behaviors);
         warnings.push(...instanceBehaviors.warnings);
 
@@ -287,7 +475,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         if (args.zElevation !== undefined) overrides.zElevation = args.zElevation;
         if (args.originX !== undefined) overrides.originX = args.originX;
         if (args.originY !== undefined) overrides.originY = args.originY;
-        if (args.instanceVariables !== undefined) overrides.instanceVariables = args.instanceVariables;
+        overrides.instanceVariables = instanceVariables;
         overrides.behaviors = instanceBehaviors.behaviors;
         if (args.tags !== undefined) overrides.tags = args.tags;
         if (args.showing !== undefined) overrides.showing = args.showing;
@@ -301,7 +489,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
             uid,
             sid,
             tags: overrides.tags ?? '',
-            instanceVariables: overrides.instanceVariables ?? {},
+            instanceVariables,
             behaviors: instanceBehaviors.behaviors,
             showing: overrides.showing ?? true,
             locked: overrides.locked ?? false,
@@ -342,6 +530,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           generatedSid: sid,
           generatedUid: uid,
           warnings: warnings.length > 0 ? warnings : undefined,
+          ...unscannedFields(variableCheck.unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -576,7 +765,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_layer',
-    'Delete a layer or sub-layer from a layout, together with its sub-layers (a layout must keep at least one top-level layer)',
+    'Delete a layer or sub-layer from a layout, together with its sub-layers (a layout must keep at least one top-level layer). Hierarchy links of instances on other layers to the deleted instances are removed (children stay, without a parent).',
     {
       layoutName: z.string().max(200).describe('Layout name'),
       layerName: z.string().max(200).describe('Layer name to delete (any layer or sub-layer; a sub-layer can also be given by its path, e.g. "Main > HUD")'),
@@ -618,7 +807,14 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           });
         }
 
+        // Hierarchy links go across layers: links of instances left in the
+        // layout to the instances deleted with the layer are removed
+        const removedUids = new Set<number>();
+        forEachLayerInstance([entry.layer], instance => {
+          if (typeof instance.uid === 'number') removedUids.add(instance.uid);
+        });
         entry.siblings.splice(entry.index, 1);
+        const unlink = unlinkRemovedInstances(layout, removedUids);
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
@@ -626,6 +822,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         const warnings: string[] = [];
         if (instanceCount > 0) warnings.push(`Deleted layer contained ${instanceCount} instance(s)${withSubLayers} — they have been removed.`);
         if (subLayerCount > 0) warnings.push(`Its ${subLayerCount} sub-layer(s) were deleted with it.`);
+        warnings.push(...hierarchyUnlinkWarnings(unlink));
 
         const result: WriteResult = {
           success: true,
@@ -647,11 +844,12 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'update_layer',
-    'Update properties of an existing layer or sub-layer (name, visibility, parallax, blend mode, etc.)',
+    'Update properties of an existing layer or sub-layer (name, visibility, parallax, blend mode, etc.). A rename also updates the "layer" parameters of conditions and actions that are exactly the quoted old name (ignoring case), unless another layout has a layer of that name, and warns about other strings that name the layer.',
     {
       layoutName: z.string().max(200).describe('Layout name'),
       layerName: z.string().max(200).describe('Layer name to update (any layer or sub-layer; a sub-layer can also be given by its path, e.g. "Main > HUD")'),
-      newName: z.string().max(200).optional().describe('Rename the layer (must not match another layer of the layout, sub-layers included, ignoring case)'),
+      newName: z.string().max(200).optional().describe('Rename the layer (must not match another layer of the layout, sub-layers included, ignoring case). Event parameters that name the layer are updated (see updateReferences)'),
+      updateReferences: z.boolean().optional().default(true).describe('With newName: point the "layer" parameters of conditions and actions whose whole expression is the quoted old name (ignoring case) at the new name, unless another layout has a layer of the old name (default: true). Other strings that name the layer are listed in a warning, never changed'),
       isInitiallyVisible: z.boolean().optional().describe('Change initial visibility'),
       isInitiallyInteractive: z.boolean().optional().describe('Change initial interactivity'),
       isTransparent: z.boolean().optional().describe('Change transparency'),
@@ -685,13 +883,20 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
         // Check new name uniqueness like the editor: another layer's name (ignoring case, sub-layers
         // included) is taken, changing the case of this layer's own name is fine
-        if (args.newName !== undefined && args.newName !== layer.name) {
-          const layerClash = findLayerNameClash(layout.layers, args.newName, layer);
+        const oldName = typeof layer.name === 'string' ? layer.name : undefined;
+        const renamed = args.newName !== undefined && args.newName !== layer.name;
+        if (renamed) {
+          const layerClash = findLayerNameClash(layout.layers, args.newName!, layer);
           if (layerClash) {
-            return toolError(layerNameClashError(args.newName, layerClash, args.layoutName));
+            return toolError(layerNameClashError(args.newName!, layerClash, args.layoutName));
           }
-          layer.name = args.newName;
+          layer.name = args.newName!;
         }
+        // Event sheet strings that name the old name (read before any write). A rename that
+        // only changes the letter case breaks none: the editor looks layer names up ignoring case
+        const references = renamed && oldName !== undefined && layerNameKey(oldName) !== layerNameKey(args.newName!)
+          ? await planLayerReferences(args.layoutName, oldName, args.newName!, args.updateReferences)
+          : undefined;
 
         if (args.isInitiallyVisible !== undefined) layer.isInitiallyVisible = args.isInitiallyVisible;
         if (args.isInitiallyInteractive !== undefined) layer.isInitiallyInteractive = args.isInitiallyInteractive;
@@ -702,15 +907,30 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         if (args.scaleRate !== undefined) layer.scaleRate = args.scaleRate;
         if (args.zElevation !== undefined) layer.zElevation = args.zElevation;
 
+        // The layout first, then the event sheets; a failure puts back what was written
+        // (rollBackLayerRename), except a file changed on disk after the call wrote it,
+        // which is left as it is and named. A write refused because its file changed on
+        // disk during the call (StaleFileError) has had the writer do so already
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
+        try {
+          for (const [sheetName, sheet] of references?.rewrites ?? []) {
+            await writer.writeEntityFile('eventSheets', sheetName, sheet, writer.getSubfolderForEntity('eventSheets', sheetName));
+          }
+        } catch (error) {
+          if (error instanceof StaleFileError) throw error;
+          throw new Error(await rollBackLayerRename(writer, error));
+        }
 
+        const warnings = references?.warnings ?? [];
         const result: WriteResult = {
           success: true,
           entity: args.layoutName,
           category: 'layout',
           action: 'updated',
           backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
+          ...(references ? unscannedFields(references.unscanned) : {}),
         };
         return toolResult(result);
       } catch (error) {
@@ -724,7 +944,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
 
   server.tool(
     'delete_instance_from_layout',
-    'Remove a placed object instance (on any layer or sub-layer, or a non-world instance) from a layout by its UID',
+    'Remove a placed object instance (on any layer or sub-layer, or a non-world instance) from a layout by its UID. Hierarchy links to it are removed: its children stay in the layout without a parent, and its parent no longer lists it.',
     {
       layoutName: z.string().max(200).describe('Layout name'),
       uid: z.number().int().describe('UID of the instance to remove'),
@@ -745,17 +965,23 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
         }
         const removedType = typeof found.instance.type === 'string' ? found.instance.type : undefined;
         found.list.splice(found.index, 1);
+        // Hierarchy links name UIDs: its children lose their parent, its parent the child entry
+        const unlink = unlinkRemovedInstances(layout, new Set([args.uid]));
 
         const subfolder = writer.getSubfolderForEntity('layouts', args.layoutName);
         const backupPath = await writer.writeEntityFile('layouts', args.layoutName, layout, subfolder);
 
+        const warnings = [
+          ...(removedType ? [`Removed instance of "${removedType}" (UID ${args.uid}) from ${describeInstancePlace(found.entry)}.`] : []),
+          ...hierarchyUnlinkWarnings(unlink),
+        ];
         const result: WriteResult = {
           success: true,
           entity: args.layoutName,
           category: 'layout',
           action: 'updated',
           backupFile: backupPath,
-          warnings: removedType ? [`Removed instance of "${removedType}" (UID ${args.uid}) from ${describeInstancePlace(found.entry)}.`] : undefined,
+          warnings: warnings.length > 0 ? warnings : undefined,
         };
         return toolResult(result);
       } catch (error) {
@@ -783,7 +1009,7 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       showing: z.boolean().optional().describe('Initial visibility'),
       locked: z.boolean().optional().describe('Locked in editor'),
       tags: z.string().max(500).optional().describe('Comma-separated tags'),
-      instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe('Instance variable values to update'),
+      instanceVariables: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe('Instance variable values to update (names of instance variables of the object type or its families; others are refused)'),
     },
     async (args) => {
       try {
@@ -809,6 +1035,25 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           return toolError(`Instance with UID ${args.uid} not found in layout "${args.layoutName}". Use get_layout_details to see all instance UIDs.`);
         }
         const inst = found.instance;
+
+        // Only the instance variables its object type and families have (or a family
+        // file that could not be parsed possibly declares)
+        const warnings: string[] = [];
+        let unscanned: UnscannedFileReport[] = [];
+        if (args.instanceVariables !== undefined) {
+          const declared = await declaredInstanceVariables(inst.type);
+          if ('error' in declared) {
+            return toolError(declared.error);
+          }
+          if (declared.variables) {
+            const check = await checkGivenInstanceVariables(String(inst.type), declared.variables, args.instanceVariables, false);
+            if (check.error !== undefined) return toolError(check.error);
+            warnings.push(...check.warnings);
+            unscanned = check.unscanned;
+          } else {
+            warnings.push(declared.warning);
+          }
+        }
 
         // Update world properties (non-world instances have none: spatial props are ignored for them)
         if (found.entry && inst.world) {
@@ -836,6 +1081,8 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
           category: 'layout',
           action: 'updated',
           backupFile: backupPath,
+          warnings: warnings.length > 0 ? warnings : undefined,
+          ...unscannedFields(unscanned),
         };
         return toolResult(result);
       } catch (error) {
@@ -844,4 +1091,75 @@ export function registerLayoutTools({ server, reader, writer, idGen }: MutationT
       }
     }
   );
+}
+
+/**
+ * Error for instance variable values given for names the object type and its
+ * families have no instance variable of. `unparsedFamilies`: family files
+ * that could not be parsed whose text names the object type, but not these
+ * names.
+ */
+function undeclaredVariablesError(
+  objectType: string,
+  check: { unknown: string[]; suggestions: Map<string, string> },
+  expected: InstanceVariableDef[],
+  unparsedFamilies: readonly UnscannedFileReport[] = [],
+): string {
+  const names = check.unknown.map(name => {
+    const suggestion = check.suggestions.get(name);
+    return suggestion ? `"${name}" (names are matched with their letter case: "${suggestion}"?)` : `"${name}"`;
+  });
+  const defined = expected.map(v => `${v.name} (${v.type})`).join(', ') || '(none)';
+  const unparsed = unparsedFamilies.length > 0
+    ? `Family file(s) ${unparsedFamilies.map(describeUnscannedFile).join('; ')} could not be parsed; their text names "${objectType}" but not ` +
+      `${check.unknown.length === 1 ? 'this name' : 'these names'}. `
+    : '';
+  return `"${objectType}" and its families have no instance variable ${names.join(', ')}. Its instance variables: ${defined}. ${unparsed}` +
+    'Add the variable to the object type (update_object_properties) or its family (update_family) first. Nothing was changed.';
+}
+
+/**
+ * Undo an update_layer rename whose event sheet write failed for a reason
+ * other than a refusal as stale, and return the error message. The layout
+ * and the event sheets written before are put back by the writer
+ * (undoToolCall), which leaves a file saved again in the editor after the
+ * call wrote it as it is. The event sheet whose write failed is restored from
+ * its backup, unless another write replaced it during this one
+ * (EntityWriteError.changedByOtherWrite): only a write from outside the
+ * server can land there, such as a save in the editor, so it is left as that
+ * write left it.
+ */
+async function rollBackLayerRename(writer: MutationToolDeps['writer'], error: unknown): Promise<string> {
+  // A refusal of the writer ends with a full stop already
+  const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+  const failed: string[] = [];
+  let otherWrite = '';
+  if (error instanceof EntityWriteError) {
+    if (error.changedByOtherWrite) {
+      otherWrite = ' The event sheet was left as that write left it.';
+    } else {
+      try {
+        await writer.restoreEntityFile(error.backupPath);
+      } catch {
+        failed.push(error.backupPath.replace(/\.bak$/, ''));
+      }
+    }
+  }
+  const undo = await writer.undoToolCall();
+  if (undo.left.length === 0 && failed.length === 0) {
+    return `${cause}.${otherWrite} The rename was rolled back: the layout and the event sheets written before were restored from their backups.`;
+  }
+  const parts = [
+    ...(undo.restored.length > 0 ? [`put back as they were before the call: ${undo.restored.join(', ')}`] : []),
+    ...(undo.left.length > 0 ? [filesLeftClause(undo.left)] : []),
+    ...(failed.length > 0 ? [`restoring failed for: ${failed.join(', ')} (the .bak file holds the previous JSON)`] : []),
+  ];
+  return `${cause}.${otherWrite} The rename was rolled back only in part: ${parts.join('; ')}. ` +
+    'Check the project (validate_project, git diff) before you run the tool again.';
+}
+
+/** The first few locations and how many more there are. */
+function listUses(items: string[], max = 5): string {
+  const shown = items.slice(0, max).join(', ');
+  return items.length > max ? `${shown} and ${items.length - max} more` : shown;
 }
