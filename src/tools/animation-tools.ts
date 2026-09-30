@@ -12,7 +12,8 @@ import { findNameClash } from '../construct3/names.js';
 import { createAnimation, createAnimationFrame } from '../construct3/templates.js';
 import { describeCharacter, getImageFileName, invalidImageNameCharacter } from '../construct3/png-generator.js';
 import { resolveProjectPath } from '../construct3/path-utils.js';
-import { EntityWriteError } from '../construct3/project-writer.js';
+import { EntityWriteError, filesLeftClause } from '../construct3/project-writer.js';
+import { StaleFileError } from '../construct3/disk-state.js';
 import {
   animationsSharingImageFiles,
   countAnimationNameParameters,
@@ -439,22 +440,25 @@ export function registerAnimationTools({ server: mcpServer, reader, writer, idGe
 
         // Image files first (renamed back by the writer if one fails), then the
         // object and the layouts; a failure there rolls back everything before
-        // it, including the file whose write failed if it was already replaced
+        // it (rollBackAnimationRename), except a file changed on disk after the
+        // call wrote it, which is left as it is and named. A write refused because
+        // its file changed on disk during the call (StaleFileError) has had the
+        // writer put back the files already, so only the image renames are undone
         await writer.renameImageFiles(images.renames);
-        const written: string[] = [];
+        let writing = reader.getEntityRelativePath('objectTypes', args.objectName);
         let backupPath: string;
         try {
           backupPath = await writer.writeEntityFile('objectTypes', args.objectName, obj, subfolder);
-          written.push(backupPath);
           for (const ref of layoutRefs) {
             const layout = await reader.readLayout(ref.name);
             renameInitialAnimation(layout, args.objectName, oldName, args.newName);
-            written.push(await writer.writeEntityFile('layouts', ref.name, layout, writer.getSubfolderForEntity('layouts', ref.name)));
+            writing = reader.getEntityRelativePath('layouts', ref.name);
+            await writer.writeEntityFile('layouts', ref.name, layout, writer.getSubfolderForEntity('layouts', ref.name));
           }
         } catch (error) {
-          if (error instanceof EntityWriteError) written.push(error.backupPath);
-          const cause = error instanceof Error ? error.message : String(error);
-          throw new Error(`${cause}. ${await rollBackAnimationRename(writer, written, images.renames)}`);
+          // A refusal of the writer ends with a full stop already
+          const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+          throw new Error(`${cause}. ${await rollBackAnimationRename(writer, error, writing, images.renames)}`.trimEnd());
         }
 
         const warnings: string[] = [];
@@ -583,9 +587,10 @@ export function registerAnimationTools({ server: mcpServer, reader, writer, idGe
           const kept = await frameChangeAfterOtherWrite(reader, args.objectName, anim.name, error,
             frames => frames.length === frameCount + 1 && frames[insertAt]?.imageSpriteId === imageSpriteId);
           if (kept !== true) {
-            const cause = error instanceof Error ? error.message : String(error);
+            // A refusal of the writer ends with a full stop already
+            const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
             throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, {
-              newFrameFile: images.newFrameFile, otherWrite: kept === false,
+              newFrameFile: images.newFrameFile, kept,
             })}`);
           }
           backupPath = (error as EntityWriteError).backupPath;
@@ -678,8 +683,9 @@ export function registerAnimationTools({ server: mcpServer, reader, writer, idGe
             frames => frames.length === frameCount - 1
               && (deletedId === undefined || !frames.some(frame => frame?.imageSpriteId === deletedId)));
           if (kept !== true) {
-            const cause = error instanceof Error ? error.message : String(error);
-            throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, { otherWrite: kept === false })}`);
+            // A refusal of the writer ends with a full stop already
+            const cause = (error instanceof Error ? error.message : String(error)).replace(/\.$/, '');
+            throw new Error(`${cause}. ${await rollBackFrameChange(writer, error, images.renames, { kept })}`);
           }
           backupPath = (error as EntityWriteError).backupPath;
           otherWrite = true;
@@ -995,19 +1001,22 @@ function otherWriteKeptWarning(change: string): string {
  * placeholder image (`newFrameFile`), then rename the image files back, last
  * first. The placeholder's name was free before the call (see
  * planFrameImageShift), so a file there, also one a failed write left part
- * written, is removed. With `otherWrite`, another write replaced the object
- * file during this one with content that lacks this call's change: the file
- * is left as that write left it, and the image files are renamed back to
- * match it. Returns a sentence for the error message.
+ * written, is removed. When another write replaced the object file during
+ * this one (EntityWriteError.changedByOtherWrite), the file is left as that
+ * write left it, never restored over, and the image files are renamed back to
+ * match the object as it was: `kept` (frameChangeAfterOtherWrite) false says
+ * that write lacks this call's change, undefined that the file could not be
+ * read again to tell. Returns a sentence for the error message.
  */
 async function rollBackFrameChange(
   writer: MutationToolDeps['writer'],
   error: unknown,
   renames: ImageFileRename[],
-  options: { newFrameFile?: string; otherWrite?: boolean } = {},
+  options: { newFrameFile?: string; kept?: boolean } = {},
 ): Promise<string> {
   const failed: string[] = [];
-  const restore = error instanceof EntityWriteError && !options.otherWrite;
+  const otherWrite = error instanceof EntityWriteError && error.changedByOtherWrite;
+  const restore = error instanceof EntityWriteError && !otherWrite;
   if (restore) {
     try {
       await writer.restoreEntityFile(error.backupPath);
@@ -1030,51 +1039,89 @@ async function rollBackFrameChange(
       failed.push(`image files (${e instanceof Error ? e.message : String(e)})`);
     }
   }
-  const otherWrite = options.otherWrite
-    ? 'Another write replaced the object file during this one (a tool call running in parallel?) without this call\'s change; '
-      + 'the object file was left as that write left it. '
-    : '';
+  const unchecked = otherWrite && options.kept !== false;
+  const otherWriteNote = !otherWrite ? '' : unchecked
+    ? 'Another write replaced the object file during this one (a tool call running in parallel?), and the file could not be read again '
+      + 'to tell whether it kept this call\'s change; it was left as that write left it: re-read the object to check its frames. '
+    : 'Another write replaced the object file during this one (a tool call running in parallel?) without this call\'s change; '
+      + 'the object file was left as that write left it. ';
   if (failed.length > 0) {
-    return `${otherWrite}Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
+    return `${otherWriteNote}Rolling back failed for: ${failed.join('; ')}. Check these (the .bak file holds the previous object JSON).`;
   }
   const undone = [
     ...(renames.length > 0 ? ['the image files have their old names again'] : []),
     ...(placeholderRemoved ? ['the placeholder image was removed'] : []),
     ...(restore ? ['the object file was restored from its backup'] : []),
   ];
-  return otherWrite + (undone.length === 0
-    ? 'Nothing was changed.'
-    : `Nothing was changed: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`);
+  const nothing = unchecked ? 'The rest was rolled back' : 'Nothing was changed';
+  return otherWriteNote + (undone.length === 0
+    ? `${nothing}.`
+    : `${nothing}: ${undone.slice(0, -1).join(', ')}${undone.length > 1 ? ' and ' : ''}${undone[undone.length - 1]}.`);
 }
 
 /**
- * Undo a rename_animation whose JSON writes failed part way: put back the
- * entity files written so far and the one whose write failed (it may have been
- * replaced; an unchanged file is left alone), from their backups, newest
- * first, then rename the image files back. Returns a sentence for the error
- * message.
+ * Undo a rename_animation whose object or layout write failed (`error`, for
+ * the file `failedFile`), and return sentences for the error message. After a
+ * write refused as stale (StaleFileError) the writer has put back the files
+ * the call wrote, or named those it had to leave, in the refusal already;
+ * otherwise the writer puts them back now (undoToolCall), leaving a file
+ * saved in the editor after the call wrote it as it is. The file whose write
+ * failed is not among them: it is restored from its backup when the write
+ * may have replaced it (EntityWriteError), unless another write replaced it
+ * during this one (changedByOtherWrite), such as a save in the editor, which
+ * is kept. Last, the frame image files, which the writer does not track, are
+ * renamed back.
  */
 async function rollBackAnimationRename(
   writer: MutationToolDeps['writer'],
-  writtenBackups: string[],
+  error: unknown,
+  failedFile: string,
   renames: ImageFileRename[],
 ): Promise<string> {
-  const failed: string[] = [];
-  for (const backup of [...writtenBackups].reverse()) {
+  const renameBack = async (): Promise<string | undefined> => {
+    if (renames.length === 0) return undefined;
     try {
-      await writer.restoreEntityFile(backup);
-    } catch {
-      failed.push(backup.replace(/\.bak$/, ''));
+      await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })).reverse());
+      return undefined;
+    } catch (e) {
+      return `renaming its frame image files back failed (${e instanceof Error ? e.message : String(e)}); rename them back by hand: `
+        + renames.map(r => `"images/${r.to}" → "images/${r.from}"`).join(', ');
+    }
+  };
+
+  if (error instanceof StaleFileError) {
+    const imagesFailed = await renameBack();
+    if (imagesFailed !== undefined) return `${imagesFailed[0].toUpperCase()}${imagesFailed.slice(1)}.`;
+    return renames.length > 0 ? 'Its frame image files have their old names again.' : '';
+  }
+
+  const done: string[] = [];
+  const problems: string[] = [];
+  let otherWrite = '';
+  if (error instanceof EntityWriteError) {
+    if (error.changedByOtherWrite) {
+      otherWrite = `${failedFile} was left as that write left it. `;
+    } else {
+      try {
+        await writer.restoreEntityFile(error.backupPath);
+        done.push(`${failedFile} was restored from its backup`);
+      } catch {
+        problems.push(`restoring ${failedFile} from its backup failed (${failedFile}.bak holds the previous JSON)`);
+      }
     }
   }
-  try {
-    await writer.renameImageFiles(renames.map(r => ({ from: r.to, to: r.from })));
-  } catch (error) {
-    failed.push(`image files (${error instanceof Error ? error.message : String(error)})`);
+  const undo = await writer.undoToolCall();
+  const imagesFailed = await renameBack();
+  if (imagesFailed !== undefined) problems.push(imagesFailed);
+  else if (renames.length > 0) done.unshift('its frame image files have their old names again');
+  if (undo.restored.length > 0) done.push(`put back as they were before the call: ${undo.restored.join(', ')}`);
+  if (undo.left.length > 0) problems.push(filesLeftClause(undo.left));
+
+  if (problems.length === 0) {
+    return done.length === 0 ? `${otherWrite}Nothing was changed.` : `${otherWrite}The rename was rolled back: ${done.join('; ')}.`;
   }
-  return failed.length === 0
-    ? 'The rename was rolled back: the image files have their old names again, and every JSON file it had written or started to write was restored from its backup.'
-    : `Rolling back the rename failed for: ${failed.join('; ')}. Check these (the .bak files hold the previous JSON).`;
+  return `${otherWrite}The rename was rolled back only in part: ${[...done, ...problems].join('; ')}. `
+    + 'Check the project (validate_project, git diff) before you run the tool again.';
 }
 
 /**

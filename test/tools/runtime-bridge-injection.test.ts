@@ -7,14 +7,16 @@
  * saves them. Real reader, fixture copies.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
-import { access, chmod, cp, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { access, chmod, cp, mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
 import { Construct3ProjectWriter } from '../../src/construct3/project-writer.js';
 import { IdGenerator } from '../../src/construct3/id-generator.js';
+import { getProjectIndex } from '../../src/construct3/analyzers/index-builder.js';
+import { runInToolCall } from '../../src/construct3/disk-state.js';
 import { registerRuntimeTools } from '../../src/tools/runtime-tools.js';
 import { MockServer } from '../mocks/mock-server.js';
 
@@ -22,6 +24,7 @@ const FIXTURES = join(__dirname, '..', 'fixtures');
 const dirs: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (dirs.length > 0) await rm(dirs.pop()!, { recursive: true, force: true });
 });
 
@@ -33,11 +36,23 @@ async function copyFixture(name: string): Promise<string> {
 }
 
 async function tools(dir: string): Promise<MockServer> {
+  return (await runtimeSetup(dir)).server;
+}
+
+/** The runtime tools on the project in `dir`, with the real reader, writer and ID generator they use. */
+async function runtimeSetup(dir: string): Promise<{ server: MockServer; reader: Construct3ProjectReader; writer: Construct3ProjectWriter; idGen: IdGenerator }> {
   const reader = new Construct3ProjectReader(join(dir, 'project.c3proj'));
   await reader.loadProject();
+  const idGen = new IdGenerator();
+  const writer = new Construct3ProjectWriter(reader, idGen);
   const server = new MockServer();
-  registerRuntimeTools({ server, reader, writer: new Construct3ProjectWriter(reader, new IdGenerator()) } as never);
-  return server;
+  registerRuntimeTools({ server, reader, writer } as never);
+  return { server, reader, writer, idGen };
+}
+
+/** A value for Math.random that makes the ID generator's formula produce `sid` (15 digits). */
+function randomForSid(sid: number): number {
+  return (sid - 100_000_000_000_000 + 0.5) / 900_000_000_000_000;
 }
 
 async function readProject(dir: string): Promise<any> {
@@ -129,6 +144,21 @@ describe('inject_runtime_bridge', () => {
     expect(after).toHaveLength(1);
     expect(after[0]['script-info']).toEqual({ purpose: 'main' });
     expect(after[0]['file-info']).toBeUndefined();
+  });
+
+  it('refuses, changing nothing, when scripts/c3-runtime-bridge.js is a folder', async () => {
+    const dir = await copyFixture('minimal-project');
+    const folder = join(dir, 'scripts', 'c3-runtime-bridge.js');
+    await mkdir(folder, { recursive: true });
+    const projectBefore = await readFile(join(dir, 'project.c3proj'), 'utf8');
+    const server = await tools(dir);
+
+    const refused = await server.callTool('inject_runtime_bridge', {});
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain('nothing was changed: scripts/c3-runtime-bridge.js is a folder');
+    expect(refused.content[0].text).not.toContain('could not be put back');
+    expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(projectBefore);
+    expect((await stat(folder)).isDirectory()).toBe(true);
   });
 
   it('registers the bridge in a clone the same way', async () => {
@@ -260,6 +290,31 @@ describe('inject_runtime_bridge and remove_runtime_bridge on script files as use
     }
   });
 
+  it('puts back what remove_runtime_bridge wrote when project.c3proj cannot be written', async (context) => {
+    const dir = await copyFixture('minimal-project');
+    const mainPath = await addRootMainScript(dir, 'runOnStartup(async (runtime) => {});\n');
+    const server = await tools(dir);
+    payload(await server.callTool('inject_runtime_bridge', {}));
+    const mainBefore = await readFile(mainPath, 'utf8');
+    const projectPath = join(dir, 'project.c3proj');
+    const projectBefore = await readFile(projectPath, 'utf8');
+    await chmod(projectPath, 0o444);
+    try {
+      // Where a read-only file stays writable (root on Linux), the failing write cannot be staged.
+      if (await access(projectPath, constants.W_OK).then(() => true, () => false)) context.skip('read-only files are writable for this user');
+
+      // The import line goes first, then the entry: the second write fails
+      const refused = await server.callTool('remove_runtime_bridge', {});
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain('The bridge was not removed: the files this call had written are back as they were.');
+      expect(await readFile(mainPath, 'utf8')).toBe(mainBefore);
+      expect(await readFile(projectPath, 'utf8')).toBe(projectBefore);
+      expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(true);
+    } finally {
+      await chmod(projectPath, 0o644);
+    }
+  });
+
   it('writes nothing when the bridge is registered already, wherever its entry sits', async () => {
     const dir = await copyFixture('minimal-project');
     await addRootMainScript(dir, 'runOnStartup(async (runtime) => {});\n');
@@ -274,6 +329,156 @@ describe('inject_runtime_bridge and remove_runtime_bridge on script files as use
     const again = payload(await server.callTool('inject_runtime_bridge', {}));
     expect(again).toMatchObject({ registered: false, importAdded: false });
     expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(before);
+  });
+});
+
+/**
+ * The bridge tools write project.c3proj and the script files themselves, not
+ * through the writer. The bridge entry's SID comes from the project's ID
+ * generator, and after the writes the reader, the project index and the ID
+ * generator are brought in line as after a write of the writer's own: in a
+ * project without a main script no file the reader knows changes, so nothing
+ * else would tell them.
+ */
+describe('the bridge entry and the server state after the bridge is added', () => {
+  it('gives the bridge entry a SID that no other entry of the project has', async () => {
+    const dir = await copyFixture('minimal-project');
+    const taken = (await readProject(dir)).rootFileFolders.icon.items[0].sid;
+    const server = await tools(dir);
+
+    vi.spyOn(Math, 'random').mockReturnValueOnce(randomForSid(taken));
+    payload(await server.callTool('inject_runtime_bridge', {}));
+    const [entry] = bridgeEntries(await readProject(dir));
+    expect(entry.sid).toBeGreaterThanOrEqual(100_000_000_000_000);
+    expect(entry.sid).not.toBe(taken);
+  });
+
+  it.each(['inject_runtime_bridge', 'export_for_preview', 'pack_project'])(
+    '%s: the next call sees the bridge in the script list, and its SID is never handed out again',
+    async (tool) => {
+      const dir = await copyFixture('minimal-project');
+      const { server, reader, idGen } = await runtimeSetup(dir);
+      // Built before the bridge exists: the index with its script list, and the ID generator's scan
+      await runInToolCall(async () => {
+        await reader.checkProjectFile();
+        await (await getProjectIndex(reader)).getScriptMemberReads(reader);
+        await idGen.initialize(reader);
+      });
+      const out = join(dir, '..', `${dir.split(/[\\/]/u).pop()}.c3p`);
+      dirs.push(out);
+
+      expect(payload(await server.callTool(tool, tool === 'pack_project' ? { outputPath: out } : {})).loadedAs).toBe('main');
+      const [entry] = bridgeEntries(await readProject(dir));
+
+      const readScript = vi.spyOn(reader, 'readScriptFile');
+      const sid = await runInToolCall(async () => {
+        await reader.checkProjectFile();
+        await (await getProjectIndex(reader)).getScriptMemberReads(reader);
+        vi.spyOn(Math, 'random').mockReturnValueOnce(randomForSid(entry.sid));
+        return idGen.generateSid(reader);
+      });
+      expect(readScript).toHaveBeenCalledWith('c3-runtime-bridge.js');
+      expect(sid).not.toBe(entry.sid);
+    },
+  );
+});
+
+/**
+ * The bridge tools write project.c3proj themselves, from the text they read
+ * at the start. A save of project.c3proj in the editor during the call
+ * (#51) must not be written over: the call refuses, changing nothing, and
+ * the next call adds the bridge to the saved file.
+ */
+describe('project.c3proj saved in the editor while a bridge tool runs', () => {
+  const ARGS: Record<string, (dir: string) => Record<string, unknown>> = {
+    inject_runtime_bridge: () => ({}),
+    remove_runtime_bridge: () => ({}),
+    export_for_preview: () => ({}),
+    pack_project: (dir) => ({ outputPath: join(dir, '..', `${dir.split(/[\\/]/u).pop()}.c3p`) }),
+  };
+
+  /** Save project.c3proj as the editor would, with another author; returns the text saved. */
+  async function saveInEditor(dir: string): Promise<string> {
+    const project = await readProject(dir);
+    project.properties.author = 'Saved in the editor';
+    const text = JSON.stringify(project, null, '\t');
+    await writeFile(join(dir, 'project.c3proj'), text, 'utf8');
+    return text;
+  }
+
+  it.each(['inject_runtime_bridge', 'export_for_preview', 'pack_project'])(
+    '%s: a save while the ID generator scans the project for the bridge entry\'s SID is kept',
+    async (tool) => {
+      const dir = await copyFixture('minimal-project');
+      const args = ARGS[tool](dir);
+      if (args.outputPath) dirs.push(args.outputPath as string);
+      const { server, reader } = await runtimeSetup(dir);
+      // The first SID of the session: the ID generator reads every object type, and the editor saves meanwhile
+      const readAllObjectTypes = reader.readAllObjectTypes.bind(reader);
+      let saved: string | undefined;
+      vi.spyOn(reader, 'readAllObjectTypes').mockImplementation(async (...rest) => {
+        saved ??= await saveInEditor(dir);
+        return readAllObjectTypes(...rest);
+      });
+
+      const refused = await server.callTool(tool, args);
+      expect(saved, 'the scan ran during the call').toBeDefined();
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain('project.c3proj was changed on disk after this server read it');
+      expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(saved);
+      expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(false);
+
+      payload(await server.callTool(tool, args));
+      const project = await readProject(dir);
+      expect(project.properties.author).toBe('Saved in the editor');
+      expect(bridgeEntries(project)).toHaveLength(1);
+    },
+  );
+
+  it.each(['inject_runtime_bridge', 'export_for_preview', 'pack_project', 'remove_runtime_bridge'])(
+    '%s: a save after the check at the start of the call, before project.c3proj is written, is kept',
+    async (tool) => {
+      const dir = await copyFixture('minimal-project');
+      const args = ARGS[tool](dir);
+      if (args.outputPath) dirs.push(args.outputPath as string);
+      const { server, writer } = await runtimeSetup(dir);
+      if (tool === 'remove_runtime_bridge') payload(await server.callTool('inject_runtime_bridge', {}));
+      const bridgePath = join(dir, 'scripts', 'c3-runtime-bridge.js');
+      const bridgeBefore = existsSync(bridgePath) ? await readFile(bridgePath, 'utf8') : undefined;
+      // The check passes, then the editor saves
+      const check = writer.assertProjectFileCurrent.bind(writer);
+      let saved: string | undefined;
+      vi.spyOn(writer, 'assertProjectFileCurrent').mockImplementation(async () => {
+        await check();
+        saved ??= await saveInEditor(dir);
+      });
+
+      const refused = await server.callTool(tool, args);
+      expect(saved).toBeDefined();
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain('project.c3proj was changed on disk after this server read it');
+      expect(refused.content[0].text).toContain(`The bridge was not ${tool === 'remove_runtime_bridge' ? 'removed' : 'added'}: the files this call had written are back as they were.`);
+      expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(saved);
+      expect(existsSync(bridgePath) ? await readFile(bridgePath, 'utf8') : undefined).toBe(bridgeBefore);
+    },
+  );
+
+  it('a save right after the call wrote project.c3proj is not taken for the call\'s own write', async () => {
+    const dir = await copyFixture('minimal-project');
+    const { server, reader, writer } = await runtimeSetup(dir);
+    const afterDirectWrites = writer.afterDirectWrites.bind(writer);
+    vi.spyOn(writer, 'afterDirectWrites').mockImplementationOnce(async (writes) => {
+      await saveInEditor(dir);
+      return afterDirectWrites(writes);
+    });
+
+    payload(await server.callTool('inject_runtime_bridge', {}));
+    // Seen as a change made outside the server: the next call loads it, and the index and the ID generator rebuild
+    expect(await reader.projectFileChanged()).toBe(true);
+    const epoch = reader.getDiskEpoch();
+    expect(payload(await server.callTool('inject_runtime_bridge', {})).registered).toBe(false);
+    expect(reader.getDiskEpoch()).toBeGreaterThan(epoch);
+    expect(reader.getProject().properties.author).toBe('Saved in the editor');
   });
 });
 

@@ -117,6 +117,14 @@ export class ConcurrentWriteError extends Error {
  */
 const MAX_PROJECT_UPDATE_ROUNDS = 3;
 
+/** A file a tool wrote or deleted itself, outside the writer (see Construct3ProjectWriter.afterDirectWrites). */
+export interface DirectWrite {
+  /** The file's path. */
+  readonly path: string;
+  /** The text written; null when the file was deleted. */
+  readonly text: string | null;
+}
+
 /** What undoing a tool call's earlier changes did (see Construct3ProjectWriter.undoCallChanges). */
 export interface UndoReport {
   /** Files put back as they were before the call. */
@@ -364,9 +372,11 @@ export class Construct3ProjectWriter {
    * (undoCallChanges), each file is put back from its backup, last change
    * first, and a file the call created is removed; a file that changed on
    * disk after the call wrote it (saved again in the editor), or whose backup
-   * was replaced meanwhile, is left as it is. A file whose own write failed
-   * is not among them (restoreEntityFile). Returns what was put back and what
-   * was left; nothing outside a tool call. Called outside the writer's locks.
+   * was replaced meanwhile, is left as it is. An entity file whose own write
+   * failed is not among them (restoreEntityFile); project.c3proj is, from the
+   * moment an update replaced it, also when the check after that write
+   * failed. Returns what was put back and what was left; nothing outside a
+   * tool call. Called outside the writer's locks.
    */
   async undoToolCall(): Promise<UndoReport> {
     const scope = currentToolCall();
@@ -407,6 +417,49 @@ export class Construct3ProjectWriter {
       const label = this.projectRelative(this.reader.getProjectPath());
       throw await this.refusalAfterUndo(new StaleFileError(staleFileMessage(label), label));
     }
+  }
+
+  /**
+   * A new SID that no SID of the project has (IdGenerator.generateSid), for
+   * an entry a tool writes into project.c3proj itself (the runtime bridge's
+   * script entry). The ID generator keeps it, so it is not handed out again.
+   */
+  async generateSid(): Promise<number> {
+    return this.idGen.generateSid(this.reader);
+  }
+
+  /**
+   * After a tool wrote or deleted project files itself rather than through
+   * the writer (the runtime bridge tools write project.c3proj and script
+   * files): bring the reader, the project index and the ID generator in line
+   * with them, as after the writer's own writes. project.c3proj is loaded
+   * again and the IDs in its new text are added to the ID generator; the new
+   * state of every other file (none: deleted) is recorded as the server's
+   * own, so the next call does not take it for a change made outside the
+   * server; the caches and the project index are dropped, so the next call
+   * sees the new script list. Loading project.c3proj alone
+   * (reader.loadProject) would not do: it records the file's new state, so
+   * no change on disk is found, the disk epoch does not move, and the index
+   * and the ID generator keep what they built from the old file.
+   * project.c3proj counts as the tool's only while it holds exactly the text
+   * the tool wrote: one saved again since (in the editor) is left to the next
+   * call's check, which takes it in as a change made outside the server.
+   */
+  async afterDirectWrites(writes: ReadonlyArray<DirectWrite>): Promise<void> {
+    const projectPath = this.reader.getProjectPath();
+    const projectKey = fileKey(projectPath);
+    let projectText: string | null | undefined;
+    for (const { path, text } of writes) {
+      if (fileKey(path) === projectKey) projectText = text;
+      else this.afterOwnWrite(path, await statFileState(path));
+    }
+    const state = typeof projectText === 'string' ? await this.stateIfHolding(projectPath, projectText) : undefined;
+    if (typeof projectText === 'string' && state !== undefined) {
+      noteFileWritten(projectKey, state);
+      await this.reader.reloadProject();
+      this.idGen.noteWrittenText(projectText);
+    }
+    resetProjectIndex(this.reader);
   }
 
   /**
@@ -473,6 +526,23 @@ export class Construct3ProjectWriter {
   }
 
   /**
+   * The state of a file this call just replaced with `text`, when it still
+   * holds exactly that text (read again here); undefined when it holds
+   * anything else, such as another write that landed after this one, or
+   * cannot be read. Only a state known to be this call's lets undoing the
+   * call put the file back (putBack compares it with the file on disk).
+   */
+  private async stateIfHolding(filePath: string, text: string): Promise<FileState | undefined> {
+    try {
+      // Taken before the read: when the text is ours, so is this state
+      const state = await statFileState(filePath);
+      return (await readFile(filePath, 'utf-8')) === text ? state : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Update project.c3proj under the project lock: `change` edits the parsed
    * file and returns false when there is nothing to write. The file is
    * backed up (once per tool call), written with its text style, read back
@@ -506,7 +576,18 @@ export class Construct3ProjectWriter {
           // Changed since the read: read it again, so that change is kept
           if (!sameFileState(await statFileState(projectPath), asRead)) continue;
           await this.atomicWrite(projectPath, text);
-          const state = await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+          // Replaced: from here on the file counts as changed by the call, also
+          // when the check below fails, so undoing the call puts it back or,
+          // when it no longer holds this write, names it as left
+          let state: FileState;
+          try {
+            state = await this.verifyWrittenFile(projectPath, 'project.c3proj', text);
+          } catch (error) {
+            const ours = await this.stateIfHolding(projectPath, text);
+            if (ours !== undefined) noteFileWritten(fileKey(projectPath), ours);
+            this.noteCallChange(projectPath, true);
+            throw error;
+          }
           noteFileWritten(fileKey(projectPath), state);
           this.noteCallChange(projectPath, true);
           await this.reader.reloadProject();

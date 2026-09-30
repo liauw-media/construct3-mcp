@@ -574,9 +574,11 @@ describe('rename_animation', () => {
     const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('disk full. The rename was rolled back');
-    expect(writer.callsFor('restoreEntityFile').map(c => c.args[0])).toEqual(['/mock/backup/objectTypes/Hero.json.bak']);
+    // The object written before is the writer's to put back (undoToolCall), with its check for a save of the editor
+    expect(writer.callsFor('undoToolCall')).toHaveLength(1);
+    expect(writer.callsFor('restoreEntityFile')).toHaveLength(0);
     const [forward, back] = writer.callsFor('renameImageFiles').map(c => c.args[0]);
-    expect(back).toEqual((forward as Array<{ from: string; to: string }>).map(r => ({ from: r.to, to: r.from })));
+    expect(back).toEqual((forward as Array<{ from: string; to: string }>).map(r => ({ from: r.to, to: r.from })).reverse());
     expect(back).toHaveLength(3);
   });
 
@@ -639,7 +641,8 @@ describe('rename_animation', () => {
     writer.imageFiles = ['hero-walk-000.png'];
     const write = writer.writeEntityFile.bind(writer);
     writer.writeEntityFile = async (category: string, name: string, data: unknown, subfolder?: string) => {
-      if (category === 'layouts') throw new Error('disk full');
+      // Failed after replacing the layout file: it is restored from its backup
+      if (category === 'layouts') throw new EntityWriteError(new Error('disk full'), '/mock/backup/layouts/Level.json.bak');
       return write(category, name, data, subfolder);
     };
     writer.restoreEntityFile = async () => { throw new Error('EPERM'); };
@@ -650,7 +653,9 @@ describe('rename_animation', () => {
 
     const result = await server.callTool('rename_animation', { objectName: 'Hero', animationName: 'Walk', newName: 'Run' });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('disk full. Rolling back the rename failed for: /mock/backup/objectTypes/Hero.json; image files (EBUSY).');
+    expect(result.content[0].text).toContain('disk full. The rename was rolled back only in part: restoring layouts/Level.json from its backup failed '
+      + '(layouts/Level.json.bak holds the previous JSON); renaming its frame image files back failed (EBUSY); '
+      + 'rename them back by hand: "images/hero-run-000.png" → "images/hero-walk-000.png". Check the project');
   });
 
   it('counts the event sheet strings on the object\'s families too', async () => {

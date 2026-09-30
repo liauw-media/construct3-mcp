@@ -606,6 +606,41 @@ describe('another write to the object file during a frame change', () => {
     expect(await readFile(objectPath(), 'utf8')).toBe(withSpeed42(objectBefore));
   });
 
+  /** The check whether the other write kept this call's change cannot read the object file (the tool's own read works). */
+  function failSecondObjectRead(): void {
+    const readObjectType = reader.readObjectType.bind(reader);
+    let reads = 0;
+    reader.readObjectType = async (name: string) => {
+      if (++reads > 1) throw new Error('EBUSY: resource busy or locked');
+      return readObjectType(name);
+    };
+  }
+
+  it('add_frame_to_animation: a write it cannot read again is kept, never restored over', async () => {
+    const server = withOtherWrite((_written, before) => withSpeed42(before), objectBefore);
+    failSecondObjectRead();
+    const result = await server.callTool('add_frame_to_animation', insert);
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Another write replaced the object file during this one (a tool call running in parallel?), '
+      + 'and the file could not be read again to tell whether it kept this call\'s change; it was left as that write left it: '
+      + 're-read the object to check its frames. The rest was rolled back: the image files have their old names again and the placeholder image was removed.');
+    expect(await readFile(objectPath(), 'utf8')).toBe(withSpeed42(objectBefore));
+    expect(await snapshot()).toEqual(imagesBefore);
+  });
+
+  it('delete_frame_from_animation: a write it cannot read again is kept, never restored over', async () => {
+    const server = withOtherWrite((_written, before) => withSpeed42(before), objectBefore);
+    failSecondObjectRead();
+    const result = await server.callTool('delete_frame_from_animation', remove);
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('it was left as that write left it: re-read the object to check its frames. '
+      + 'The rest was rolled back: the image files have their old names again.');
+    expect(await readFile(objectPath(), 'utf8')).toBe(withSpeed42(objectBefore));
+    expect(await snapshot()).toEqual(imagesBefore);
+  });
+
   it('delete_frame_from_animation: a write made on top of the deletion keeps it, with the images moved', async () => {
     const result = await withOtherWrite(written => withSpeed42(written), objectBefore).callTool('delete_frame_from_animation', remove);
 
