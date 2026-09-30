@@ -2,6 +2,28 @@
 
 All notable changes to the Construct3 MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Changes made on disk while the server runs are picked up without a reconnect. Each tool call, resource read and prompt checks `project.c3proj`, and the files the server's caches hold the first time the call uses them, by modification time, size and file id; after a save in the Construct 3 editor, `git restore` or another program, the project list, the bulk caches, the cross-reference index and the ID generator are rebuilt from the files. The check costs one file status per call, plus one per cached file when the call uses cached data, so it grows with the size of the project: measured 7 to 25 ms for 355 files and about 60 to 110 ms for 3,000 files (#51).
+
+### Changed
+
+- A write refuses to replace or delete an event sheet, layout, object type or family file that changed on disk after the tool call read it. The error names the file (`... was changed on disk after this server read it ... It was not written, so that change is kept. Run the tool again ...`). A tool call refused this way after it had already written other files puts those back as they were before the call, so it changes nothing: `move_events_between_sheets` leaves no copy of the moved events in the target sheet when the source sheet was saved in the editor meanwhile. A file that changed on disk again after the call wrote it is left as it is and named in the error, with its `.bak`. Of two parallel tool calls that change the same event sheet, layout, object type or family file, the second is refused the same way; before, it could silently overwrite the first one's change. The animation tools on one Sprite and the server's own `project.c3proj` updates run one after the other, as before (#51).
+- The server's own `project.c3proj` updates (registering a new object type, event sheet, layout or family, removing a deleted one, addon auto-registration, `update_project_metadata`) read the file right before they write it and keep a change saved in the editor since, which the server then takes in; when the file changes between that read and the write, they read it again. The timeline, `register_addon` / `unregister_addon` and runtime-bridge tools, which decide on the project as loaded, refuse a `project.c3proj` that changed on disk during the call, before their first write (#51).
+- After `Cannot generate a safe UID: project file(s) could not be scanned`, each later UID request scans the named layouts and object types again, so a file that was locked (virus scanner, sync client) or fixed is used as soon as it can be read, and one deleted meanwhile no longer blocks. Before, only a write through the tools or a restart started a new scan (#38, #51).
+- A tool call backs each file up once, before its first write: `project.c3proj.bak` holds the state from before the call, also when the call writes `project.c3proj` twice (#51).
+- The ID generator keeps its scan of the project across the server's own writes and adds the IDs of each file it writes; it scans again only after a change on disk the server did not make, and never hands out an ID twice, also after a rescan. On a project with about 45,000 SIDs, `add_event_block` took about 40 ms per call instead of 350 ms, most of which was the rescan (#38).
+
+### Fixed
+
+- `create_object` with a plugin it had to register first (e.g. `Keyboard`) and `update_object_properties` adding more than one behavior it had to register left an intermediate state in `project.c3proj.bak` (with the new addon, without the object), not the project from before the call (#51).
+- `update_object_properties` with a known and an unknown behavior registered the known one in `usedAddons` before it refused the unknown one; it now checks all of them first and changes nothing (#51).
+- After the project was reset on disk (`git restore . && git clean -fd`) or saved in the editor, the running server still listed removed objects, refused to create them again (`Object "Hero" already exists`) and `validate_project` reported their files as missing, until the server was reconnected (#51).
+- A layout or event sheet saved in the editor while the server ran was not seen by the tools that use the cross-reference index (e.g. `find_orphaned_objects`) until a write of the server's own (#51).
+- Two parallel create calls for the same new name (`create_object`, `create_layout` and the other create tools) raced for the file: one or both failed with a write error (`EPERM` or `ENOENT` on rename, `Post-write verification failed ...`), and when both failed the file could stay on disk without being registered. Now one creates it and the other is refused with `Refusing to create "<name>": the file ... already exists` (#51).
+
 ## [1.9.2] - 2026-09-29
 
 ### Highlights

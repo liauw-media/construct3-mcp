@@ -66,8 +66,10 @@ import {
   behaviorTypesOf,
 } from '../construct3/instance-behaviors.js';
 import type { InstanceBehavior } from '../construct3/instance-behaviors.js';
+import { withProjectSync } from './project-sync.js';
 
-export function registerObjectTools({ server, reader, writer, idGen }: MutationToolDeps) {
+export function registerObjectTools({ server: mcpServer, reader, writer, idGen }: MutationToolDeps) {
+  const server = withProjectSync(mcpServer, reader);
   // ─── create_object ──────────────────────────────────────────
 
   server.tool(
@@ -298,6 +300,8 @@ export function registerObjectTools({ server, reader, writer, idGen }: MutationT
 
         // Add behaviors
         if (args.addBehaviors && args.addBehaviors.length > 0) {
+          // All of them before registering the first: an unknown one must not leave the others registered
+          for (const b of args.addBehaviors) writer.checkAddonRegistrable('behavior', b.behaviorId);
           for (const b of args.addBehaviors) {
             const bWarning = await writer.ensureAddonRegistered('behavior', b.behaviorId);
             if (bWarning) warnings.push(bWarning);

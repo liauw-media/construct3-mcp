@@ -15,11 +15,13 @@ import { buildEventOutline, locateEvent, renderOutline } from '../construct3/ana
 import type { EventSheet } from '../construct3/types.js';
 import { notFoundError, toolError, toolResult } from './shared.js';
 import { findRuntimeTraps } from '../construct3/analyzers/runtime-traps.js';
+import { withProjectSync } from './project-sync.js';
 
 const detailSchema = z.enum(['summary', 'standard', 'full']).optional().default('standard')
   .describe('Level of detail: summary (<2K tokens), standard, or full');
 
-export function registerAnalysisTools(server: McpServer, reader: Construct3ProjectReader) {
+export function registerAnalysisTools(mcpServer: McpServer, reader: Construct3ProjectReader) {
+  const server = withProjectSync(mcpServer, reader);
   // Tool: Event sheet flow visualization
   server.tool(
     'get_eventsheet_flow',
