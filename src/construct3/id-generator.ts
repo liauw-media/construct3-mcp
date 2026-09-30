@@ -42,6 +42,16 @@ function scanFailureReason(error: unknown): string {
   return error instanceof Error && error.message ? error.message : 'could not be read';
 }
 
+/**
+ * A UID-bearing file that exists but could not be scanned at all, with why
+ * (scanFailureReason).
+ */
+interface UnscannedEntity {
+  category: 'objectTypes' | 'layouts';
+  name: string;
+  reason: string;
+}
+
 /** Rescans in one initialize() call when the disk keeps changing while it scans. */
 const MAX_SCAN_ROUNDS = 3;
 
@@ -73,11 +83,11 @@ export class IdGenerator {
   private scanning: { epoch: number; done: Promise<void> } | null = null;
   // Bumped by reset(): a scan that started before does not merge its result
   private generation = 0;
-  // UID-bearing files ("category/name") that exist but could not be scanned
-  // at all (parse AND raw scan failed). While non-empty, the UID high-water
-  // mark is untrustworthy and UID minting must hard-fail rather than risk a
+  // UID-bearing files that exist but could not be scanned at all (parse AND
+  // raw scan failed), with why. While non-empty, the UID high-water mark is
+  // untrustworthy and UID minting must hard-fail rather than risk a
   // duplicate UID.
-  private unscannedEntities: string[] = [];
+  private unscannedEntities: UnscannedEntity[] = [];
 
   /**
    * Scan the project to collect all existing SIDs and find the highest UID:
@@ -114,12 +124,8 @@ export class IdGenerator {
     const epoch = this.scannedEpoch;
     const project = reader.getProject();
     const ids = new IdCollector();
-    const still: string[] = [];
-    for (const entry of this.unscannedEntities) {
-      // "category/name": the category holds no "/"
-      const slash = entry.indexOf('/');
-      const category = entry.slice(0, slash) as 'objectTypes' | 'layouts';
-      const name = entry.slice(slash + 1);
+    const still: UnscannedEntity[] = [];
+    for (const { category, name } of this.unscannedEntities) {
       if (!entityFolderPaths(project[category]).has(name)) continue;
       try {
         const scan = await reader.scanEntityIdsRaw(category, name);
@@ -127,7 +133,7 @@ export class IdGenerator {
         for (const sid of scan.sids) ids.sid(sid);
       } catch (error) {
         if (isFileNotFoundError(error)) continue;
-        still.push(entry);
+        still.push({ category, name, reason: scanFailureReason(error) });
       }
     }
     // A reset or a new scan ran meanwhile: its result stands
@@ -154,7 +160,7 @@ export class IdGenerator {
    * Collect every SID, UID and imageSpriteId in the project. Returns the
    * UID-bearing files that exist but could not be scanned.
    */
-  private async collectProjectIds(reader: Construct3ProjectReader, ids: IdCollector): Promise<string[]> {
+  private async collectProjectIds(reader: Construct3ProjectReader, ids: IdCollector): Promise<UnscannedEntity[]> {
     // Scan c3proj file for SIDs in file items
     const project = reader.getProject();
     this.scanContainerSids(ids, project.rootFileFolders);
@@ -226,8 +232,8 @@ export class IdGenerator {
    *
    * Driven by the registered names, not by the failure records alone, so a
    * skipped file is scanned even if its record went missing. Returns the
-   * files that exist but could not be scanned either, with the reason
-   * ("category/name: reason"); generateUid() refuses while there are any,
+   * files that exist but could not be scanned either, with the reason;
+   * generateUid() refuses while there are any ("category/name: reason"),
    * instead of risking a duplicate UID.
    */
   private async recoverSkippedIds(
@@ -238,9 +244,9 @@ export class IdGenerator {
       loaded: Map<string, unknown>;
       failures: Map<string, ReadFailure>;
     }>,
-  ): Promise<string[]> {
+  ): Promise<UnscannedEntity[]> {
     const project = reader.getProject();
-    const unscanned: string[] = [];
+    const unscanned: UnscannedEntity[] = [];
     for (const { category, loaded, failures } of sources) {
       for (const name of entityFolderPaths(project[category]).keys()) {
         if (loaded.has(name)) continue;
@@ -256,7 +262,7 @@ export class IdGenerator {
         } catch (error) {
           // No file (or it vanished since the bulk read): same as above.
           if (isFileNotFoundError(error)) continue;
-          unscanned.push(`${category}/${name}: ${scanFailureReason(error)}`);
+          unscanned.push({ category, name, reason: scanFailureReason(error) });
         }
       }
     }
@@ -290,7 +296,8 @@ export class IdGenerator {
     if (this.unscannedEntities.length > 0) {
       throw new Error(
         `Cannot generate a safe UID: project file(s) could not be scanned for existing UIDs ` +
-        `(${this.unscannedEntities.join(', ')}). Minting anyway could duplicate a UID already in use.`
+        `(${this.unscannedEntities.map(e => `${e.category}/${e.name}: ${e.reason}`).join(', ')}). ` +
+        `Minting anyway could duplicate a UID already in use.`
       );
     }
     this.highestUid++;
