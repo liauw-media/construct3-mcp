@@ -1369,11 +1369,41 @@ Check a condition at once and then every `pollIntervalMs` until it holds or `tim
 
 Conditions: `{ type: "globalVar", name, operator, value }`, `{ type: "objectProperty", objectType, property, operator, value }` (a property of the first instance, or one of its instance variables), `{ type: "layout", name }`, and `{ type: "expression", expr, operator, value }`. Operators: `eq`, `neq` (strict, `Object.is`), `gt`, `lt`, `gte`, `lte` (two numbers or two strings) and `contains` (substring or array element). An `expression` is JavaScript evaluated where the bridge runs, with the page's full rights; it is refused unless the server runs with `C3MCP_ALLOW_EVAL=1`.
 
-### `subscribe_events`, `read_events`, `unsubscribe_events`
+### `subscribe_events`
 
-Buffer events in the bridge between polls. `subscribe_events` takes `connectionId`, `eventType` (`"globalVarChange"` with `filter.variable`, `"layoutChange"`, or `"custom"` with an optional `filter.name`) and `bufferSize` (1 to 1000, default 100; the oldest event is dropped when full), and returns `subscriptionId`. Custom events come from the game's own script: `globalThis.__c3bridge.emit(name, data)`. Changes are found by comparing values once per tick, so a change and its reversal within one tick are not seen. There is no generic event-sheet signal subscription: no documented interface reports them.
+Buffer events in the bridge between polls, for [`read_events`](#read_events). Custom events come from the game's own script: `globalThis.__c3bridge.emit(name, data)`. Changes are found by comparing values once per tick, so a change and its reversal within one tick are not seen. There is no generic event-sheet signal subscription: no documented interface reports them. A subscription lives in the page: it stays after `disconnect_from_game` and ends with [`unsubscribe_events`](#unsubscribe_events) or a reload.
 
-`read_events` takes `connectionId`, `subscriptionId` and `clear` (default true) and returns `events` (`type`, `name`, `value`, `previousValue` for changes, `timestamp`, `tick`, oldest first) and `count`. `unsubscribe_events` takes `connectionId` and `subscriptionId`; an unknown subscription is an error.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `eventType` | string | Yes | `"globalVarChange"` (changes of one global variable), `"layoutChange"` (changes of the current layout) or `"custom"` (events the game emits) |
+| `filter` | object | No | `variable`: the global variable to watch, required for `"globalVarChange"`; `name`: for `"custom"`, only events emitted with this name (default: every custom event) |
+| `bufferSize` | integer | No | Events kept, 1 to 1000 (default: 100); the oldest event is dropped when full |
+
+Returns `subscriptionId`, `eventType`, `filter` and `bufferSize`.
+
+### `read_events`
+
+Read the events a subscription buffered since the last read.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `subscriptionId` | string | Yes | From `subscribe_events` |
+| `clear` | boolean | No | Empty the buffer after reading (default: true); `false` leaves the events for a later read |
+
+Returns `events` (`type`, `name`, `value`, `previousValue` for changes, `timestamp`, `tick`, oldest first) and `count`.
+
+### `unsubscribe_events`
+
+Stop a subscription and release its buffer. An unknown subscription is an error.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `connectionId` | string | Yes | From `connect_to_game` |
+| `subscriptionId` | string | Yes | From `subscribe_events` |
+
+Returns `subscriptionId` and `unsubscribed`.
 
 ### `simulate_input`
 
