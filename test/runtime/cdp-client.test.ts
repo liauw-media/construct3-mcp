@@ -300,7 +300,8 @@ function registerConnectionTools(projectDir = NO_PROJECT_DIR): {
   const server = new MockServer();
   const controller = registerRuntimeTools({
     server: server as never,
-    reader: { getProjectDir: () => projectDir } as any,
+    // Registered through withProjectSync (#51): each call first checks project.c3proj, which this stub never changes
+    reader: { getProjectDir: () => projectDir, checkProjectFile: async () => false } as any,
     writer: {} as any,
   });
   return { server, controller };

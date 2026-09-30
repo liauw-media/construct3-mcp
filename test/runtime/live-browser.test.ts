@@ -43,8 +43,9 @@ afterEach(async () => {
 
 function register(): Registered {
   const server = new MockServer();
-  // The open project is a folder the tests never write into.
-  const reader = { getProjectDir: () => join(tmpdir(), 'c3mcp-live-test-project') };
+  // The open project is a folder the tests never write into. The tools are registered through
+  // withProjectSync (#51), so each call first checks project.c3proj, which this stub never changes.
+  const reader = { getProjectDir: () => join(tmpdir(), 'c3mcp-live-test-project'), checkProjectFile: async () => false };
   const controller = registerRuntimeTools({ server: server as never, reader: reader as never, writer: {} as never });
   controllers.push(controller);
   return { server, controller };
