@@ -8,8 +8,8 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { access, chmod, cp, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Construct3ProjectReader } from '../../src/construct3/project-reader.js';
@@ -216,6 +216,48 @@ describe('inject_runtime_bridge and remove_runtime_bridge on script files as use
     expect(await readFile(mainPath, 'utf8')).toBe(mainBefore);
     expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(projectBefore);
     expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(true);
+  });
+
+  it('refuses, changing nothing, when project.c3proj names a main script that is not there', async () => {
+    const dir = await copyFixture('minimal-project');
+    await rm(await addRootMainScript(dir, 'runOnStartup(async (runtime) => {});\n'));
+    const projectBefore = await readFile(join(dir, 'project.c3proj'), 'utf8');
+    const server = await tools(dir);
+    const out = join(dir, '..', `${dir.split(/[\\/]/u).pop()}.c3p`);
+    dirs.push(out);
+
+    // All three add the bridge by default; none may leave the bridge file or its entry behind.
+    for (const [tool, args] of [['inject_runtime_bridge', {}], ['export_for_preview', {}], ['pack_project', { outputPath: out }]] as const) {
+      const refused = await server.callTool(tool, args);
+      expect(refused.isError, tool).toBe(true);
+      expect(refused.content[0].text, tool).toContain('nothing was changed');
+      expect(refused.content[0].text, tool).toContain('scripts/main.js');
+      expect(await readFile(join(dir, 'project.c3proj'), 'utf8'), tool).toBe(projectBefore);
+      expect(await readdir(join(dir, 'scripts')), tool).toEqual([]);
+    }
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it('puts back what it wrote when the import line cannot be written into the main script', async (context) => {
+    const dir = await copyFixture('minimal-project');
+    const original = 'runOnStartup(async (runtime) => {});\n';
+    const mainPath = await addRootMainScript(dir, original);
+    const projectBefore = await readFile(join(dir, 'project.c3proj'), 'utf8');
+    await chmod(mainPath, 0o444);
+    try {
+      // Where a read-only file stays writable (root on Linux), the failing write cannot be staged.
+      if (await access(mainPath, constants.W_OK).then(() => true, () => false)) context.skip('read-only files are writable for this user');
+      const server = await tools(dir);
+
+      const refused = await server.callTool('inject_runtime_bridge', {});
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain('back as they were');
+      expect(await readFile(join(dir, 'project.c3proj'), 'utf8')).toBe(projectBefore);
+      expect(await readFile(mainPath, 'utf8')).toBe(original);
+      expect(existsSync(join(dir, 'scripts', 'c3-runtime-bridge.js'))).toBe(false);
+    } finally {
+      await chmod(mainPath, 0o644);
+    }
   });
 
   it('writes nothing when the bridge is registered already, wherever its entry sits', async () => {
