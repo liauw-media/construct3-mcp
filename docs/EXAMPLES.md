@@ -313,7 +313,7 @@ Returns an error — the startup layout cannot be deleted.
 **Force delete:**
 > "Force delete Enemy even though it's referenced"
 
-Returns success with a warning that names the remaining uses (references are NOT cleaned up). Afterwards `validate_project` reports the leftover instances, object parameters and family memberships as `broken-object-reference`; uses in expressions and scripts are not reported, and a second warning of the delete lists them.
+Returns success with a warning that names the remaining uses (references are NOT cleaned up). Afterwards `validate_project` reports the leftover instances, object parameters and family memberships as `broken-object-reference`; uses in expressions, scripts and *Create object (by name)* are not reported, and a second warning of the delete lists them. The object's image files are kept as `.bak`.
 
 ### Update Project Metadata
 

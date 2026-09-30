@@ -643,7 +643,7 @@ We welcome contributions! Here's how to get started:
 - [x] Bridge commands: callFunction, get/setGlobalVar, getObjectState, evaluateExpression, etc.
 - [x] Project cloning with bridge injection
 - [x] Export-for-preview pre-flight checks (worker mode, bridge registration)
-- [x] Bridge eval script generation (curl/python for browser CDP)
+- [x] Bridge eval script generation (browser-console lines, and a Python snippet that prints them)
 - [x] Game connection over CDP (page or worker), bridge calls, conditions, event buffers, input, screenshots, preview server (issues #8 to #13)
 
 ### M1 Primitive Surface ✅ (v1.8)
